@@ -118,23 +118,29 @@ Expect pacing to be the weak point, not image quality.
 
 ## 4. The patch
 
-Both gates are `cmp <r32>, 0x1B0`. Rewriting the immediate to 0 makes every
-architecture take the supported branch — `setae` is unsigned `>=`, and `jl` is
-never taken for a non-negative arch id.
+Both gates are `cmp <r32>, 0x1B0`. Rewriting the immediate to 0 makes the
+comparison read "arch >= 0", true for every real architecture id, so whichever
+way the compiler phrased the predicate the Blackwell branch is the one taken.
 
 Four bytes of payload:
 
-| version | file offset | before | after |
+| build | rva | before | after |
 | --- | --- | --- | --- |
-| 310.7.129 | `0x19D9C` | `81 FD B0 01 00 00` | `81 FD 00 00 00 00` |
-| 310.7.129 | `0x392CF` | `3D B0 01 00 00` | `3D 00 00 00 00` |
-| 310.8.0.0 | `0x15AF2` | `81 FD B0 01 00 00` | `81 FD 00 00 00 00` |
-| 310.8.0.0 | `0x34FEF` | `3D B0 01 00 00` | `3D 00 00 00 00` |
+| 310.6.0.0 | `0x1A026` | `cmp esi,0x1B0 ; cmovl` | `cmp esi,0 ; cmovl` |
+| 310.6.0.0 | `0x33EFF` | `cmp eax,0x1B0 ; setae` | `cmp eax,0 ; setae` |
+| 310.7.129 | `0x1A99C` | `cmp ebp,0x1B0 ; jl` | `cmp ebp,0 ; jl` |
+| 310.7.129 | `0x39ECF` | `cmp eax,0x1B0 ; setae` | `cmp eax,0 ; setae` |
+| 310.8.0.0 | `0x166F2` | `cmp ebp,0x1B0 ; jl` | `cmp ebp,0 ; jl` |
+| 310.8.0.0 | `0x35BEF` | `cmp eax,0x1B0 ; setae` | `cmp eax,0 ; setae` |
 
-`tools/mfg_unlock.py` finds them by pattern rather than offset — it walks
-`.pdata` function ranges, disassembles, and takes every `cmp r32, 0x1B0`
-followed by `setae` or `jl`. It works on both versions above and should survive
-future snippet revisions.
+Note 310.6.0.0: the same gate, compiled to `cmovl` rather than a branch. Which
+form appears is a compiler decision, not a version one, so a patcher that keys
+on a byte string finds one site and silently misses the other. `tools/mfg_unlock.py`
+walks `.pdata` function ranges, disassembles, and takes every `cmp r32, 0x1B0`
+whose first flag consumer is an *ordering* test — `jl`, `jb`, `jge`, `setae`,
+`cmovl` and the rest. Equality tests are refused rather than patched, since
+"arch >= 0" would not preserve their meaning, and it says so loudly when it does
+not find exactly two sites.
 
 ## 5. What is still missing for old games
 
@@ -171,3 +177,47 @@ single, version-stable place to rewrite `numFramesToGenerate`.
 0x28  DLSSGFlags  flags
 ...
 ```
+
+
+## 6. Measuring it without a game
+
+`tools/snippet_probe.cpp` settles the second gate empirically. It creates a
+D3D12 device, loads the snippet, and drives it the way the NGX runtime does:
+
+```
+NVSDK_NGX_D3D12_Init_Ext(appId, dataPath, device, sdkVersion, featureInfo)
+NVSDK_NGX_D3D12_PopulateParameters_Impl(param)
+```
+
+`param` is a hand-built vtable rather than a C++ class, because the snippet is
+MSVC-built and MSVC emits same-name virtual overloads in *reverse* declaration
+order:
+
+```
+Set  0 void*   1 ID3D12Resource*  2 ID3D11Resource*  3 int
+     4 uint    5 double           6 float            7 uint64
+Get  8 void** 9 ID3D12Resource** 10 ID3D11Resource** 11 int*
+    12 uint* 13 double*          14 float*          15 uint64*
+    16 Reset
+```
+
+Two things the public header will not tell you:
+
+- `Init_Ext` takes `(rcx appId, rdx dataPath, r8 device, r9d sdkVersion,
+  stack featureInfo)`. The header has the version last.
+- It refuses to start unless the *calling module* has `nvngx.dll` in its path:
+  `GetModuleHandleExW(FROM_ADDRESS, <return address>)`, `GetModuleFileNameW`,
+  then `wcsstr` against `L"nvngx.dll"`. Failing that you get `0xBAD00002` and
+  "Error: Not called from NGX runtime". Naming the harness
+  `nvngx.dll.probe.exe` is enough.
+
+Result on an RTX 4070 Ti, all snippet builds tested:
+
+```
+as shipped   DLSSG.MultiFrameCountMax = 1     max multiplier 2x
+patched      DLSSG.MultiFrameCountMax = 5     max multiplier 6x
+```
+
+The first gate cannot be reached this way. `m_multiFrameSupported` is only read
+by the count validation, which runs at *evaluate* time and needs a full set of
+tagged D3D12 resources.
