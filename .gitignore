@@ -1,0 +1,4 @@
+external/
+*.addon64
+dist/*.dll
+__pycache__/
