@@ -93,6 +93,46 @@ of one.
 
 To undo: delete the patched dll and rename `.orig` back.
 
+#### It also has the right benchmark built in
+
+DOOM ships a benchmark mode in the menus that writes `benchmark.json`, and what
+it records happens to be exactly what this question needs:
+
+```
+avg_fps  median_fps  1_percent_low_fps  sd_fps  avg_fps_excluding_outliers
+s_percentile_frame_time / _cpu_frame_time / _gpu_frame_time   percentiles_ms
+```
+
+plus a stutter-frame count controlled by `benchmark_stutterFrameThreshold`,
+`benchmark_stutterFrameThresholdPerc` and `benchmark_stutterFrameWindow`, and
+on-screen frametime graphs via `benchmark_graph_frame`, `_cpu`, `_gpu`.
+
+Average FPS will rise with the multiplier no matter how bad the result looks, so
+it is close to useless here. **`sd_fps`, the frametime percentiles and the
+stutter count are the measurement** — they are where a CPU pacer failing to
+space three generated frames will show up.
+
+Run the same benchmark three times, changing one line between runs:
+
+| run | `r_streamlineDLSSGMode` | what it is |
+| --- | --- | --- |
+| 1 | `1` | 2x, the baseline that works today |
+| 2 | `2` | 3x |
+| 3 | `3` | 4x |
+
+If `sd_fps` and the stutter count stay flat while `avg_fps` climbs, it works. If
+they climb with it, the pacer is the limit and that is the honest result.
+
+### Not the Bright Memory benchmark
+
+Worth writing down so it does not get tried twice: the benchmark we used for the
+neural-rendering work cannot test this. Its executable contains no reference to
+Streamline, `sl.dlss_g`, `DLSSG` or `numFramesToGenerate` — only
+`NVSDK_NGX_D3D12_Init` for the upscaler — and the folder has no `sl.interposer.dll`.
+It has DLSS upscaling and ray reconstruction and no frame generation at all.
+Frame generation needs the game to load Streamline, hand over its swapchain and
+tag depth and motion vectors; dropping DLLs in cannot add code that calls them.
+
 ### Halo Campaign Evolved — the add-on route
 
 ReShade is already installed there. Patch the snippet the same way, then:
