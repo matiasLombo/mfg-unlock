@@ -142,6 +142,40 @@ whose first flag consumer is an *ordering* test — `jl`, `jb`, `jge`, `setae`,
 "arch >= 0" would not preserve their meaning, and it says so loudly when it does
 not find exactly two sites.
 
+### Does anything assume a count of 1?
+
+This was the claim least supported by reasoning alone, so here is every read of
+the two fields, found by scanning the whole disassembly for the offsets
+`EndpointCoreInputs+0x4EC` (index) and `+0x4F0` (count):
+
+| rva | what it does |
+| --- | --- |
+| `0x65732`, `0x65847`, `0x6589C`, `0x658DE` | the validation itself |
+| `0x660D4`, `0x66108` | reading them out of the NGX parameters |
+| `0x65921` | `timeFactor = index / (count + 1)` -> `+0x4F4` |
+| `0x658FC` | `isMultiFrame = count > 1` -> `+0x4F8` |
+| `0x658EF` | `isLastGenerated = index == count` -> `+0x4F9` |
+| `0x3EF2A` | `count + 1` formatted into the on-screen indicator, `"- %dx"` |
+| `0x3B63B` | copied into a telemetry struct |
+| `0x5682D`-`0x56849` | index, count and timeFactor read together for a state dump |
+
+`+0x4F4` is then consumed by three render paths (`0x3D895`, `0x41B32`,
+`0x4495C`). That is the complete accounting: the count produces a float, two
+booleans, a log line and a string. **Nothing is sized by it.**
+
+Which follows from where it lives. The count arrives as a per-evaluate NGX
+parameter, while every allocation happens in `CreateFeature`, whose parameter
+parse reads only `Width`, `Height`, `InternalWidth`, `InternalHeight`,
+`BackbufferFormat`, `DynamicResolution`, `UseReflexMatrices` and the node masks.
+The one count-shaped thing it does read,
+`DLSSG.NvAppOvrAppliedVal.MultiFrameCount`, is stored as an optional and only
+echoed back for telemetry.
+
+The `m_multiFrameSupported` byte at `EndpointCore+0x28` likewise has exactly one
+reader, `0x3AF18`, which passes it to the validation. Other `[reg+0x28]` byte
+tests in the binary belong to unrelated classes -- `0x79C62` loads its object
+from `[rbx+8]` first.
+
 ## 5. What is still missing for old games
 
 The patch makes the runtime *capable*. It does not make a game *ask*. A title
@@ -218,6 +252,40 @@ as shipped   DLSSG.MultiFrameCountMax = 1     max multiplier 2x
 patched      DLSSG.MultiFrameCountMax = 5     max multiplier 6x
 ```
 
-The first gate cannot be reached this way. `m_multiFrameSupported` is only read
-by the count validation, which runs at *evaluate* time and needs a full set of
-tagged D3D12 resources.
+The harness goes further than the capability query, because
+`EndpointCoreCreateParameters::ParseNGXParameters` needs only scalars — a
+command list and a handful of numbers are enough to build the real feature:
+
+```
+Init_Ext                          0x00000001  ok
+PopulateParameters                0x00000001  ok
+  DLSSG.ModelVersion              512   (FG v2)
+  DLSSG.MultiFrameCountMax        5     <-- 1 before the patch
+CreateFeature (feature 10)        0x00000001  ok    2560x1440 from 1280x720
+ReleaseFeature                                ok
+```
+
+So on Ada the patched snippet initialises, advertises five generated frames,
+builds a complete frame-generation feature and tears it down cleanly. What is
+still untested offline is the evaluate path with a count above 1: that runs
+`ComputeAndValidateTimeFactor`, and it needs tagged colour, depth and
+motion-vector resources plus real GPU work.
+
+### Getting the snippet to talk
+
+Two environment variables, no registry writes:
+
+```
+__NGX_LOG_LEVEL=2
+__NGX_LOG_PATH_OVERRIDE=<directory>
+```
+
+The snippet then logs to stdout *and* to `nvngx_dlssg_<version>.log`. That is
+where `m_gpuArch = 0x190`, the DRS key reads, and any "Multi frame is not
+supported on this device" would appear. It works inside a game as well as in the
+harness.
+
+The `ShowDlssIndicator` value under the NGXCore registry key turns on the
+on-screen DLSS indicator, which renders the multiplier through the `"- %dx"` at
+`0x3EF2A` — the fastest visual confirmation that three frames are being
+generated rather than one.

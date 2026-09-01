@@ -21,7 +21,31 @@ That is the capability the Streamline plugin clamps against, measured on the
 real card. What it does *not* prove is that generating three frames works once
 the pipeline is running — that needs a game.
 
-Re-run it any time with `tools/run_probe.sh`.
+It goes further than that, too:
+
+```
+Init_Ext            ok
+PopulateParameters  ok      DLSSG.MultiFrameCountMax = 5
+CreateFeature       ok      feature 10, 2560x1440 from 1280x720
+ReleaseFeature      ok
+```
+
+The patched snippet builds a whole frame-generation feature on the card and
+tears it down cleanly. Re-run any of it with `tools/run_probe.sh`.
+
+### Making the snippet talk, inside a game
+
+Set these before launching and the NGX snippet logs what it is doing, both to
+stdout and to `nvngx_dlssg_<version>.log`:
+
+```
+__NGX_LOG_LEVEL=2
+__NGX_LOG_PATH_OVERRIDE=C:\some\folder
+```
+
+That log is where `m_gpuArch = 0x190` and any "Multi frame is not supported on
+this device" would show up. In Steam, put `__NGX_LOG_LEVEL=2 %command%` in the
+launch options.
 
 ## The three candidates you have installed
 
