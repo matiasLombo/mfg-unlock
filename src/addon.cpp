@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdarg>
+#include <atomic>
 
 #include <reshade.hpp>
 #include <MinHook.h>
@@ -35,16 +36,14 @@ static void logf(const char *fmt, ...) {
 //
 // Streamline chains its option structs through a common header.  Read out of
 // sl.dlss_g 2.13 rather than a header, because the header is not shipped with
-// the games:
+// the games -- slSetData walks the chain through [node+0x00] and compares the
+// two type qwords at [node+0x08] and [node+0x10]:
 //
 //   BaseStructure  +0x00 BaseStructure *next
 //                  +0x08 StructType     structType[16]
 //                  +0x18 uint64_t       structVersion
 //   DLSSGOptions   +0x20 uint32_t       mode                 0 = off
 //                  +0x24 uint32_t       numFramesToGenerate
-//
-// slSetData walks the chain comparing the two qwords at +0x08 and +0x10, which
-// is where this identifier comes from.
 
 static const unsigned char kDLSSGOptionsType[16] = {
     0xcb, 0xf1, 0xc5, 0xfa, 0xfd, 0x2d, 0x36, 0x4f,
@@ -59,28 +58,38 @@ static const unsigned kOffCount = 0x24;
 // the snippet advertises, so there is nothing above 6x to ask for.
 static const int kMaxGenerated = 5;
 
-static bool readable(const void *p, size_t n) {
-    if (p == nullptr) return false;
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (VirtualQuery(p, &mbi, sizeof mbi) == 0 || mbi.State != MEM_COMMIT) return false;
-    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
-    const auto base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-    return reinterpret_cast<uintptr_t>(p) + n <= base + mbi.RegionSize;
+// Walk every region the range touches.  A single VirtualQuery is not enough:
+// an object can legitimately straddle two adjacent committed regions, and one
+// that starts in a good region can end in a guard page.
+static bool range_ok(const void *p, size_t n, DWORD want) {
+    if (p == nullptr || n == 0) return false;
+    const auto start = reinterpret_cast<uintptr_t>(p);
+    if (start > UINTPTR_MAX - n) return false;              // wrap
+    uintptr_t at = start;
+    const uintptr_t end = start + n;
+    while (at < end) {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(reinterpret_cast<void *>(at), &mbi, sizeof mbi) == 0) return false;
+        if (mbi.State != MEM_COMMIT) return false;
+        if (mbi.Protect & PAGE_GUARD) return false;
+        if ((mbi.Protect & want) == 0) return false;
+        const auto base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+        if (mbi.RegionSize == 0 || base > UINTPTR_MAX - mbi.RegionSize) return false;
+        at = base + mbi.RegionSize;
+    }
+    return true;
 }
-
-static bool writable(const void *p) {
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (VirtualQuery(p, &mbi, sizeof mbi) == 0 || mbi.State != MEM_COMMIT) return false;
-    const DWORD w = PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    return (mbi.Protect & w) != 0 && (mbi.Protect & PAGE_GUARD) == 0;
-}
+static const DWORD kReadable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                               PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+static const DWORD kWritable = PAGE_READWRITE | PAGE_WRITECOPY |
+                               PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
 
 // Follow the next chain looking for the DLSSGOptions node.  Bounded, because a
 // malformed chain must not become an infinite loop inside the game's present.
 static void *find_options(void *head) {
     void *p = head;
     for (int hop = 0; hop < 16 && p != nullptr; ++hop) {
-        if (!readable(p, kOffCount + 4)) return nullptr;
+        if (!range_ok(p, kOffCount + 4, kReadable)) return nullptr;
         if (std::memcmp(static_cast<char *>(p) + kOffType, kDLSSGOptionsType, 16) == 0)
             return p;
         p = *reinterpret_cast<void **>(static_cast<char *>(p) + kOffNext);
@@ -90,33 +99,42 @@ static void *find_options(void *head) {
 
 // ------------------------------------------------------------------ state ---
 
-static int  g_target        = 1;      // 1 = leave the game alone
-static bool g_hooked        = false;
-static bool g_plugin_seen   = false;
-static int  g_game_asked    = 0;      // what the game last requested
-static int  g_applied       = 0;      // what we last handed to the plugin
-static int  g_mode          = 0;      // the game's DLSSGMode
-static unsigned g_overrides = 0;
-static unsigned g_rejects   = 0;
-static int  g_last_result   = 0;
-static bool g_readonly_opts = false;  // caller's struct was not writable
-static char g_note[192]     = "waiting for sl.dlss_g.dll";
+static int  g_target      = 1;        // 1 = leave the game alone
+static bool g_hooked      = false;
+static bool g_plugin_seen = false;
+// Written from the Streamline call, read from the overlay: relaxed atomics, so
+// the reporting is a data race in neither the formal nor the practical sense.
+static std::atomic<int>      g_game_asked{0};
+static std::atomic<int>      g_applied{0};
+static std::atomic<int>      g_mode{0};
+static std::atomic<unsigned> g_overrides{0};
+static std::atomic<unsigned> g_rejects{0};
+static std::atomic<int>      g_last_result{0};
+static std::atomic<bool>     g_readonly_opts{false};
+static SRWLOCK g_mutate = SRWLOCK_INIT;
+static char g_note[192] = "waiting for sl.dlss_g.dll";
 
 // ------------------------------------------------------------------ hooks ---
 //
-// Both entry points are reached through slGetPluginFunction and both put the
-// chain pointer in one of the first two argument slots.  Read off the plugin
-// rather than the public header, which disagrees:
+// Read off the plugin rather than the public header, which disagrees:
 //
 //   slDLSSGSetOptions(rcx = options, rdx = viewport)
 //       copies the first 0x28 bytes of the options onto its stack, replaces the
 //       copy's `next` with the viewport, and calls slSetData on the copy.
 //   slSetData(rcx = chain head)
 //
-// So hooking both is not redundant.  slDLSSGSetOptions sees the game's own
-// struct, which may be const; slSetData then sees the stack copy, which never
-// is.  Whichever one can be written wins, and the other passes through because
-// the count already matches.
+// So slSetData is the choke point: every slDLSSGSetOptions call arrives there
+// too, holding a private stack copy rather than the game's own struct.  All the
+// rewriting happens there and only there.
+//
+// An earlier version rewrote in both hooks, which quietly broke the fallback:
+// on a rejection the outer hook restored the game's count and called through
+// again, and the inner hook -- seeing a count that no longer matched the target
+// -- put the rejected value straight back. The retry resent exactly the value
+// that had just been refused.
+//
+// slDLSSGSetOptions stays hooked, but only to watch: it is what tells us the
+// game's own request even in the version where slSetData is never reached.
 //
 // Forwarding four register arguments covers either signature; the callee reads
 // only the ones it declared.
@@ -125,26 +143,39 @@ typedef uint32_t (*PFN_Sl4)(void *, void *, void *, void *);
 static PFN_Sl4 g_orig_setopts = nullptr;
 static PFN_Sl4 g_orig_setdata = nullptr;
 
-static uint32_t apply_override(PFN_Sl4 orig, void *a, void *b, void *c, void *d) {
+static void observe(void *opts) {
+    g_mode.store(*reinterpret_cast<uint32_t *>(static_cast<char *>(opts) + kOffMode),
+                 std::memory_order_relaxed);
+    g_game_asked.store(*reinterpret_cast<uint32_t *>(static_cast<char *>(opts) + kOffCount),
+                       std::memory_order_relaxed);
+}
+
+static uint32_t hk_setopts(void *a, void *b, void *c, void *d) {
+    if (g_orig_setopts == nullptr) return 0xFFFFFFFF;
+    void *opts = find_options(a);
+    if (opts == nullptr) opts = find_options(b);
+    if (opts != nullptr) observe(opts);
+    return g_orig_setopts(a, b, c, d);
+}
+
+static uint32_t hk_setdata(void *a, void *b, void *c, void *d) {
+    PFN_Sl4 orig = g_orig_setdata;
     if (orig == nullptr) return 0xFFFFFFFF;
 
     void *opts = find_options(a);
     if (opts == nullptr) opts = find_options(b);
     if (opts == nullptr) return orig(a, b, c, d);
+    observe(opts);
 
-    auto *pmode  = reinterpret_cast<uint32_t *>(static_cast<char *>(opts) + kOffMode);
     auto *pcount = reinterpret_cast<uint32_t *>(static_cast<char *>(opts) + kOffCount);
-    g_mode       = static_cast<int>(*pmode);
-    g_game_asked = static_cast<int>(*pcount);
-
     const int want = g_target;
     // Frame generation off, or nothing to change: stay out of the way entirely.
-    if (want <= 1 || g_mode == 0 || static_cast<int>(*pcount) == want)
+    if (want <= 1 || g_mode.load(std::memory_order_relaxed) == 0 ||
+        static_cast<int>(*pcount) == want)
         return orig(a, b, c, d);
 
-    if (!writable(pcount)) {
-        if (!g_readonly_opts) {
-            g_readonly_opts = true;
+    if (!range_ok(pcount, sizeof(uint32_t), kWritable)) {
+        if (!g_readonly_opts.exchange(true)) {
             logf("[MFG] the game's DLSSGOptions live in read-only memory; cannot override");
             std::snprintf(g_note, sizeof g_note, "options are read-only, override not possible");
         }
@@ -154,34 +185,37 @@ static uint32_t apply_override(PFN_Sl4 orig, void *a, void *b, void *c, void *d)
     // Write, forward, restore.  Patching in place rather than passing a copy is
     // deliberate: the struct is versioned and its real size is whatever the game
     // was built against, so copying it means guessing how many bytes to read.
+    //
+    // The lock is for the case where a game calls slSetData directly from more
+    // than one thread with the same struct; without it two overlapping calls can
+    // restore each other's saved value and leave the game's own count changed.
+    // It is held across the original call, which is only safe because Streamline
+    // does not re-enter slSetData from inside it.
+    AcquireSRWLockExclusive(&g_mutate);
     const uint32_t saved = *pcount;
     *pcount = static_cast<uint32_t>(want);
     uint32_t r = orig(a, b, c, d);
     *pcount = saved;
+    ReleaseSRWLockExclusive(&g_mutate);
 
     if (r != 0) {
         // The plugin refused.  Hand the game's own request through so frame
-        // generation keeps working instead of switching off underneath it.
-        ++g_rejects;
-        g_last_result = static_cast<int>(r);
+        // generation keeps working instead of switching off underneath it.  The
+        // struct already holds the game's value again, and this is the only
+        // place that rewrites it, so the retry really does send the original.
+        g_rejects.fetch_add(1, std::memory_order_relaxed);
+        g_last_result.store(static_cast<int>(r), std::memory_order_relaxed);
         r = orig(a, b, c, d);
         std::snprintf(g_note, sizeof g_note,
                       "plugin rejected %dx (0x%X) -- is nvngx_dlssg.dll patched?",
-                      want + 1, g_last_result);
+                      want + 1, static_cast<int>(g_last_result.load(std::memory_order_relaxed)));
     } else {
-        ++g_overrides;
-        g_applied     = want;
-        g_last_result = 0;
+        g_overrides.fetch_add(1, std::memory_order_relaxed);
+        g_applied.store(want, std::memory_order_relaxed);
+        g_last_result.store(0, std::memory_order_relaxed);
         std::snprintf(g_note, sizeof g_note, "generating %d frames per rendered frame", want);
     }
     return r;
-}
-
-static uint32_t hk_setopts(void *a, void *b, void *c, void *d) {
-    return apply_override(g_orig_setopts, a, b, c, d);
-}
-static uint32_t hk_setdata(void *a, void *b, void *c, void *d) {
-    return apply_override(g_orig_setdata, a, b, c, d);
 }
 
 // ---------------------------------------------------------------- install ---
@@ -213,25 +247,24 @@ static void install_hook() {
         g_hooked = true;
         return;
     }
-    int n = 0;
-    if (setopts != nullptr &&
-        MH_CreateHook(setopts, reinterpret_cast<void *>(&hk_setopts),
-                      reinterpret_cast<void **>(&g_orig_setopts)) == MH_OK &&
-        MH_EnableHook(setopts) == MH_OK) {
-        logf("[MFG] hooked slDLSSGSetOptions at %p", setopts);
-        ++n;
-    }
     if (setdata != nullptr &&
         MH_CreateHook(setdata, reinterpret_cast<void *>(&hk_setdata),
                       reinterpret_cast<void **>(&g_orig_setdata)) == MH_OK &&
         MH_EnableHook(setdata) == MH_OK) {
         logf("[MFG] hooked slSetData at %p", setdata);
-        ++n;
     }
-    if (n == 0) {
-        std::snprintf(g_note, sizeof g_note, "found the plugin but could not hook it");
+    if (setopts != nullptr &&
+        MH_CreateHook(setopts, reinterpret_cast<void *>(&hk_setopts),
+                      reinterpret_cast<void **>(&g_orig_setopts)) == MH_OK &&
+        MH_EnableHook(setopts) == MH_OK) {
+        logf("[MFG] watching slDLSSGSetOptions at %p", setopts);
+    }
+    if (g_orig_setdata == nullptr) {
+        std::snprintf(g_note, sizeof g_note,
+                      "slSetData is not hooked, so nothing can be overridden");
     } else {
-        std::snprintf(g_note, sizeof g_note, "hooked, waiting for the game to enable frame generation");
+        std::snprintf(g_note, sizeof g_note,
+                      "hooked, waiting for the game to enable frame generation");
     }
     g_hooked = true;
 }
@@ -261,8 +294,8 @@ static void draw_overlay(reshade::api::effect_runtime *) {
     };
     int idx = g_target;                       // target N generated -> (N+1)x
     if (ImGui::Combo("Multiplier", &idx, kLabels, IM_ARRAYSIZE(kLabels))) {
-        g_target  = idx;
-        g_rejects = 0;
+        g_target = idx;
+        g_rejects.store(0, std::memory_order_relaxed);
         save_settings();
     }
     ImGui::TextDisabled("%s", g_note);
@@ -273,20 +306,28 @@ static void draw_overlay(reshade::api::effect_runtime *) {
                            "Streamline frame generation, or has not started it yet.");
         return;
     }
-    ImGui::Text("Game requests   : %d generated (%dx)", g_game_asked, g_game_asked + 1);
-    ImGui::Text("Frame generation: %s",
-                g_mode == 0 ? "off" : (g_mode == 1 ? "on" : "auto"));
-    if (g_overrides > 0)
-        ImGui::Text("Applied         : %d generated (%dx), %u times",
-                    g_applied, g_applied + 1, g_overrides);
-    if (g_rejects > 0)
+    const int asked = g_game_asked.load(std::memory_order_relaxed);
+    const int mode  = g_mode.load(std::memory_order_relaxed);
+    const unsigned ov = g_overrides.load(std::memory_order_relaxed);
+    const unsigned rj = g_rejects.load(std::memory_order_relaxed);
+    ImGui::Text("Game requests   : %d generated (%dx)", asked, asked + 1);
+    ImGui::Text("Frame generation: %s", mode == 0 ? "off" : (mode == 1 ? "on" : "auto"));
+    if (ov > 0) {
+        const int ap = g_applied.load(std::memory_order_relaxed);
+        ImGui::Text("Applied         : %d generated (%dx), %u times", ap, ap + 1, ov);
+    }
+    if (rj > 0)
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f),
-                           "Rejected %u times, last result 0x%X", g_rejects, g_last_result);
+                           "Rejected %u times, last result 0x%X", rj,
+                           g_last_result.load(std::memory_order_relaxed));
 
     ImGui::Separator();
     ImGui::TextWrapped("Anything above 2x also needs the architecture gate removed from "
                        "nvngx_dlssg.dll (tools/mfg_unlock.py). Without it the plugin "
                        "reports a maximum of one generated frame and refuses the rest.");
+    ImGui::TextWrapped("A driver profile can also cap this: the NVIDIA App writes a "
+                       "maximum-generated-frames key that Streamline takes the minimum "
+                       "against.");
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)

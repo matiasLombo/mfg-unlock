@@ -39,6 +39,24 @@ snippet what it can do and takes the smaller of that and its own cap of 5:
 0x582c1  [plugin+0x45dc] = edx   ; numFramesToGenerateMax
 ```
 
+That is not the last word on it. Immediately afterwards a driver-profile value
+is folded in with a second minimum, logged as "DRS limits max generated frames
+to %u":
+
+```
+0x5841c  cmp byte [plugin+0x44b4], 0     ; is the DRS value present
+0x58439  edx = [plugin+0x45dc]
+0x5843b  cmp [rax], edx
+0x5843d  cmovb r8, rax                   ; min(current, DRS)
+0x58444  [plugin+0x45dc] = ...
+```
+
+and if the NGX parameter is missing or zero, `0x58416` writes 1 outright. So the
+effective maximum is `min(snippet, 5, DRS key 0x104D6667)`. On a machine with no
+NVIDIA App override that key reads 0 and drops out — the snippet log confirms
+`drsReadKey SUCCESS: id 104d6667, value 00000000` — but a profile that sets it
+will cap the result no matter what the snippet says.
+
 and later rejects the app's request against it:
 
 ```
@@ -176,6 +194,20 @@ reader, `0x3AF18`, which passes it to the validation. Other `[reg+0x28]` byte
 tests in the binary belong to unrelated classes -- `0x79C62` loads its object
 from `[rbx+8]` first.
 
+### And the capability query?
+
+`GetFeatureRequirements` is the other place that could plausibly hide a gate: it
+queries device ID, architecture, OS build and driver version, and it runs before
+any of the above. It does not gate multi-frame. The whole implementation,
+`0x37280`-`0x37A97`, contains no architecture constant of the `0x1?0` form and no
+multi-frame reference of any kind — it decides whether DLSS-G runs at all, which
+on Ada it already does at 2x.
+
+A note on method, since this kind of claim is only as good as the search behind
+it: everything here is disassembled per function from `.pdata` ranges, never by
+linear sweep over `.text`. A linear sweep desynchronises on the first jump table
+and will miss real instructions.
+
 ## 5. What is still missing for old games
 
 The patch makes the runtime *capable*. It does not make a game *ask*. A title
@@ -200,17 +232,25 @@ and `slGetPluginFunction`. The host resolves `slDLSSGSetOptions` through the
 latter. Hooking `slGetPluginFunction` and wrapping the returned pointer gives a
 single, version-stable place to rewrite `numFramesToGenerate`.
 
-`DLSSGOptions` (SL 2.13, 0x78 bytes):
+`DLSSGOptions`, read off `slSetData` — it walks the chain through `[node+0x00]`
+and compares the two type qwords at `[node+0x08]` and `[node+0x10]`:
 
 ```
-0x00  StructType  structType      (16 bytes)
-0x10  uint64      structVersion
-0x18  BaseStructure* next
-0x20  DLSSGMode   mode
-0x24  uint32      numFramesToGenerate     <-- the field to rewrite
-0x28  DLSSGFlags  flags
-...
+0x00  BaseStructure* next
+0x08  StructType     structType          (16 bytes)
+0x18  uint64         structVersion
+0x20  DLSSGMode      mode                0 = off
+0x24  uint32         numFramesToGenerate <-- the field to rewrite
 ```
+
+`{cb f1 c5 fa fd 2d 36 4f a1 e6 3a 9e 86 52 56 c5}` is the DLSSGOptions type;
+`{35 64 1b 17 3c 9b c8 4f 99 94 fb e5 25 69 aa a4}` is the viewport handle.
+
+`slDLSSGSetOptions(rcx = options, rdx = viewport)` — note the order, the public
+header has it the other way round — copies the first `0x28` bytes of the options
+onto its stack, overwrites the copy's `next` with the viewport, and calls
+`slSetData` on that copy. So `slSetData` is the real choke point, and on that
+path it is handed a private copy rather than the game's own struct.
 
 
 ## 6. Measuring it without a game
