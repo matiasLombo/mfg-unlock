@@ -93,6 +93,49 @@ of one.
 
 To undo: delete the patched dll and rename `.orig` back.
 
+#### If 3x and 4x do not appear in the menu
+
+Do not guess — one log line says exactly where it stops. Streamline takes its
+logging from the environment, so put this in the Steam launch options:
+
+```
+SL_LOG_LEVEL=2 SL_LOG_PATH=C:\tmp\sl SL_ENABLE_CONSOLE_LOGGING=1 %command%
+```
+
+Then find this in `sl.log`:
+
+```
+Multi-frame <state>, max generated frames A (SL Plugin supports B, NGX feature supports C)
+```
+
+| what it says | what it means | what to do |
+| --- | --- | --- |
+| `NGX feature supports 1` | the game is not using the dll we patched | check which `nvngx_dlssg.dll` it loaded; that folder also holds `.dlsss` copies from a DLSS swapper, and the driver can supply its own |
+| `NGX feature supports 5`, `max generated frames 1` | a driver profile is capping it | DRS key `0x104D6667`, set by the NVIDIA App's frame-generation override; clear it there |
+| all three say `5`, menu still 2x | the runtime is unlocked and the game's UI is the limit | skip the menu, set the console variable below |
+
+The console variable takes the count directly — `"DLSS-FG Mode: 0:Off, 1-3:On
+and number of frames to generate"` — so it does not care what the menu offers.
+In `DOOMTheDarkAgesConfig.local`:
+
+```
+r_streamlineDLSSGMode "3"
+```
+
+Enable frame generation in the menu first, quit, then set it, so the menu cannot
+write over the value on its way out.
+
+If even that gets overwritten, `mfg-multiplier.addon64` is the last resort. It
+hooks `slSetData`, which is API-agnostic, so it works under Vulkan as well —
+provided ReShade loads in DOOM.
+
+Why the menu is expected to work: DOOM has no NVAPI in its executable at all, so
+it cannot ask the driver what GPU this is. It reads the limit from Streamline,
+and in the 2.11.1 plugin DOOM ships, `slDLSSGGetState` forwards through
+`slGetData`, which at `0x52343` copies `[plugin+0x45A4]` — the value our patch
+feeds — into `DLSSGState+0x34`. The one condition is that the game passes a
+`structVersion` of 2 or more; below that the field is never filled in.
+
 #### It also has the right benchmark built in
 
 DOOM ships a benchmark mode in the menus that writes `benchmark.json`, and what
