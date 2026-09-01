@@ -124,6 +124,9 @@ static const wchar_t *kCorePaths[] = {
 
 int main(int argc, char **argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    // Static reference to version.dll so a proxy in this folder is loaded at
+    // process start, exactly as it would be in a game that imports it.
+    { DWORD h = 0; GetFileVersionInfoSizeA("nul", &h); }
     const unsigned long long appId =
         (argc > 1) ? strtoull(argv[1], nullptr, 0) : 0xE658700ull;
 
