@@ -94,10 +94,14 @@ typedef unsigned (__cdecl *PFN_Init_Ext)(unsigned long long, const wchar_t *,
 typedef unsigned (__cdecl *PFN_Populate)(void *);
 typedef unsigned (__cdecl *PFN_Shutdown)(void);
 typedef unsigned (__cdecl *PFN_GetArch)(void);
+// rcx command list, edx feature id, r8 parameters, r9 out handle
+typedef unsigned (__cdecl *PFN_Create)(ID3D12GraphicsCommandList *, unsigned, void *, void **);
+typedef unsigned (__cdecl *PFN_Release)(void *);
 
 int main(int argc, char **argv) {
-    if (argc < 2) { std::printf("usage: snippet_probe <nvngx_dlssg.dll> [appId]\n"); return 2; }
+    if (argc < 2) { std::printf("usage: snippet_probe <nvngx_dlssg.dll> [appId] [featureId]\n"); return 2; }
     const unsigned long long appId = (argc > 2) ? strtoull(argv[2], nullptr, 0) : 241534723ull;
+    const unsigned feature = (argc > 3) ? (unsigned)strtoul(argv[3], nullptr, 0) : 10u;
 
     ID3D12Device *dev = nullptr;
     IDXGIFactory4 *fac = nullptr;
@@ -144,6 +148,51 @@ int main(int argc, char **argv) {
             std::printf("%-44s %-8s %g\n", s.name.c_str(), s.type.c_str(), s.f);
         else
             std::printf("%-44s %-8s %llu (0x%llX)\n", s.name.c_str(), s.type.c_str(), s.u, s.u);
+    }
+
+    // Creating the feature exercises EndpointCore::Create, which is where the
+    // other architecture gate writes m_multiFrameSupported.  Nothing here needs
+    // a tagged resource: EndpointCoreCreateParameters::ParseNGXParameters reads
+    // only scalars, so a command list and a handful of numbers are enough.
+    auto create  = (PFN_Create)GetProcAddress(h, "NVSDK_NGX_D3D12_CreateFeature");
+    auto release = (PFN_Release)GetProcAddress(h, "NVSDK_NGX_D3D12_ReleaseFeature");
+    if (create != nullptr && (rp & 0xFFF00000) != 0xBAD00000) {
+        ID3D12CommandAllocator *alloc = nullptr;
+        ID3D12GraphicsCommandList *cl = nullptr;
+        dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                    __uuidof(ID3D12CommandAllocator), (void **)&alloc);
+        if (alloc)
+            dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc, nullptr,
+                                   __uuidof(ID3D12GraphicsCommandList), (void **)&cl);
+        if (cl == nullptr) {
+            std::printf("\n(no command list, skipping CreateFeature)\n");
+        } else {
+            const unsigned W = 2560, H = 1440, iW = 1280, iH = 720;
+            set_u(&p, "DLSSG.Width",             W);
+            set_u(&p, "DLSSG.Height",            H);
+            set_u(&p, "DLSSG.InternalWidth",     iW);
+            set_u(&p, "DLSSG.InternalHeight",    iH);
+            set_u(&p, "Width",                   W);
+            set_u(&p, "Height",                  H);
+            set_u(&p, "DLSSG.BackbufferFormat",  DXGI_FORMAT_R16G16B16A16_FLOAT);
+            set_u(&p, "DLSSG.DynamicResolution", 0);
+            set_u(&p, "DLSSG.UseReflexMatrices", 0);
+            set_u(&p, "CreationNodeMask",        1);
+            set_u(&p, "VisibilityNodeMask",      1);
+            const size_t before = g_sets.size();
+            void *handle = nullptr;
+            unsigned rc = create(cl, feature, &p, &handle);
+            std::printf("\nCreateFeature  : 0x%08X%s   (feature %u, %ux%u from %ux%u)\n",
+                        rc, (rc & 0xFFF00000) == 0xBAD00000 ? "  FAILED" : "  ok",
+                        feature, W, H, iW, iH);
+            for (size_t i = before; i < g_sets.size(); ++i)
+                std::printf("    set by create: %-40s %s\n",
+                            g_sets[i].name.c_str(), g_sets[i].type.c_str());
+            if (handle != nullptr && release != nullptr) release(handle);
+            cl->Close();
+            cl->Release();
+        }
+        if (alloc != nullptr) alloc->Release();
     }
 
     auto it = g_ints.find("DLSSG.MultiFrameCountMax");
