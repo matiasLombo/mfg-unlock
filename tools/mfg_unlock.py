@@ -153,7 +153,42 @@ def main():
     if dst == src and not os.path.exists(src + '.orig'):
         shutil.copy2(src, src + '.orig')
         print(f"  + backup: {src}.orig")
-    open(dst, 'wb').write(data)
+    # Opening the real file for writing truncates it first, so anything that
+    # goes wrong mid-write leaves a zero-byte DLL where the game expects its
+    # runtime.  Prefer writing beside the target and renaming over it, which is
+    # atomic on NTFS.  Under Program Files that usually fails: the account can
+    # create and write files but not delete or rename over them, and os.replace
+    # needs exactly that.  So fall back to writing in place and verify by
+    # reading the file back, restoring the backup if it does not match.
+    tmp = dst + '.new'
+    written = False
+    try:
+        with open(tmp, 'wb') as f:
+            f.write(data)
+        os.replace(tmp, dst)
+        written = True
+    except OSError:
+        if os.path.exists(tmp):
+            try: os.unlink(tmp)
+            except OSError: pass
+    if not written:
+        backup = src + '.orig'
+        try:
+            with open(dst, 'r+b') as f:
+                f.write(data)
+                f.truncate(len(data))
+        except OSError as e:
+            if dst == src and os.path.exists(backup):
+                shutil.copy2(backup, dst)
+                sys.exit(f"!! write failed ({e}); restored from {backup}")
+            sys.exit(f"!! write failed: {e}")
+        if open(dst, 'rb').read() != bytes(data):
+            if dst == src and os.path.exists(backup):
+                shutil.copy2(backup, dst)
+                sys.exit("!! the file on disk does not match what was written; "
+                         f"restored from {backup}")
+            sys.exit("!! the file on disk does not match what was written")
+        print("  = wrote in place (rename over the target was denied) and verified")
     print(f"out: {dst}")
     print(f"     sha256 {hashlib.sha256(data).hexdigest()[:16]}")
     if done == EXPECTED_SITES:
