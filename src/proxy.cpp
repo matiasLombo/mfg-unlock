@@ -110,6 +110,71 @@ static int patch_gates(unsigned char *base) {
 
 // ------------------------------------------------- catching the dll load ---
 
+// ---- experiment: let the plugin keep as many outputs as the cadence needs ---
+//
+// In sl.dlss_g 2.11.1, presentCommon computes the frames-per-real-frame cadence
+// and then throws it away:
+//
+//     mov    edi, [rbp+0x628]        ; cadence, 3 for 3x
+//     cmp    byte [r14+0x4081], 0
+//     mov    eax, 2
+//     cmovne edi, eax                ; pinned to 2
+//     ...    call <allocate m_pDLFGOutputs, count = edi>
+//
+// The flag is set in updateAppVSyncState as
+//     flag = checkFullscreen() ? 0 : (flipMeteringNotForcedOff && field >= 30)
+// and checkFullscreen() begins by requiring RSync, which is DX12 only -- the log
+// says so outright. Under Vulkan the flag is therefore always 1, so the plugin
+// allocates two DLFG outputs no matter how many frames it is about to present.
+// Two is exactly right for 2x, which is the configuration that looks fine.
+//
+// This is a hypothesis, not a known fix. Neutralising the cmov makes the code
+// take the same branch it already takes in the fullscreen case, so it is a
+// configuration the plugin supports rather than an invented one. The pattern
+// does not exist in 2.13 at all, which is consistent with it having been a
+// limitation NVIDIA later removed.
+
+static int g_outputs_patched = 0;
+
+static int patch_dlfg_outputs(unsigned char *base) {
+    auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    auto *sec = IMAGE_FIRST_SECTION(nt);
+    unsigned char *text = nullptr;
+    size_t len = 0;
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        const char *n = reinterpret_cast<const char *>(sec[i].Name);
+        if (n[0] == '.' && n[1] == 't' && n[2] == 'e' && n[3] == 'x' && n[4] == 't') {
+            text = base + sec[i].VirtualAddress;
+            len = sec[i].Misc.VirtualSize;
+            break;
+        }
+    }
+    if (text == nullptr) return 0;
+
+    int hits = 0;
+    for (size_t i = 0; i + 16 <= len; ++i) {
+        // mov eax, 2 ; cmovne r32, eax
+        if (!(text[i] == 0xB8 && text[i + 1] == 0x02 && text[i + 2] == 0 &&
+              text[i + 3] == 0 && text[i + 4] == 0 &&
+              text[i + 5] == 0x0F && text[i + 6] == 0x45))
+            continue;
+        // preceded by cmp byte ptr [r14 + imm32], 0
+        if (i < 8) continue;
+        const unsigned char *p = text + i - 8;
+        if (!(p[0] == 0x41 && p[1] == 0x80 && p[2] == 0xBE && p[7] == 0x00)) continue;
+        unsigned char *cmov = text + i + 5;          // the 3-byte cmovne
+        DWORD old = 0;
+        if (!VirtualProtect(cmov, 3, PAGE_EXECUTE_READWRITE, &old)) continue;
+        cmov[0] = 0x90; cmov[1] = 0x90; cmov[2] = 0x90;
+        VirtualProtect(cmov, 3, old, &old);
+        ++hits;
+    }
+    return hits;
+}
+
 struct DllNotifyData {
     ULONG Flags;
     const UNICODE_STRING *FullDllName;
@@ -120,29 +185,72 @@ struct DllNotifyData {
 typedef VOID(CALLBACK *PFN_Notify)(ULONG, const DllNotifyData *, PVOID);
 typedef NTSTATUS(NTAPI *PFN_LdrRegister)(ULONG, PFN_Notify, PVOID, PVOID *);
 
+static wchar_t lower(wchar_t c) { return (c >= L'A' && c <= L'Z') ? (wchar_t)(c + 32) : c; }
+
 static bool name_is(const UNICODE_STRING *s, const wchar_t *want) {
     if (s == nullptr || s->Buffer == nullptr) return false;
     const size_t n = s->Length / sizeof(wchar_t);
     size_t i = 0;
-    for (; i < n && want[i] != 0; ++i) {
-        wchar_t a = s->Buffer[i], b = want[i];
-        if (a >= L'A' && a <= L'Z') a = (wchar_t)(a + 32);
-        if (b >= L'A' && b <= L'Z') b = (wchar_t)(b + 32);
-        if (a != b) return false;
-    }
+    for (; i < n && want[i] != 0; ++i)
+        if (lower(s->Buffer[i]) != lower(want[i])) return false;
     return i == n && want[i] == 0;
+}
+
+// The snippet does not always arrive under the name nvngx_dlssg.dll. NGX keeps
+// OTA-updated snippets under ProgramData as <arch>_<appid>.bin, and that copy is
+// usually the newest, so it is the one NGX actually uses -- matching on the file
+// name alone patches the two copies that get discarded and misses the one that
+// counts. Match on the whole path instead. "dlssg" appears in both
+// nvngx_dlssg.dll and ...\NGX\models\dlssg\..., and not in sl.dlss_g.dll, which
+// spells it with an underscore.
+static bool path_has(const UNICODE_STRING *s, const wchar_t *needle) {
+    if (s == nullptr || s->Buffer == nullptr) return false;
+    const size_t n = s->Length / sizeof(wchar_t);
+    size_t want = 0;
+    while (needle[want] != 0) ++want;
+    if (want == 0 || n < want) return false;
+    for (size_t i = 0; i + want <= n; ++i) {
+        size_t j = 0;
+        while (j < want && lower(s->Buffer[i + j]) == lower(needle[j])) ++j;
+        if (j == want) return true;
+    }
+    return false;
+}
+
+// Narrow a wide path for the log; these are all ASCII in practice.
+static void log_wide(const char *label, const UNICODE_STRING *s) {
+    char buf[512];
+    int i = 0;
+    while (label[i] != 0 && i < 120) { buf[i] = label[i]; ++i; }
+    const size_t n = s ? s->Length / sizeof(wchar_t) : 0;
+    for (size_t k = 0; k < n && i < 500; ++k, ++i) {
+        wchar_t c = s->Buffer[k];
+        buf[i] = (c >= 32 && c < 127) ? (char)c : '?';
+    }
+    buf[i] = 0;
+    log_line(buf);
 }
 
 static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
     if (reason != 1 || d == nullptr) return;                 // 1 = LDR_DLL_NOTIFICATION_REASON_LOADED
-    if (!name_is(d->BaseDllName, L"nvngx_dlssg.dll")) return;
-    const int n = patch_gates(reinterpret_cast<unsigned char *>(d->DllBase));
-    // NGX maps the snippet more than once; later passes find the immediates
-    // already rewritten and report nothing, so keep the pass that did the work.
-    if (n > 0 && g_gates <= 0) {
-        g_gates = n;
-        log_num("nvngx_dlssg.dll mapped, architecture gates rewritten: ", (unsigned)n);
+
+    // Load order matters for reading the Streamline log afterwards: the plugin
+    // caches the maximum at its startup, so it has to come after the snippet.
+    if (name_is(d->BaseDllName, L"sl.interposer.dll")) { log_line("sl.interposer.dll mapped"); return; }
+    if (name_is(d->BaseDllName, L"sl.dlss_g.dll")) {
+        log_line("sl.dlss_g.dll mapped");
+        const int n = patch_dlfg_outputs(reinterpret_cast<unsigned char *>(d->DllBase));
+        g_outputs_patched += n;
+        log_num("  DLFG output count un-pinned from 2, sites: ", (unsigned)n);
+        return;
     }
+    if (name_is(d->BaseDllName, L"_nvngx.dll"))        { log_line("_nvngx.dll mapped"); return; }
+
+    if (!path_has(d->FullDllName, L"dlssg")) return;
+    const int n = patch_gates(reinterpret_cast<unsigned char *>(d->DllBase));
+    if (n > 0) ++g_gates;
+    log_num("  gates rewritten: ", (unsigned)n);
+    log_wide("  in ", d->FullDllName);
 }
 
 // ------------------------------------------------------------ forwarding ---
@@ -209,6 +317,23 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
         g_log[0] = 0;
     }
     log_line("--- mfg-unlock attached ---");
+
+    // Turn on Streamline's own logging from here, before anything loads it, so
+    // the decisive line arrives without the user editing launch options:
+    //   "Multi-frame <state>, max generated frames A
+    //    (SL Plugin supports B, NGX feature supports C)"
+    // C is what the snippet reports -- our patch -- and A is what survives the
+    // plugin's own cap and any driver-profile limit. The three numbers say
+    // exactly where the chain stops.
+    {
+        wchar_t dir[MAX_PATH];
+        DWORD m = GetModuleFileNameW(self, dir, MAX_PATH);
+        while (m > 0 && dir[m - 1] != L'\\') --m;
+        if (m > 1) { dir[m - 1] = 0; SetEnvironmentVariableW(L"SL_LOG_PATH", dir); }
+        SetEnvironmentVariableW(L"SL_LOG_LEVEL", L"2");
+        SetEnvironmentVariableW(L"SL_ENABLE_CONSOLE_LOGGING", L"0");
+        log_line("streamline logging enabled (sl.log lands beside this dll)");
+    }
 
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     auto reg = reinterpret_cast<PFN_LdrRegister>(
