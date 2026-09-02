@@ -84,6 +84,24 @@ loaded something else entirely: the newest OTA copy under
 different hash, different struct offsets. `sl.log` names the file it opened —
 read that line before anything else.
 
+### The plugin has the same OTA problem as the snippet
+
+`sl.log` says which Streamline plugin was loaded, and it is not always the one in
+the game folder:
+
+```
+A duplicate was found, but a newer plugin version was available
+Found plugin: ...\NGX\models\sl_dlss_g_0\versions\134273\files\190_E658703.dll
+```
+
+Cyberpunk 2077 loads that one -- 614 KB -- and leaves the 461 KB `sl.dlss_g.dll` in
+its own folder unused. A proxy matching the file name patches the copy that never
+executes and truthfully reports `sites: 0`, while the game runs unpatched at 15%
+stacked frames. Matching the path catches both.
+
+This is the snippet's lesson a second time, on a different file, and it was already
+written down here. Applying it to the plugin took a game looking wrong to notice.
+
 ### Match shapes, not bytes
 
 Three patches here silently stopped matching across Streamline versions:

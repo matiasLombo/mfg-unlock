@@ -805,8 +805,18 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
     // Load order matters for reading the Streamline log afterwards: the plugin
     // caches the maximum at its startup, so it has to come after the snippet.
     if (name_is(d->BaseDllName, L"sl.interposer.dll")) { log_line("sl.interposer.dll mapped"); return; }
-    if (name_is(d->BaseDllName, L"sl.dlss_g.dll")) {
-        log_line("sl.dlss_g.dll mapped");
+    // Match the path, not the file name. Streamline prefers a newer plugin from
+    // NVIDIA's OTA cache when it finds one -- Cyberpunk 2077 loads
+    // ...\NGX\models\sl_dlss_g_0\versions\<id>\files\190_E658703.dll and leaves
+    // the copy in its own folder unused. Matching "sl.dlss_g.dll" then patches the
+    // file that never runs and reports zero sites on the one that does, which is
+    // exactly the trap the snippet already taught us. "sl_dlss_g" catches the cache
+    // layout and "sl.dlss_g" the game-folder one; patching both is harmless, since
+    // a signature either matches an image or leaves it alone.
+    if (path_has(d->FullDllName, L"sl.dlss_g") ||
+        path_has(d->FullDllName, L"sl_dlss_g")) {
+        log_line("sl.dlss_g mapped");
+        log_wide("  in ", d->FullDllName);
         const int n = patch_enable_cpu_pacer(reinterpret_cast<unsigned char *>(d->DllBase));
         g_outputs_patched += n;
         log_num("  CPU pacer enabled, sites: ", (unsigned)n);

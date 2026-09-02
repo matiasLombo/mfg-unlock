@@ -8,11 +8,11 @@ extra frames worth having.
 Confirmed on an RTX 4070 Ti in two games, one Vulkan and one D3D12, with the same
 binary:
 
-| | DOOM The Dark Ages | GTA V Enhanced |
-| --- | --- | --- |
-| API | Vulkan | D3D12 |
-| Streamline | 2.12.129 | 2.13.0 |
-| snippet | 310.7.129 | 310.8.0.0 |
+| | DOOM The Dark Ages | GTA V Enhanced | Cyberpunk 2077 |
+| --- | --- | --- | --- |
+| API | Vulkan | D3D12 | D3D12 |
+| Streamline | 2.12.129 | 2.13.0 | OTA 134273 |
+| snippet | 310.7.129 | 310.8.0.0 | game folder |
 
 The snippet's own diagnostic overlay reports `4x`, so the unlock is confirmed by
 NVIDIA's code rather than by inference.
@@ -153,6 +153,29 @@ A patch reporting `sites: 0` matched nothing and did nothing. And in `sl.log`:
 ```
 Multi-frame supported, max generated frames 5 (SL Plugin supports 5, NGX feature supports 5)
 ```
+
+
+## Patch the plugin that actually loads, not the one on disk
+
+Streamline prefers a newer copy of its own plugins from NVIDIA's OTA cache when it
+finds one, and the file there is named by id, not by plugin:
+
+```
+A duplicate was found, but a newer plugin version was available
+Found plugin: ...\NGX\models\sl_dlss_g_0\versions\134273\files\190_E658703.dll
+```
+
+Cyberpunk 2077 does exactly this: the `sl.dlss_g.dll` in its own folder is 461 KB
+and never runs, while the 614 KB copy in the cache does. Matching the file name
+patches the wrong image and reports `sites: 0` on a game that is running the
+unpatched one -- which looks like a signature that stopped working, and is not.
+
+This proxy matches the **path** instead (`sl.dlss_g` or `sl_dlss_g`), so it catches
+both layouts. It is the same rule the NGX snippet already needed, applied to the
+plugin: **read `sl.log` to see which file was opened before concluding anything**.
+
+The patches are idempotent, so an image reached twice is harmless: each looks for a
+pattern it has already rewritten, finds nothing, and reports zero.
 
 ## Why a proxy and not a patched file
 
