@@ -2,3 +2,12 @@ external/
 *.addon64
 dist/*.dll
 __pycache__/
+
+# Generated from the snippet installed on the build machine, and derived from
+# NVIDIA's own PTX -- rebuild it with tools/rebuild_cubins.py, never commit it.
+src/cubins.h
+
+# Build output and logs
+version.dll
+*.log
+*.exe
