@@ -73,7 +73,7 @@ the process.
    ```
    It writes `nvngx_dlssg.dll.orig` next to it first.
 
-2. Add to `C:\Users\matia\Saved Games\id Software\DOOMTheDarkAges\base\DOOMTheDarkAgesConfig.local`:
+2. Add to `%USERPROFILE%\Saved Games\id Software\DOOMTheDarkAges\base\DOOMTheDarkAgesConfig.local`:
    ```
    r_streamlineLogLevel "2"
    r_streamlineEnableDebugLogging "1"
