@@ -268,7 +268,24 @@ static int patch_cubins(unsigned char *base) {
                     if (elf_fingerprint(payload, (size_t)psz, &t, &sh, &rg)) {
                         for (const auto &c : kCubinPatches) {
                             if (c.text != t || c.shared != sh || c.regs != rg) continue;
-                            if (c.orig_size != (unsigned)psz) continue;   // must be the same slot
+                            // The fingerprint matched, so this IS the kernel we
+                            // built against -- but the ELF around it has to be
+                            // the same size too, or the replacement was derived
+                            // from a different snippet build and its constants
+                            // may no longer line up. NVIDIA moved all three of
+                            // these by 128-256 bytes in the 2026-09-03 OTA drop
+                            // while leaving the fingerprints untouched, so the
+                            // swap stopped applying and said only "expected 3".
+                            // Say which slot moved and by how much: that one
+                            // line is the difference between "rerun
+                            // rebuild_cubins.py" and a night of guessing.
+                            if (c.orig_size != (unsigned)psz) {
+                                log_line("  ! slot moved, not patched:");
+                                log_line(c.what);
+                                log_num("      snippet has: ", (unsigned)psz);
+                                log_num("      built for:   ", c.orig_size);
+                                continue;
+                            }
                             if (c.size > psz) continue;                   // must fit
                             DWORD old = 0;
                             if (!VirtualProtect(payload, (SIZE_T)psz, PAGE_READWRITE, &old)) break;
@@ -642,6 +659,18 @@ static int patch_metering_off(unsigned char *base) {
         }
         if (field == 0) { log_line("    (metering field not located; nothing touched)"); return 0; }
     }
+    // NVIDIA's 2026-09-03 build (see patch_enable_cpu_pacer) restructures this
+    // whole area, and the anchor above genuinely does not appear in it -- not
+    // matched, checked by direct disassembly of the file. There is a
+    // plausible-looking `movzx ebx, byte [r14+off]` nearby, but "nearby" is
+    // 293 bytes from the branchy flag computation it would need to feed, with
+    // a *closer* (24 bytes) and structurally more connected candidate
+    // reading a different field entirely -- and nothing here resolves which
+    // one, if either, is the byte this function exists to protect. Guessing
+    // and patching the wrong context offset is worse than doing nothing:
+    // patch_enable_cpu_pacer's own fix for this build does not depend on
+    // finding this field at all, so leaving this one reporting zero is the
+    // honest state until that ambiguity is actually resolved.
     log_num("    metering field at ctx+", field);
 
     // Now the store that clears it. 2.11.1 and 2.12.129 write an immediate zero;
@@ -738,6 +767,49 @@ static int patch_enable_cpu_pacer(unsigned char *base) {
         if (!VirtualProtect(cmov, 3, PAGE_EXECUTE_READWRITE, &old)) continue;
         cmov[0] = 0x90; cmov[1] = 0x90; cmov[2] = 0x90;
         VirtualProtect(cmov, 3, old, &old);
+        ++hits;
+    }
+
+    // NVIDIA pushed a new sl.dlss_g build through its OTA cache on 2026-09-03
+    // (versions\134656\190_E658703.dll, up from versions\134273\190_E658703.dll
+    // dated 2026-08-25) and rewrote this same computation from the cmovae form
+    // above into two plain jumps. Confirmed by scanning both files' .text
+    // directly off disk, independent of anything this proxy does at runtime:
+    // the cmovae form above is the only one present in the Aug 25 build (one
+    // site) and is entirely absent from the Sep 3 one; the pattern below is
+    // the only one present in the Sep 3 build (one site) and is absent from
+    // the Aug 25 one and from the copy Cyberpunk ships in its own bin\x64.
+    //
+    //     test bl, bl        84 DB
+    //     jne  L             75 xx
+    //     cmp  edi, 0x1E     83 FF 1E
+    //     jb   L             72 yy      -- same target L as the jne above
+    //     mov  bl, 1         B3 01
+    //
+    // bl already holds the guard byte's value on entry (0 = cleared) and edi
+    // is feedbackCounter; `mov bl, 1` is the only place the combined flag
+    // becomes 1, reached only once both branches have proven bl == 0. NOPing
+    // it pins the flag at 0 the same way the cmovae-neutering above does on
+    // the older build, just reached through jumps instead of a cmov -- and it
+    // needs no knowledge of *where* the guard byte lives in the context
+    // struct, unlike patch_metering_off's approach. That matters here: this
+    // build's guard byte was not re-verified (see the comment on
+    // patch_metering_off), so this patch, which does not depend on it, is the
+    // one being shipped for this build.
+    for (size_t i = 0; i + 11 <= len; ++i) {
+        if (text[i] != 0x84 || text[i + 1] != 0xDB) continue;                    // test bl, bl
+        if (text[i + 2] != 0x75) continue;                                      // jne rel8
+        if (text[i + 4] != 0x83 || text[i + 5] != 0xFF || text[i + 6] != 0x1E) continue; // cmp edi,0x1E
+        if (text[i + 7] != 0x72) continue;                                      // jb rel8
+        if (text[i + 9] != 0xB3 || text[i + 10] != 0x01) continue;              // mov bl, 1
+        const long t1 = (long)(i + 4) + (signed char)text[i + 3];
+        const long t2 = (long)(i + 9) + (signed char)text[i + 8];
+        if (t1 != t2) continue;   // jne and jb must share a target, or this isn't it
+        unsigned char *imm = text + i + 9;
+        DWORD old = 0;
+        if (!VirtualProtect(imm, 2, PAGE_EXECUTE_READWRITE, &old)) continue;
+        imm[0] = 0x90; imm[1] = 0x90;
+        VirtualProtect(imm, 2, old, &old);
         ++hits;
     }
     return hits;
