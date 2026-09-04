@@ -901,6 +901,14 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
             log_num("  queue parallelism mode forced to ", (unsigned)g_queue_mode);
             log_num("    sites: ", (unsigned)q);
         }
+        // One verdict per module, not one per process: this callback runs for
+        // every copy of the plugin that maps, and they do not all get the same
+        // result -- the game-folder copy and NVIDIA's OTA copy have reported
+        // different site counts in the same session. An aggregate would average
+        // that into a number belonging to neither.
+        log_line(n > 0 ? "  => pacer OK"
+                       : "  => PACER NOT APPLIED -- signature does not match this "
+                         "build; 3x/4x will stutter on a mode change or alt-tab");
         return;
     }
     if (name_is(d->BaseDllName, L"_nvngx.dll"))        { log_line("_nvngx.dll mapped"); return; }
@@ -919,7 +927,21 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         const int cb = patch_cubins(reinterpret_cast<unsigned char *>(d->DllBase));
         g_cubins_done += cb;
         log_num("  kernels rebuilt from the Blackwell PTX: ", (unsigned)cb);
-        if (cb != 3) log_line("  (expected 3 -- snippet version may have changed; the rest are untouched)");
+        if (cb != 3) {
+            // The failure this exists for is silent in play: the unlock still
+            // works, the frames still generate, they are just slower kernels.
+            // Nothing errors, so say the fix out loud rather than leaving a
+            // count to be recognised as wrong.
+            log_line("  => CUBINS NOT APPLIED -- unlock still works, the speed-up does not");
+            log_line("     cubins.h was built for dlssg build:");
+            log_line(kCubinsBuiltFor);
+            log_line("     the snippet loaded here is the path below; if they differ,");
+            log_line("     rerun: python tools/rebuild_cubins.py && sh build-proxy.sh");
+        } else {
+            log_line("  => gates and cubins OK");
+        }
+    } else if (n > 0) {
+        log_line("  => gates OK");
     }
     log_wide("  in ", d->FullDllName);
 }

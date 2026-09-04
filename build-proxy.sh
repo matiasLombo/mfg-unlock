@@ -13,6 +13,7 @@ if [ ! -f src/cubins.h ]; then
   cat > src/cubins.h <<'STUB'
 // Placeholder. Run tools/rebuild_cubins.py to generate the real one.
 #pragma once
+static const char kCubinsBuiltFor[] = "(not built)";
 struct CubinPatch {
     unsigned text, shared, regs, orig_size, size;
     const unsigned char *data;
