@@ -825,6 +825,70 @@ static int patch_enable_cpu_pacer(unsigned char *base) {
         VirtualProtect(imm, 2, old, &old);
         ++hits;
     }
+    if (hits != 0) return hits;
+
+    // Fallback only, and deliberately so. Streamline 2.9-era builds phrase the
+    // threshold test as a bare setcc rather than feeding a cmov or a pair of
+    // jumps:
+    //
+    //     mov   <r32>, [ctx+counter]
+    //     cmp   <r32>, 0x1E        [REX] 83 /7 1E
+    //     setae <r8>               [REX] 0F 93 (mod=11)
+    //     ...
+    //     mov   byte [obj+disp], <r8>     ; the flag reaches its field here
+    //
+    // Zeroing the setcc pins the flag off, the same outcome as forms A and B.
+    // The rewrite is `mov <r8>, 0` -- C6 /0 ib -- which is the same length as
+    // setcc with or without a REX prefix, writes the same operand the setcc
+    // wrote, and needs no register bookkeeping: /0 is an opcode extension, so
+    // the modrm's reg field carries no register and REX.B keeps extending rm
+    // exactly as it did. (xor r8,r8 would be shorter by one and would need
+    // both REX.R and REX.B set to name an extended register twice.)
+    //
+    // Why fallback-only: this pair also occurs, exactly once, in every build
+    // form A already handles (v2.10.0 through 134273) and in the one form B
+    // handles. It is therefore a *different* site from the one those forms
+    // patch -- a second place the same counter is compared -- and patching it
+    // in a build that is already handled would be changing code we have not
+    // read for no reason. Running only when nothing else matched keeps working
+    // builds byte-identical to what they are today.
+    //
+    // Not verified: that the flag this feeds is the metering flag rather than
+    // some other consumer of the same threshold. It is inferred from shape.
+    // Hence also the exactly-one requirement below -- an ambiguous match is
+    // reported and left alone rather than guessed at.
+    {
+        size_t found = 0, at = 0;
+        for (size_t i = 0; i + 8 <= len; ++i) {
+            size_t j = i;
+            if (text[j] >= 0x40 && text[j] <= 0x4F) ++j;      // optional REX on the cmp
+            if (text[j] != 0x83) continue;
+            const unsigned char m = text[j + 1];
+            if ((m & 0xC0) != 0xC0 || (m & 0x38) != 0x38) continue;   // mod=11, /7 = CMP
+            if (text[j + 2] != 0x1E) continue;                        // imm8 == 30
+            size_t k = j + 3;
+            if (text[k] >= 0x40 && text[k] <= 0x4F) ++k;      // optional REX on the setcc
+            if (text[k] != 0x0F || text[k + 1] != 0x93) continue;     // setae
+            if ((text[k + 2] & 0xC0) != 0xC0) continue;               // register form
+            ++found;
+            at = k;                                            // the 0F, REX (if any) at at-1
+        }
+        if (found == 1) {
+            unsigned char *op = text + at;                     // points at the 0F
+            const unsigned char rm = (unsigned char)(op[2] & 7);
+            DWORD old = 0;
+            if (VirtualProtect(op, 3, PAGE_EXECUTE_READWRITE, &old)) {
+                op[0] = 0xC6;                                  // mov r/m8, imm8
+                op[1] = (unsigned char)(0xC0 | rm);            // mod=11, /0, same rm
+                op[2] = 0x00;                                  // = 0
+                VirtualProtect(op, 3, old, &old);
+                ++hits;
+            }
+        } else if (found > 1) {
+            log_num("    (threshold setcc is ambiguous, sites: ", (unsigned)found);
+            log_line("     nothing touched)");
+        }
+    }
     return hits;
 }
 
