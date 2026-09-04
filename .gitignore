@@ -11,3 +11,13 @@ src/cubins.h
 version.dll
 *.log
 *.exe
+
+# Official Streamline SDK binaries, downloaded to give tools/verify_patches.py
+# a corpus to run every signature against. NVIDIA's to distribute, not ours,
+# and 54 MB that git would keep forever.
+corpus/
+
+# Release artefacts belong on GitHub Releases. Keeping a built dll here is also
+# how a stale one survived long enough to be shipped: releases/v1.0/version.dll
+# was built from sources predating the fix that src/ already had.
+releases/
