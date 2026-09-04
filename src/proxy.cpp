@@ -28,6 +28,7 @@
 
 #include <windows.h>
 #include <winternl.h>
+#include <dxgi.h>
 #include <cstdint>
 #include <MinHook.h>
 #include "cubins.h"
@@ -80,6 +81,9 @@ static bool g_meter_off = false;
 // verdict shouted "CUBINS NOT APPLIED" about the image that never executes
 // while the one that does was patched correctly.
 static wchar_t g_ota_newest[64] = {0};
+// Set once that build has actually been seen mapping, which is the only thing
+// that makes another copy provably redundant.
+static bool g_ota_mapped = false;
 
 // ---- selecting the interpolation model ---------------------------------
 //
@@ -397,6 +401,127 @@ static int __stdcall hk_present(void *queue, const void *info) {
     return g_orig_present(queue, info);
 }
 
+// ---- the same measurement for D3D12 ---------------------------------------
+//
+// The hook above is vkQueuePresentKHR, so it measures Vulkan and nothing else.
+// Of the games this project runs on, only DOOM is Vulkan: GTA V, Cyberpunk,
+// Avatar and AC Shadows are all D3D12, and in every one of them F9 recorded a
+// clean, meaningless zero -- the hook installs, the game simply never calls
+// that function. The instrument covered one game out of five and said so
+// nowhere.
+//
+// Present is a COM method, so there is no export to detour; the address lives
+// in the swapchain's vtable, slot 8, fixed by the COM contract. Reaching it
+// means following DXGI's own chain: the two factory entry points, then the two
+// creation methods on the factory that comes back, then the swapchain. Every
+// step degrades to doing nothing, because a game whose swapchain arrives some
+// way this did not anticipate should lose a diagnostic, not its picture.
+//
+// Rows land with src=2. img and meter stay empty: they are read out of the
+// Vulkan present info, and there is no equivalent to read here.
+
+typedef HRESULT(STDMETHODCALLTYPE *PFN_DXGIPresent)(IDXGISwapChain *, UINT, UINT);
+static PFN_DXGIPresent g_orig_dxgi_present = nullptr;
+
+static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT interval, UINT flags) {
+    note_present(nullptr, 2);
+    return g_orig_dxgi_present(self, interval, flags);
+}
+
+static void hook_swapchain_present(void *sc) {
+    if (sc == nullptr || g_orig_dxgi_present != nullptr) return;
+    void **vt = *reinterpret_cast<void ***>(sc);
+    if (MH_CreateHook(vt[8], reinterpret_cast<void *>(&hk_dxgi_present),
+                      reinterpret_cast<void **>(&g_orig_dxgi_present)) == MH_OK &&
+        MH_EnableHook(vt[8]) == MH_OK)
+        log_line("recorder: D3D12 present hooked (src=2 rows)");
+    else
+        g_orig_dxgi_present = nullptr;
+}
+
+typedef HRESULT(STDMETHODCALLTYPE *PFN_CSC)(IDXGIFactory *, IUnknown *,
+        DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **);
+typedef HRESULT(STDMETHODCALLTYPE *PFN_CSCFH)(void *, IUnknown *, HWND, const void *,
+        const void *, void *, IDXGISwapChain **);
+static PFN_CSC g_orig_csc = nullptr;
+static PFN_CSCFH g_orig_cscfh = nullptr;
+
+static HRESULT STDMETHODCALLTYPE hk_csc(IDXGIFactory *self, IUnknown *dev,
+        DXGI_SWAP_CHAIN_DESC *desc, IDXGISwapChain **out) {
+    HRESULT hr = g_orig_csc(self, dev, desc, out);
+    if (SUCCEEDED(hr) && out != nullptr) hook_swapchain_present(*out);
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE hk_cscfh(void *self, IUnknown *dev, HWND hwnd,
+        const void *d1, const void *fs, void *restrict_to, IDXGISwapChain **out) {
+    HRESULT hr = g_orig_cscfh(self, dev, hwnd, d1, fs, restrict_to, out);
+    if (SUCCEEDED(hr) && out != nullptr) hook_swapchain_present(*out);
+    return hr;
+}
+
+// Slots 10 and 15 on IDXGIFactory2 are CreateSwapChain (inherited) and
+// CreateSwapChainForHwnd, fixed by the COM contract rather than by version.
+static void hook_factory(void *factory) {
+    if (factory == nullptr || g_orig_cscfh != nullptr) return;
+    void **vt = *reinterpret_cast<void ***>(factory);
+    if (MH_CreateHook(vt[15], reinterpret_cast<void *>(&hk_cscfh),
+                      reinterpret_cast<void **>(&g_orig_cscfh)) != MH_OK ||
+        MH_EnableHook(vt[15]) != MH_OK)
+        g_orig_cscfh = nullptr;
+    if (MH_CreateHook(vt[10], reinterpret_cast<void *>(&hk_csc),
+                      reinterpret_cast<void **>(&g_orig_csc)) != MH_OK ||
+        MH_EnableHook(vt[10]) != MH_OK)
+        g_orig_csc = nullptr;
+}
+
+typedef HRESULT(WINAPI *PFN_F1)(REFIID, void **);
+typedef HRESULT(WINAPI *PFN_F2)(UINT, REFIID, void **);
+static PFN_F1 g_orig_f0 = nullptr, g_orig_f1 = nullptr;
+static PFN_F2 g_orig_f2 = nullptr;
+
+// One detour per export: a shared one could not tell which entry point it was
+// reached through, and would forward half its calls to the wrong original.
+static HRESULT WINAPI hk_f0(REFIID riid, void **out) {
+    HRESULT hr = g_orig_f0(riid, out);
+    if (SUCCEEDED(hr) && out != nullptr) hook_factory(*out);
+    return hr;
+}
+static HRESULT WINAPI hk_f1(REFIID riid, void **out) {
+    HRESULT hr = g_orig_f1(riid, out);
+    if (SUCCEEDED(hr) && out != nullptr) hook_factory(*out);
+    return hr;
+}
+static HRESULT WINAPI hk_f2(UINT flags, REFIID riid, void **out) {
+    HRESULT hr = g_orig_f2(flags, riid, out);
+    if (SUCCEEDED(hr) && out != nullptr) hook_factory(*out);
+    return hr;
+}
+
+static bool g_dxgi_armed = false;
+
+static void arm_dxgi_recorder() {
+    if (g_dxgi_armed) return;
+    HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
+    if (dxgi == nullptr) return;          // not a D3D game, or not loaded yet
+    g_dxgi_armed = true;
+    if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) return;
+    struct { const char *name; void *detour; void **orig; } e[] = {
+        { "CreateDXGIFactory",  (void *)&hk_f0, (void **)&g_orig_f0 },
+        { "CreateDXGIFactory1", (void *)&hk_f1, (void **)&g_orig_f1 },
+        { "CreateDXGIFactory2", (void *)&hk_f2, (void **)&g_orig_f2 },
+    };
+    int n = 0;
+    for (auto &x : e) {
+        FARPROC p = GetProcAddress(dxgi, x.name);
+        if (p == nullptr) continue;
+        if (MH_CreateHook(reinterpret_cast<void *>(p), x.detour, x.orig) == MH_OK &&
+            MH_EnableHook(reinterpret_cast<void *>(p)) == MH_OK)
+            ++n;
+    }
+    if (n > 0) log_num("recorder: watching DXGI for a swapchain, entry points: ", (unsigned)n);
+}
+
 static int __stdcall hk_present2(void *queue, const void *info) {
     note_present(info, 1);
     return g_orig_present2(queue, info);
@@ -502,6 +627,9 @@ static DWORD WINAPI recorder(LPVOID) {
                 }
             }
         }
+        // D3D12 games never reach the Vulkan branches above, so this is not in
+        // the else of anything: both are attempted, and whichever applies wins.
+        arm_dxgi_recorder();
         const bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
         if (down && !was_down) {
             if (g_recording == 0) {
@@ -991,10 +1119,21 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
     if (name_is(d->BaseDllName, L"_nvngx.dll"))        { log_line("_nvngx.dll mapped"); return; }
 
     if (!path_has(d->FullDllName, L"dlssg")) return;
-    // Whether this is the copy NGX will actually run. With no OTA cache at all
-    // the game's own copy is it; with one, the newest cached build wins and
-    // every other copy that maps is a shadow whose patch results mean nothing.
-    const bool live = g_ota_newest[0] == 0 || path_has(d->FullDllName, g_ota_newest);
+    // A build sitting in the OTA cache is not proof NGX will load it. Avatar:
+    // Frontiers of Pandora has 20318464 cached and maps only its own copy --
+    // the same way GTA V's sl.log says "OTA'd plugins will not be loaded!",
+    // it is the game's decision, not ours to predict. Assuming the cache wins
+    // made the verdict call the copy that actually ran a shadow and tell the
+    // reader to ignore it: the precise failure the verdict exists to prevent,
+    // in the opposite direction.
+    //
+    // So claim nothing until the OTA copy actually maps. Until then a copy is
+    // treated as possibly-live and reports in full; once the OTA build has
+    // been seen, anything else really is redundant and can say so.
+    const bool is_ota = g_ota_newest[0] != 0 && path_has(d->FullDllName, g_ota_newest);
+    if (is_ota) g_ota_mapped = true;
+    const bool shadow = !is_ota && g_ota_mapped;
+    const bool live = !shadow;
     const int n = patch_gates(reinterpret_cast<unsigned char *>(d->DllBase));
     if (n > 0) ++g_gates;
     log_num("  gates rewritten: ", (unsigned)n);
@@ -1008,8 +1147,8 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         const int cb = patch_cubins(reinterpret_cast<unsigned char *>(d->DllBase), live);
         g_cubins_done += cb;
         log_num("  kernels rebuilt from the Blackwell PTX: ", (unsigned)cb);
-        if (!live) {
-            log_line("  => not the copy NGX loads -- ignore this one");
+        if (shadow) {
+            log_line("  => redundant: the OTA build already mapped, this copy is unused");
         } else if (cb != 3) {
             // The failure this exists for is silent in play: the unlock still
             // works, the frames still generate, they are just slower kernels.
@@ -1024,7 +1163,8 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
             log_line("  => gates and cubins OK");
         }
     } else if (n > 0) {
-        log_line(live ? "  => gates OK" : "  => not the copy NGX loads -- ignore this one");
+        log_line(shadow ? "  => redundant: the OTA build already mapped, this copy is unused"
+                        : "  => gates OK");
     }
     log_wide("  in ", d->FullDllName);
 }
@@ -1244,7 +1384,8 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 b[k] = (char)g_ota_newest[i];   // decimal digits, ASCII either way
             b[k] = 0;
             log_line(b);
-            log_line("  (any other dlssg copy that maps is a shadow and is reported as such)");
+            log_line("  (if it maps, copies that map after it are redundant; some games");
+            log_line("   never load the cached build and run their own -- watch which one appears)");
         } else {
             log_line("no OTA cache found; the game's own dlssg copy is the one that runs");
         }
