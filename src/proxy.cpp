@@ -1052,14 +1052,31 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
     // C is what the snippet reports -- our patch -- and A is what survives the
     // plugin's own cap and any driver-profile limit. The three numbers say
     // exactly where the chain stops.
+    // Opt in, because level 2 is not free: it writes several megabytes of sl.log
+    // beside the game every session, and this used to be switched on for
+    // everyone who installed the dll -- our debugging shipped as everyone's
+    // disk writes. Off unless mfg-sllog.txt is there. Kept separate from
+    // mfg-indicator.txt so the on-screen multiplier can stay on without
+    // dragging the log back with it.
     {
-        wchar_t dir[MAX_PATH];
-        DWORD m = GetModuleFileNameW(self, dir, MAX_PATH);
-        while (m > 0 && dir[m - 1] != L'\\') --m;
-        if (m > 1) { dir[m - 1] = 0; SetEnvironmentVariableW(L"SL_LOG_PATH", dir); }
-        SetEnvironmentVariableW(L"SL_LOG_LEVEL", L"2");
-        SetEnvironmentVariableW(L"SL_ENABLE_CONSOLE_LOGGING", L"0");
-        log_line("streamline logging enabled (sl.log lands beside this dll)");
+        wchar_t p[MAX_PATH];
+        int j = 0;
+        while (g_log[j] != 0 && j < MAX_PATH - 1) { p[j] = g_log[j]; ++j; }
+        while (j > 0 && p[j - 1] != 0x5C) --j;
+        const wchar_t *fn = L"mfg-sllog.txt";
+        for (int i = 0; fn[i] != 0; ++i) p[j + i] = fn[i];
+        p[j + 13] = 0;
+        if (GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES) {
+            wchar_t dir[MAX_PATH];
+            DWORD m = GetModuleFileNameW(self, dir, MAX_PATH);
+            while (m > 0 && dir[m - 1] != L'\\') --m;
+            if (m > 1) { dir[m - 1] = 0; SetEnvironmentVariableW(L"SL_LOG_PATH", dir); }
+            SetEnvironmentVariableW(L"SL_LOG_LEVEL", L"2");
+            SetEnvironmentVariableW(L"SL_ENABLE_CONSOLE_LOGGING", L"0");
+            log_line("streamline logging enabled (sl.log lands beside this dll)");
+        } else {
+            SetEnvironmentVariableW(L"SL_LOG_LEVEL", L"0");
+        }
     }
 
     // The snippet carries its own diagnostic overlay, drawn by the
