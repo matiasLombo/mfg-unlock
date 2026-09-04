@@ -73,6 +73,14 @@ static bool g_preset_b = false;
 static bool g_cubins = false;
 static bool g_meter_off = false;
 
+// The id of the newest build in NVIDIA's OTA cache, or empty if there is none.
+// NGX loads that copy and leaves the one in the game folder unused, so a patch
+// failing against the game's own copy is not a failure worth reporting -- and
+// reporting it anyway is exactly how a log cries wolf: DOOM maps both, and the
+// verdict shouted "CUBINS NOT APPLIED" about the image that never executes
+// while the one that does was patched correctly.
+static wchar_t g_ota_newest[64] = {0};
+
 // ---- selecting the interpolation model ---------------------------------
 //
 // The snippet does not have one interpolation network, it has two, and it picks
@@ -231,7 +239,10 @@ static bool elf_fingerprint(const unsigned char *b, size_t len,
     return *text != 0;
 }
 
-static int patch_cubins(unsigned char *base) {
+// `live` says whether this image is the one NGX will run. A shadow copy still
+// gets patched -- it costs nothing and protects against our guess about which
+// copy wins being wrong -- but it does not get to narrate its mismatches.
+static int patch_cubins(unsigned char *base, bool live = true) {
     auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
     auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
@@ -280,10 +291,12 @@ static int patch_cubins(unsigned char *base) {
                             // line is the difference between "rerun
                             // rebuild_cubins.py" and a night of guessing.
                             if (c.orig_size != (unsigned)psz) {
-                                log_line("  ! slot moved, not patched:");
-                                log_line(c.what);
-                                log_num("      snippet has: ", (unsigned)psz);
-                                log_num("      built for:   ", c.orig_size);
+                                if (live) {
+                                    log_line("  ! slot moved, not patched:");
+                                    log_line(c.what);
+                                    log_num("      snippet has: ", (unsigned)psz);
+                                    log_num("      built for:   ", c.orig_size);
+                                }
                                 continue;
                             }
                             if (c.size > psz) continue;                   // must fit
@@ -914,6 +927,10 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
     if (name_is(d->BaseDllName, L"_nvngx.dll"))        { log_line("_nvngx.dll mapped"); return; }
 
     if (!path_has(d->FullDllName, L"dlssg")) return;
+    // Whether this is the copy NGX will actually run. With no OTA cache at all
+    // the game's own copy is it; with one, the newest cached build wins and
+    // every other copy that maps is a shadow whose patch results mean nothing.
+    const bool live = g_ota_newest[0] == 0 || path_has(d->FullDllName, g_ota_newest);
     const int n = patch_gates(reinterpret_cast<unsigned char *>(d->DllBase));
     if (n > 0) ++g_gates;
     log_num("  gates rewritten: ", (unsigned)n);
@@ -924,10 +941,12 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
     // Only the copy NGX actually loads is worth rebuilding, and it is the one
     // whose gates took: the driver-store fallback reports 0 and is never used.
     if (g_cubins && n > 0) {
-        const int cb = patch_cubins(reinterpret_cast<unsigned char *>(d->DllBase));
+        const int cb = patch_cubins(reinterpret_cast<unsigned char *>(d->DllBase), live);
         g_cubins_done += cb;
         log_num("  kernels rebuilt from the Blackwell PTX: ", (unsigned)cb);
-        if (cb != 3) {
+        if (!live) {
+            log_line("  => not the copy NGX loads -- ignore this one");
+        } else if (cb != 3) {
             // The failure this exists for is silent in play: the unlock still
             // works, the frames still generate, they are just slower kernels.
             // Nothing errors, so say the fix out loud rather than leaving a
@@ -941,7 +960,7 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
             log_line("  => gates and cubins OK");
         }
     } else if (n > 0) {
-        log_line("  => gates OK");
+        log_line(live ? "  => gates OK" : "  => not the copy NGX loads -- ignore this one");
     }
     log_wide("  in ", d->FullDllName);
 }
@@ -993,6 +1012,42 @@ FORWARD(DWORD, VerLanguageNameA,          (DWORD a, LPSTR b, DWORD c), (a,b,c))
 FORWARD(DWORD, VerLanguageNameW,          (DWORD a, LPWSTR b, DWORD c), (a,b,c))
 FORWARD(BOOL,  GetFileVersionInfoByHandle,(DWORD a, HANDLE b, DWORD c, LPVOID d), (a,b,c,d))
 
+// Highest-numbered directory under the OTA cache, which is the build NGX picks.
+// Names are decimal ids, so "20318464" beats "20318081"; compared by length
+// first so a shorter number never wins on lexical order alone.
+static void find_newest_ota_build() {
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(
+        L"C:\\ProgramData\\NVIDIA\\NGX\\models\\dlssg\\versions\\*", &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (fd.cFileName[0] == L'.') continue;
+        int n = 0;
+        while (fd.cFileName[n] != 0 && n < 63) {
+            if (fd.cFileName[n] < L'0' || fd.cFileName[n] > L'9') { n = -1; break; }
+            ++n;
+        }
+        if (n <= 0) continue;
+        int cur = 0;
+        while (g_ota_newest[cur] != 0) ++cur;
+        bool better = cur == 0 || n > cur;
+        if (!better && n == cur) {
+            for (int i = 0; i < n; ++i) {
+                if (fd.cFileName[i] != g_ota_newest[i]) {
+                    better = fd.cFileName[i] > g_ota_newest[i];
+                    break;
+                }
+            }
+        }
+        if (better) {
+            for (int i = 0; i < n; ++i) g_ota_newest[i] = fd.cFileName[i];
+            g_ota_newest[n] = 0;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
 // ---------------------------------------------------------------- attach ---
 
 BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
@@ -1002,6 +1057,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
     // Log beside this dll, in the game folder.
     DWORD n = GetModuleFileNameW(self, g_log, MAX_PATH);
     while (n > 0 && g_log[n - 1] != L'\\') --n;
+    find_newest_ota_build();
     const wchar_t *name = L"mfg-unlock.log";
     if (n + 15 < MAX_PATH) {
         for (int i = 0; name[i] != 0; ++i) g_log[n + i] = name[i];
@@ -1115,10 +1171,22 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
         return TRUE;
     }
     PVOID cookie = nullptr;
-    if (reg(0, &on_dll_load, nullptr, &cookie) == 0)
+    if (reg(0, &on_dll_load, nullptr, &cookie) == 0) {
         log_line("armed, waiting for nvngx_dlssg.dll");
-    else
+        if (g_ota_newest[0] != 0) {
+            char b[96] = "NGX will load OTA build ";
+            int k = 24;
+            for (int i = 0; g_ota_newest[i] != 0 && k < 90; ++i, ++k)
+                b[k] = (char)g_ota_newest[i];   // decimal digits, ASCII either way
+            b[k] = 0;
+            log_line(b);
+            log_line("  (any other dlssg copy that maps is a shadow and is reported as such)");
+        } else {
+            log_line("no OTA cache found; the game's own dlssg copy is the one that runs");
+        }
+    } else {
         log_line("failed to arm the loader callback");
+    }
 
     // If something loaded the snippet before this proxy did, catch it anyway.
     HMODULE already = GetModuleHandleW(L"nvngx_dlssg.dll");
