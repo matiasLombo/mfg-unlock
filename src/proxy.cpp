@@ -357,10 +357,15 @@ struct Sample { long long qpc; unsigned img; int meter; unsigned char src; };
 static Sample *g_samples = nullptr;
 static volatile LONG g_nsamples = 0;
 static volatile LONG g_recording = 0;
+// QPC at the start of a recording, so display times can be stored as a small
+// offset rather than a 64-bit absolute.
+static long long g_rec_qpc0 = 0;
 static LONG g_written = 0;
 static const int kMaxSamples = 200000;
 static long long g_qpc_freq = 1;
 static wchar_t g_frames[MAX_PATH];
+static wchar_t g_frames_base[MAX_PATH];   // unnumbered name, per-run suffix added at F9
+static int g_run_no = 0;
 
 typedef int(__stdcall *PFN_Present)(void *, const void *);
 static PFN_Present g_orig_present = nullptr;
@@ -423,8 +428,86 @@ static int __stdcall hk_present(void *queue, const void *info) {
 typedef HRESULT(STDMETHODCALLTYPE *PFN_DXGIPresent)(IDXGISwapChain *, UINT, UINT);
 static PFN_DXGIPresent g_orig_dxgi_present = nullptr;
 
+// ---- pacing the frames ourselves, where nothing else will --------------
+//
+// Streamline gained a pacer in 2.10 and hardware flip metering in 2.11.1.
+// Before that there is nothing to patch and nothing to enable: a game on
+// 2.8.0 hands all four frames of a 4x batch to Present back to back and then
+// waits. Measured in Avatar: 551 batches, 522 of them exactly four presents,
+// 1.14 ms apart inside the batch and up to 41 ms of nothing after it. Four
+// flips inside one refresh interval means three of them are overwritten
+// before the display ever scans them -- the frames are generated, paid for in
+// latency, and thrown away. That is why 2x feels better than 4x there.
+//
+// So pace them here. Not by identifying batches -- once pacing works the
+// batches stop existing and the detector eats itself -- but by holding each
+// present to the running average interval. Average presents/second is set by
+// the game's real framerate times the multiplier and does not change when the
+// spacing does, so the target is stable while the bursts smooth out.
+//
+// Deliberately conservative:
+//   - it releases at 95% of the measured average, so it can never become the
+//     thing limiting throughput,
+//   - it never waits longer than one average interval, so a framerate change
+//     cannot turn into a stall,
+//   - and it does nothing at all unless the native pacer was looked for and
+//     not found. On 2.10+ NVIDIA's own runs and this stays out of the way.
+//
+// Sleep's granularity is milliseconds and the waits here are single-digit
+// milliseconds, so it sleeps on a high-resolution timer for the bulk and
+// spins the last stretch.
+
+static bool g_native_pacer_found = false;  // sticky: one plugin with sites is enough
+// Timestamps on the *natural* clock -- real time minus everything this pacer
+// has slept. Measuring on the real clock fed our own delays back into the
+// average we derive the delays from, a closed loop whose only brake was the
+// 5% margin shrinking it each pass. It converged, but by accident rather than
+// by design, and it hid the burst structure the moment it started working.
+// Subtracting our own waiting restores the cadence the game would have had
+// untouched: the bursts stay visible in it, and the average stops chasing
+// itself.
+
+
+// What the display did with the frames, rather than what we asked it to do.
+// This is the feedback Streamline gets from notifyFrameFlipped and we had no
+// equivalent for: everything above schedules against an inferred average and
+// then never learns whether any of it reached the screen. DXGI keeps the
+// answer on the swapchain -- PresentCount is how many presents the runtime
+// took, PresentRefreshCount which refresh the last one was shown at, and
+// SyncQPCTime when that refresh happened. Four presents inside one refresh
+// interval show up here as a PresentCount that climbs four times while
+// PresentRefreshCount climbs once, which is the difference between frames
+// that were displayed and frames that were paid for and overwritten.
+static void note_display(IDXGISwapChain *sc) {
+    DXGI_FRAME_STATISTICS st{};
+    if (sc == nullptr || FAILED(sc->GetFrameStatistics(&st))) return;
+    const LONG i = g_nsamples - 1;                 // the row note_present just wrote
+    if (i >= 0 && i < kMaxSamples && g_samples != nullptr) {
+        // The refresh count, not the present count, because the two readings
+        // taken so far disagree and this is what separates them. Distinct
+        // SyncQPCTime values came out at 43/s, which either means only one
+        // frame per batch of four ever reaches the glass, or means the driver
+        // updates this structure once per batch and the other three calls read
+        // back a stale copy -- 826 distinct values against ~820 batches is
+        // suspiciously exact. An earlier run measured 1.06 presents per
+        // refresh, which flatly contradicts 43. If the panel refreshes ~165
+        // times a second here, the stats are stale and the frames are fine.
+        g_samples[i].img = (unsigned)st.PresentRefreshCount;
+        // SyncQPCTime, not PresentRefreshCount: when the frame was actually
+        // put on the glass, rather than how many refreshes have gone by. The
+        // question it answers is whether submitting a batch back-to-back also
+        // *shows* it back-to-back, or whether the swapchain queue hands them
+        // to the display one per refresh regardless -- which decides whether
+        // spacing presents at all is worth anything.
+        g_samples[i].meter = (g_qpc_freq > 0 && g_rec_qpc0 != 0)
+                ? (int)((st.SyncQPCTime.QuadPart - g_rec_qpc0) * 1000000 / g_qpc_freq)
+                : 0;
+    }
+}
+
 static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT interval, UINT flags) {
     note_present(nullptr, 2);
+    if (g_recording != 0) note_display(self);
     return g_orig_dxgi_present(self, interval, flags);
 }
 
@@ -630,11 +713,43 @@ static DWORD WINAPI recorder(LPVOID) {
         // D3D12 games never reach the Vulkan branches above, so this is not in
         // the else of anything: both are attempted, and whichever applies wins.
         arm_dxgi_recorder();
+
         const bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
         if (down && !was_down) {
             if (g_recording == 0) {
                 g_nsamples = 0; g_written = 0;
+                // Number each recording instead of overwriting the last one.
+                // Comparing two settings means two runs back to back, and
+                // deleting the file on every F9 threw the first one away --
+                // it cost the pacer-off half of an A/B that had already been
+                // played, and there is no way to get a run back once the
+                // player has moved on.
+                // Built from a stored base each time, never from the last
+                // name -- appending to the previous one would grow
+                // "-1-2-3.csv" run by run.
+                if (g_frames_base[0] != 0) {
+                    int k = 0;
+                    while (g_frames_base[k] != 0 && k < MAX_PATH - 10) {
+                        g_frames[k] = g_frames_base[k]; ++k;
+                    }
+                    while (k > 0 && g_frames[k - 1] != L'.') --k;   // sits after the dot
+                    if (k > 1) {
+                        ++g_run_no;
+                        int d = k - 1;                              // on the dot
+                        g_frames[d++] = L'-';
+                        if (g_run_no >= 10) g_frames[d++] = (wchar_t)(L'0' + g_run_no / 10);
+                        g_frames[d++] = (wchar_t)(L'0' + g_run_no % 10);
+                        g_frames[d++] = L'.';
+                        g_frames[d++] = L'c'; g_frames[d++] = L's'; g_frames[d++] = L'v';
+                        g_frames[d] = 0;
+                    }
+                }
                 DeleteFileW(g_frames);
+                {
+                    LARGE_INTEGER q0;
+                    QueryPerformanceCounter(&q0);
+                    g_rec_qpc0 = q0.QuadPart;
+                }
                 g_recording = 1;
                 log_line("F9: recording started");
             } else {
@@ -798,7 +913,63 @@ static int patch_metering_off(unsigned char *base) {
             }
             if (field != 0) break;
         }
-        if (field == 0) { log_line("    (metering field not located; nothing touched)"); return 0; }
+        if (field == 0) {
+            // Streamline 2.7 through 2.10 phrase this differently and have no
+            // guard byte to flip: they gate the NvAPI call on a mode word
+            // instead. Avatar: Frontiers of Pandora ships 2.8.0, so the patch
+            // reported "field not located" and flip metering stayed on --
+            // confirmed in Streamline's own log, `FlipMetering = 1` and
+            // `Achieved 'good' FC feedback state`, on a card whose display
+            // engine has no multi-frame flip metering at all.
+            //
+            //     mov  r8d, 1              41 B8 01 00 00 00
+            //     mov  r??, rcx            48 8B  modrm(11)
+            //     cmp  eax, r8d            41 3B C0        <- mode == 1 ?
+            //     jne  L                   0F 85 rel32     <- L skips metering
+            //     mov  r9, [rcx+disp32]    4C 8B  ...      <- SetFlipConfig
+            //     test r9, r9              4D 85 C9
+            //     je   L2                  0F 84 rel32
+            //
+            // The mode word is only ever compared here, and r8 is reloaded
+            // before any other use, so turning the immediate into 0 makes the
+            // comparison fail always: the jne is taken every time and
+            // NvAPI_D3D12_SetFlipConfig is never called. One byte, same
+            // opcode, same length -- the rule this file already follows.
+            //
+            // Verified offline before shipping: exactly one site in 2.7.32,
+            // 2.8.0, 2.9.0, 2.10.0 and 2.10.3, and none at all in 2.11.1,
+            // 2.12.0 or 2.13.0, so the builds the block above already handles
+            // stay byte-identical. Runs only when that block found nothing.
+            int alt = 0;
+            size_t where = 0;
+            for (size_t i = 0; i + 34 <= len; ++i) {
+                if (text[i] != 0x41 || text[i + 1] != 0xB8 || text[i + 2] != 0x01 ||
+                    text[i + 3] != 0x00 || text[i + 4] != 0x00 || text[i + 5] != 0x00) continue;
+                if (text[i + 6] != 0x48 || text[i + 7] != 0x8B ||
+                    (text[i + 8] & 0xC0) != 0xC0) continue;
+                if (text[i + 9] != 0x41 || text[i + 10] != 0x3B || text[i + 11] != 0xC0) continue;
+                if (text[i + 12] != 0x0F || text[i + 13] != 0x85) continue;
+                if (text[i + 18] != 0x4C || text[i + 19] != 0x8B) continue;
+                if (text[i + 25] != 0x4D || text[i + 26] != 0x85 || text[i + 27] != 0xC9) continue;
+                if (text[i + 28] != 0x0F || text[i + 29] != 0x84) continue;
+                ++alt;
+                where = i + 2;                     // the immediate byte
+            }
+            if (alt == 1) {
+                unsigned char *imm = text + where;
+                DWORD old = 0;
+                if (VirtualProtect(imm, 1, PAGE_EXECUTE_READWRITE, &old)) {
+                    imm[0] = 0x00;
+                    VirtualProtect(imm, 1, old, &old);
+                    return 1;
+                }
+            } else if (alt > 1) {
+                log_num("    (2.8-era metering gate is ambiguous, sites: ", (unsigned)alt);
+                log_line("     nothing touched)");
+            }
+            log_line("    (metering field not located; nothing touched)");
+            return 0;
+        }
     }
     // NVIDIA's 2026-09-03 build (see patch_enable_cpu_pacer) restructures this
     // whole area, and the anchor above genuinely does not appear in it -- not
@@ -1017,6 +1188,72 @@ static int patch_enable_cpu_pacer(unsigned char *base) {
             log_line("     nothing touched)");
         }
     }
+
+    // Form D, for Streamline 2.8.0 -- the build Avatar: Frontiers of Pandora
+    // ships. None of the three forms above match it, so the proxy reported
+    // "sites: 0" and concluded the build had no pacer at all. It has one:
+    // 2.8.0 carries pacer.cpp with a thread of its own ("The pacer thread is
+    // on the frame %llu, the dlfg thread is on the frame %llu"). Failing to
+    // find the gate is not the same as there being no gate, and on that false
+    // reading the proxy switched on a blocking fallback pacer of its own,
+    // on top of NVIDIA's.
+    //
+    // Here the feedback counter is compared twice around its own increment,
+    // inside a function that returns a bool:
+    //
+    //     cmp  eax, 0x1E          83 F8 1E
+    //     jae  L                  0F 83 rel32
+    //     inc  eax                FF C0
+    //     mov  [rbx+disp32], eax  89 83 disp32
+    //     cmp  eax, 0x1E          83 F8 1E
+    //     jb   T                  0F 82 rel32   -- T is `mov al, 1`
+    //
+    // The second branch jumps straight at the function's true-exit, so the
+    // byte to change is *derived from the displacement* rather than found by
+    // its own signature: T is reached only from here, and `mov al, 1` on its
+    // own is far too common a shape to match safely. `mov al, 0` there pins
+    // the result false, which is the same thing forms A through C achieve by
+    // other means -- the flag never flips mid-game, so the flushAll and DLFG
+    // command-context switch that a flip triggers never happen.
+    //
+    // Not verified: that this bool is the metering flag rather than another
+    // consumer of the same counter. It is inferred from the function calling
+    // NvAPI_D3D12_SetFlipConfig and returning false when that call fails.
+    // Same rule as form C, and for the same reason: exactly one match, or
+    // nothing is touched.
+    if (hits == 0) {
+        size_t found = 0, target = 0;
+        for (size_t i = 0; i + 24 <= len; ++i) {
+            if (text[i] != 0x83 || text[i + 1] != 0xF8 || text[i + 2] != 0x1E) continue;
+            if (text[i + 3] != 0x0F || text[i + 4] != 0x83) continue;      // jae rel32
+            if (text[i + 9] != 0xFF || text[i + 10] != 0xC0) continue;     // inc eax
+            if (text[i + 11] != 0x89) continue;                            // mov [r+d32], eax
+            const unsigned char m = text[i + 12];
+            if ((m & 0xC0) != 0x80 || ((m >> 3) & 7) != 0) continue;       // mod=10, reg=eax
+            if (text[i + 17] != 0x83 || text[i + 18] != 0xF8 ||
+                text[i + 19] != 0x1E) continue;                            // cmp eax, 0x1E
+            if (text[i + 20] != 0x0F || text[i + 21] != 0x82) continue;    // jb rel32
+            int rel = 0;
+            memcpy(&rel, text + i + 22, 4);
+            const size_t t = i + 26 + (size_t)(long long)rel;
+            if (t + 2 > len) continue;
+            if (text[t] != 0xB0 || text[t + 1] != 0x01) continue;          // mov al, 1
+            ++found;
+            target = t;
+        }
+        if (found == 1) {
+            unsigned char *op = text + target;
+            DWORD old = 0;
+            if (VirtualProtect(op, 2, PAGE_EXECUTE_READWRITE, &old)) {
+                op[1] = 0x00;                                  // mov al, 0
+                VirtualProtect(op, 2, old, &old);
+                ++hits;
+            }
+        } else if (found > 1) {
+            log_num("    (2.8.0 counter form is ambiguous, sites: ", (unsigned)found);
+            log_line("     nothing touched)");
+        }
+    }
     return hits;
 }
 
@@ -1111,12 +1348,39 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         // result -- the game-folder copy and NVIDIA's OTA copy have reported
         // different site counts in the same session. An aggregate would average
         // that into a number belonging to neither.
-        log_line(n > 0 ? "  => pacer OK"
-                       : "  => PACER NOT APPLIED -- signature does not match this "
-                         "build; 3x/4x will stutter on a mode change or alt-tab");
+        // Nothing matched here, so this build has no pacer for us to enable --
+        // in 2.8.0 and 2.9 there is not one to enable at all. Rather than leave
+        // the generated frames to go out four-at-a-time, space them in the
+        // present hook. One plugin finding sites is enough to call it off: the
+        // native one is better than ours and they must not both run.
+        // Sticky, and deliberately: this callback runs once per copy of the
+        // plugin that maps, and a game can map two of different vintages. A
+        // plain assignment let the last one win, so a patched OTA copy mapping
+        // before the game's own stale one would leave our pacer switched on in
+        // a process that already had NVIDIA's. One copy with sites is enough
+        // to settle it for the process.
+        if (n > 0) {
+            g_native_pacer_found = true;
+            log_line("  => pacer OK");
+        } else if (!g_native_pacer_found) {
+            // Said "spacing generated frames ourselves" until 2026-09-04,
+            // when the fallback pacer that would have done so was removed: it
+            // never changed anything a player could see, and once a form of
+            // the pacer patch existed for every Streamline family on disk it
+            // could no longer engage at all. What is left is a warning, and it
+            // is worth keeping -- a build with no site here is one nobody has
+            // looked at yet.
+            log_line("  => no pacer site found in this build -- 4x may not be paced");
+        } else {
+            log_line("  => no pacer here, but another copy has one -- leaving it to that");
+        }
         return;
     }
-    if (name_is(d->BaseDllName, L"_nvngx.dll"))        { log_line("_nvngx.dll mapped"); return; }
+    if (name_is(d->BaseDllName, L"_nvngx.dll") || name_is(d->BaseDllName, L"nvngx.dll")) {
+        log_line(name_is(d->BaseDllName, L"nvngx.dll") ? "nvngx.dll mapped"
+                                                       : "_nvngx.dll mapped");
+        return;
+    }
 
     if (!path_has(d->FullDllName, L"dlssg")) return;
     // A build sitting in the OTA cache is not proof NGX will load it. Avatar:
@@ -1149,12 +1413,20 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         log_num("  kernels rebuilt from the Blackwell PTX: ", (unsigned)cb);
         if (shadow) {
             log_line("  => redundant: the OTA build already mapped, this copy is unused");
-        } else if (cb != 3) {
+        } else if (cb == 0) {
+            // Was `cb != 3`, from when the header held one build's three
+            // kernels. It now covers several builds at once and a snippet
+            // takes only its own subset -- Avatar's 310.3 has five where
+            // 310.9 has three -- so a fixed count reported "NOT APPLIED"
+            // directly under a line saying five had been rebuilt. Nothing had
+            // gone wrong; the verdict was measuring the wrong thing. Zero is
+            // the only count that means failure.
+            //
             // The failure this exists for is silent in play: the unlock still
             // works, the frames still generate, they are just slower kernels.
             // Nothing errors, so say the fix out loud rather than leaving a
             // count to be recognised as wrong.
-            log_line("  => CUBINS NOT APPLIED -- unlock still works, the speed-up does not");
+            log_line("  => CUBINS NOT APPLIED -- unlock works, but 4x will judder");
             log_line("     cubins.h was built for dlssg build:");
             log_line(kCubinsBuiltFor);
             log_line("     the snippet loaded here is the path below; if they differ,");
@@ -1276,6 +1548,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
         const wchar_t *fn = L"mfg-frames.csv";
         for (int i = 0; fn[i] != 0; ++i) g_frames[k + i] = fn[i];
         g_frames[k + 14] = 0;
+        for (int i = 0; i < MAX_PATH; ++i) g_frames_base[i] = g_frames[i];
         {
             wchar_t pb[MAX_PATH];
             int j = 0;
@@ -1285,10 +1558,24 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             for (int i = 0; pn[i] != 0; ++i) pb[j + i] = pn[i];
             pb[j + 15] = 0;
             g_preset_b = GetFileAttributesW(pb) != INVALID_FILE_ATTRIBUTES;
-            const wchar_t *cn = L"mfg-cubins.txt";
+            // On by default now, off with mfg-nocubins.txt. It used to be the
+            // other way round, from when this was believed to be a speed
+            // optimisation -- the script that builds these kernels said in so
+            // many words "a speed change, not an image change", and that was
+            // never verified. It is wrong. Avatar: Frontiers of Pandora at 4x
+            // judders on camera movement without these kernels and is fluid
+            // with them, same build, same snippet, same settings, measured
+            // both ways after nine other explanations had been tried and
+            // discarded. The mvec-estimate kernel is the one that matters,
+            // which fits: it is what camera motion gets reconstructed from.
+            //
+            // Left opt-in, it would have reached nobody. The person installing
+            // this has the DLL and nothing else, so the thing that makes 4x
+            // usable cannot sit behind a file they have to create.
+            const wchar_t *cn = L"mfg-nocubins.txt";
             for (int i = 0; cn[i] != 0; ++i) pb[j + i] = cn[i];
-            pb[j + 14] = 0;
-            g_cubins = GetFileAttributesW(pb) != INVALID_FILE_ATTRIBUTES;
+            pb[j + 16] = 0;
+            g_cubins = GetFileAttributesW(pb) == INVALID_FILE_ATTRIBUTES;
             // g_meter_off was declared and read but never assigned, so
             // mfg-nometer.txt did nothing at all.
             const wchar_t *mn = L"mfg-nometer.txt";
