@@ -221,6 +221,15 @@ ANALYSIS.md               how the snippet and sl.dlss_g fit together
 TESTING.md                how to verify a change
 ```
 
+## Support
+
+I'm the sole developer behind mfg-unlock, and I use it myself every day. It'll
+stay maintained for as long as I'm running an RTX 40-series card.
+
+The project is free and open source. If you find it useful, tips on
+[Ko-fi](https://ko-fi.com/gaussprojectile) are welcome and appreciated — no
+pressure at all.
+
 ## Licence
 
 MIT, for the code in this repository. It contains nothing of NVIDIA's: the
