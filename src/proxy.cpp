@@ -85,6 +85,296 @@ static wchar_t g_ota_newest[64] = {0};
 // that makes another copy provably redundant.
 static bool g_ota_mapped = false;
 
+
+// ---- overriding the multiplier the game asked for ------------------------
+//
+// The game picks its own multiplier and we take whatever it picked. To force
+// one, the value has to change before Streamline sees it, and the place it
+// arrives is `slDLSSGSetOptions(viewport, options)`.
+//
+// That function is not a DLL export. Streamline hands it out through
+// `slGetFeatureFunction(feature, name, fn)`, which *is* exported by
+// sl.interposer.dll, so the game asks for it by name and caches the pointer.
+// Hooking the lookup and handing back our own wrapper is enough: one hook, on
+// a public and stable API rather than a byte signature, on a path called when
+// settings change rather than per frame.
+//
+// The struct is versioned and self-identifying, which is what makes writing
+// into it safe. From include/sl_struct.h and include/sl_dlss_g.h:
+//
+//     BaseStructure   next(8) structType(16) structVersion(8)   = 32 bytes
+//     DLSSGOptions    mode @ +32, numFramesToGenerate @ +36
+//
+// and structType is a fixed guid, fac5f1cb-2dfd-4f36-a1e6-3a9e865256c5. It is
+// identical in 2.8.0 (struct version 3) and 2.12.0 (version 5) -- the whole
+// range this proxy patches -- and the guid is checked before a byte is
+// written, so a layout change means the override quietly does nothing instead
+// of corrupting whatever else lives at +36.
+//
+// numFramesToGenerate is frames *generated*, not the multiplier: 1 is 2x,
+// 2 is 3x, 3 is 4x.
+
+static const unsigned char kDlssgOptionsGuid[16] = {
+    0xcb, 0xf1, 0xc5, 0xfa,             // 0xfac5f1cb, little endian
+    0xfd, 0x2d,                         // 0x2dfd
+    0x36, 0x4f,                         // 0x4f36
+    0xa1, 0xe6, 0x3a, 0x9e, 0x86, 0x52, 0x56, 0xc5
+};
+
+// 0 AUTO, 1 OFF, 2..4 = 2x/3x/4x. DLSSGOptions carries the mode at +32
+// (DLSSGMode: eOff 0, eOn 1, eAuto 2) and the generated-frame count at +36,
+// so switching frame generation off is a different field from choosing a
+// multiplier -- writing a count of zero would not do it.
+static volatile LONG g_force_sel = 0;
+static LONG g_saved_mode = 0;
+static volatile LONG g_force_generated = 0;   // kept: 0 = leave the game alone
+static volatile LONG g_last_seen_generated = 0;
+static bool g_override_said = false;
+
+typedef unsigned (*PFN_slDLSSGSetOptions)(const void *, const void *);
+typedef unsigned (*PFN_slGetFeatureFunction)(unsigned, const char *, void *&);
+static PFN_slDLSSGSetOptions g_orig_setoptions = nullptr;
+static PFN_slGetFeatureFunction g_orig_getfeaturefn = nullptr;
+
+// Enough of the last call to make it again ourselves. The header says
+// slDLSSGSetOptions is not thread safe, so the thread the game used is
+// recorded with it and the replay only happens on that same thread -- from
+// the present hook, which the game enters every frame.
+static unsigned char g_opt_copy[256];
+static unsigned char g_vp_copy[64];
+static volatile LONG g_opt_have = 0;
+static volatile LONG g_opt_thread = 0;
+static volatile LONG g_opt_pending = 0;
+
+// Copies up to `want` bytes without running off the end of the page the
+// struct sits in: the real size varies by struct version and reading past a
+// page boundary would fault.
+static unsigned copy_bounded(void *dst, const void *src, unsigned want) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(src, &mbi, sizeof(mbi)) == 0) return 0;
+    const unsigned char *end = (const unsigned char *)mbi.BaseAddress + mbi.RegionSize;
+    unsigned avail = (unsigned)(end - (const unsigned char *)src);
+    if (avail > want) avail = want;
+    memcpy(dst, src, avail);
+    return avail;
+}
+
+// Applies the current selection to a live options struct, returning what was
+// there so the caller can put it back.
+static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
+    *savedMode = *(LONG *)(p + 32);
+    *savedCount = *(LONG *)(p + 36);
+    const LONG sel = g_force_sel;
+    if (sel == 1) {
+        *(LONG *)(p + 32) = 0;                 // DLSSGMode::eOff
+    } else if (sel >= 2) {
+        *(LONG *)(p + 32) = 1;                 // DLSSGMode::eOn
+        *(LONG *)(p + 36) = sel - 1;           // 2x -> 1 generated frame
+    }
+}
+
+static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) {
+    unsigned char *p = (unsigned char *)options;
+    long saved = -1;
+    if (p != nullptr && memcmp(p + 8, kDlssgOptionsGuid, 16) == 0) {
+        LONG *n = (LONG *)(p + 36);
+        g_last_seen_generated = *n;
+        const LONG want = g_force_generated;
+        if (g_force_sel > 0) {
+            // Written in place and put back straight after the call. The
+            // struct belongs to the game and Streamline only reads it for the
+            // duration of the call, so it never observes our value later and
+            // the game never observes it at all.
+            LONG sm, sc;
+            force_into(p, &sm, &sc);
+            saved = sc;
+            g_saved_mode = sm;
+            if (!g_override_said) {
+                g_override_said = true;
+                log_line("multiplier override active");
+            }
+        }
+    }
+    // Remember this call so the next key press can repeat it instead of
+    // waiting for the game to change a setting on its own.
+    if (p != nullptr && memcmp(p + 8, kDlssgOptionsGuid, 16) == 0) {
+        if (copy_bounded(g_opt_copy, options, sizeof(g_opt_copy)) >= 40 &&
+            copy_bounded(g_vp_copy, viewport, sizeof(g_vp_copy)) >= 8) {
+            if (g_opt_have == 0) log_line("override: captured a call to repeat");
+            g_opt_thread = (LONG)GetCurrentThreadId();
+            g_opt_have = 1;
+        }
+    }
+    const unsigned r = g_orig_setoptions(viewport, options);
+    if (saved >= 0) { *(LONG *)(p + 36) = saved; *(LONG *)(p + 32) = g_saved_mode; }
+    return r;
+}
+
+// Replays the last options with the forced count. Called from the present
+// hook and only on the thread the game itself used.
+static void apply_override_now(void) {
+    if (g_opt_pending == 0) return;
+    // Says which precondition is missing instead of returning quietly. Three
+    // can fail and they need different answers: no captured call to replay,
+    // no wrapper installed, or the wrong thread.
+    static int said = 0;
+    if (g_orig_setoptions == nullptr) {
+        if (said != 1) { said = 1; log_line("override: nothing wrapped yet"); }
+        return;
+    }
+    if (g_opt_have == 0) {
+        if (said != 2) {
+            said = 2;
+            log_line("override: the game has not called slDLSSGSetOptions yet,");
+            log_line("  so there is no call to repeat -- change a frame");
+            log_line("  generation setting once to seed it");
+        }
+        return;
+    }
+    if ((LONG)GetCurrentThreadId() != g_opt_thread) {
+        if (said != 3) {
+            said = 3;
+            log_num("override: present runs on another thread, game used ",
+                    (unsigned)g_opt_thread);
+            log_num("  present thread is ", (unsigned)GetCurrentThreadId());
+        }
+        return;
+    }
+    said = 0;
+    g_opt_pending = 0;
+    LONG sm, sc;
+    if (g_force_sel == 0) {                    // AUTO: put the game's own back
+        *(LONG *)(g_opt_copy + 32) = 1;
+        *(LONG *)(g_opt_copy + 36) = g_last_seen_generated;
+    } else {
+        force_into(g_opt_copy, &sm, &sc);
+    }
+    g_orig_setoptions(g_vp_copy, g_opt_copy);
+    log_num("override applied now, selection ", (unsigned)g_force_sel);
+}
+
+static unsigned hk_slGetFeatureFunction(unsigned feature, const char *name, void *&fn) {
+    const unsigned r = g_orig_getfeaturefn(feature, name, fn);
+    if (r == 0 && name != nullptr && fn != nullptr &&
+        strcmp(name, "slDLSSGSetOptions") == 0 &&
+        fn != (void *)&hk_slDLSSGSetOptions) {
+        g_orig_setoptions = (PFN_slDLSSGSetOptions)fn;
+        fn = (void *)&hk_slDLSSGSetOptions;
+        log_line("multiplier override armed (slDLSSGSetOptions wrapped)");
+    }
+    return r;
+}
+
+// The game asks for a frame token once per frame, from its own render thread
+// -- which is the thread that called slDLSSGSetOptions and the only one it is
+// safe to call it from again. With DLSS-G on, Present is Streamline's thread,
+// so the replay cannot happen there; the log said so outright.
+typedef unsigned (*PFN_slGetNewFrameToken)(void *&, const unsigned *);
+static PFN_slGetNewFrameToken g_orig_frametoken = nullptr;
+static void apply_override_now(void);
+
+static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
+    const unsigned r = g_orig_frametoken(tok, idx);
+    apply_override_now();
+    return r;
+}
+
+// ---- who is on the stack when the game dies --------------------------
+//
+// Windows already records the faulting module for every crash, and for
+// Avatar it is always afop.exe itself, always at the same offset -- never
+// this dll, Streamline or the driver. That says the fault happens in the
+// game's code; it does not say whether we are in the call chain that got it
+// there. This walks the return addresses and names the module each belongs
+// to, which answers that directly.
+static LONG CALLBACK crash_report(EXCEPTION_POINTERS *ep) {
+    if (ep == nullptr || ep->ExceptionRecord == nullptr) return EXCEPTION_CONTINUE_SEARCH;
+    const DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    static LONG once = 0;
+    if (InterlockedCompareExchange(&once, 1, 0) != 0) return EXCEPTION_CONTINUE_SEARCH;
+
+    log_line("");
+    log_line("=== access violation, stack below ===");
+    log_num("  at address (low32): ",
+            (unsigned)((ULONG_PTR)ep->ExceptionRecord->ExceptionAddress & 0xFFFFFFFFu));
+    void *frames[24];
+    const USHORT n = RtlCaptureStackBackTrace(0, 24, frames, nullptr);
+    for (USHORT i = 0; i < n; ++i) {
+        HMODULE m = nullptr;
+        wchar_t name[MAX_PATH];
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR)frames[i], &m) && m != nullptr &&
+            GetModuleFileNameW(m, name, MAX_PATH) != 0) {
+            int j = 0; while (name[j] != 0) ++j;
+            while (j > 0 && name[j - 1] != 0x5C) --j;
+            char buf[96]; int k = 0;
+            buf[k++] = ' '; buf[k++] = ' ';
+            for (; name[j] != 0 && k < 80; ++j, ++k) buf[k] = (char)name[j];
+            buf[k] = 0;
+            log_line(buf);
+        } else {
+            log_line("  (unknown module)");
+        }
+    }
+    log_line("=== end of stack ===");
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void arm_multiplier_override(unsigned char *base) {
+    if (base == nullptr || g_orig_getfeaturefn != nullptr) return;
+    void *f = (void *)GetProcAddress((HMODULE)base, "slGetFeatureFunction");
+    if (f == nullptr) { log_line("  ! slGetFeatureFunction not exported here"); return; }
+    // This runs during startup, before whatever other path happens to
+    // initialise MinHook first. Without this the hook failed and said
+    // nothing -- the export was found, the call returned an error code, and
+    // the log looked exactly like a clean run.
+    const MH_STATUS init = MH_Initialize();
+    if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) {
+        log_num("  ! MinHook init failed, code ", (unsigned)init);
+        return;
+    }
+    const MH_STATUS c = MH_CreateHook(f, (void *)&hk_slGetFeatureFunction,
+                                      (void **)&g_orig_getfeaturefn);
+    if (c != MH_OK) {
+        log_num("  ! could not hook slGetFeatureFunction, code ", (unsigned)c);
+        g_orig_getfeaturefn = nullptr;
+        return;
+    }
+    const MH_STATUS e = MH_EnableHook(f);
+    if (e != MH_OK) {
+        log_num("  ! could not enable the slGetFeatureFunction hook, code ", (unsigned)e);
+        g_orig_getfeaturefn = nullptr;
+        return;
+    }
+    log_line("  slGetFeatureFunction hooked");
+
+    // After MH_Initialize, not before it. Putting this above the init made
+    // MH_CreateHook fail with "not initialised" and the else branch swallowed
+    // it -- the same silent-failure shape fixed for slGetFeatureFunction
+    // earlier today, reintroduced in the same function hours later. Every
+    // branch says something now.
+    void *ft = (void *)GetProcAddress((HMODULE)base, "slGetNewFrameToken");
+    if (ft == nullptr) { log_line("  ! slGetNewFrameToken not exported"); return; }
+    const MH_STATUS fc = MH_CreateHook(ft, (void *)&hk_slGetNewFrameToken,
+                                       (void **)&g_orig_frametoken);
+    if (fc != MH_OK) {
+        log_num("  ! could not hook slGetNewFrameToken, code ", (unsigned)fc);
+        g_orig_frametoken = nullptr;
+        return;
+    }
+    const MH_STATUS fe = MH_EnableHook(ft);
+    if (fe != MH_OK) {
+        log_num("  ! could not enable slGetNewFrameToken, code ", (unsigned)fe);
+        g_orig_frametoken = nullptr;
+        return;
+    }
+    log_line("  slGetNewFrameToken hooked (per-frame, game thread)");
+}
+
+#include "overlay.h"
+
 // ---- selecting the interpolation model ---------------------------------
 //
 // The snippet does not have one interpolation network, it has two, and it picks
@@ -508,6 +798,7 @@ static void note_display(IDXGISwapChain *sc) {
 static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT interval, UINT flags) {
     note_present(nullptr, 2);
     if (g_recording != 0) note_display(self);
+    ov_draw(self);
     return g_orig_dxgi_present(self, interval, flags);
 }
 
@@ -532,6 +823,14 @@ static PFN_CSCFH g_orig_cscfh = nullptr;
 static HRESULT STDMETHODCALLTYPE hk_csc(IDXGIFactory *self, IUnknown *dev,
         DXGI_SWAP_CHAIN_DESC *desc, IDXGISwapChain **out) {
     HRESULT hr = g_orig_csc(self, dev, desc, out);
+    // The queue arrives here too. Capturing it only in CreateSwapChainForHwnd
+    // meant the overlay never initialised in a game that uses this older
+    // entry point -- Assassin's Creed Shadows does, and every panel open
+    // logged "init failed" with nothing to submit on.
+    if (SUCCEEDED(hr)) {
+        ov_capture_queue(dev);
+        if (desc != nullptr) ov_attach_window(desc->OutputWindow);
+    }
     if (SUCCEEDED(hr) && out != nullptr) hook_swapchain_present(*out);
     return hr;
 }
@@ -539,6 +838,10 @@ static HRESULT STDMETHODCALLTYPE hk_csc(IDXGIFactory *self, IUnknown *dev,
 static HRESULT STDMETHODCALLTYPE hk_cscfh(void *self, IUnknown *dev, HWND hwnd,
         const void *d1, const void *fs, void *restrict_to, IDXGISwapChain **out) {
     HRESULT hr = g_orig_cscfh(self, dev, hwnd, d1, fs, restrict_to, out);
+    if (SUCCEEDED(hr)) {
+        ov_capture_queue(dev);
+        ov_attach_window(hwnd);
+    }
     if (SUCCEEDED(hr) && out != nullptr) hook_swapchain_present(*out);
     return hr;
 }
@@ -713,6 +1016,45 @@ static DWORD WINAPI recorder(LPVOID) {
         // D3D12 games never reach the Vulkan branches above, so this is not in
         // the else of anything: both are attempted, and whichever applies wins.
         arm_dxgi_recorder();
+
+        {
+            static bool tilde_was = false;
+            const bool t = (GetAsyncKeyState(VK_OEM_3) & 0x8000) != 0;   // `
+            const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+            if (esc && g_ov_visible) {
+                // Escape only closes. The panel swallows it while open, so the
+                // game does not also open its own menu behind us.
+                g_ov_visible = false;
+                log_line("panel: hidden");
+            }
+            if (t && !tilde_was) {
+                g_ov_visible = !g_ov_visible;
+                // Re-armed on every open, not once per process. It switched
+                // itself off after the first good draw, so the crash on a
+                // *second* opening left nothing but "panel: shown" behind.
+                if (g_ov_visible) g_ov_trace = 5;
+                log_line(g_ov_visible ? "panel: shown" : "panel: hidden");
+            }
+            tilde_was = t;
+        }
+                
+        // The click is polled too. The window procedure's job is only to stop
+        // the game seeing it; deciding what it means happens here, next to
+        // every other key, so there is no state shared with the message thread.
+        if (g_ov_visible) {
+            static bool lmb_was = false;
+            const bool lmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            if (lmb && !lmb_was && g_ov_hot >= 0) {
+                g_force_sel = g_ov_hot;
+                g_force_generated = g_ov_hot >= 2 ? g_ov_hot - 1 : 0;
+                g_override_said = false;
+                log_num("panel: frames to generate now ", (unsigned)g_ov_hot);
+            }
+            lmb_was = lmb;
+        }
+
+            // No function-key shortcuts: they collide with what games bind
+            // themselves. The panel is driven by the mouse instead.
 
         const bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
         if (down && !was_down) {
@@ -1318,7 +1660,11 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
 
     // Load order matters for reading the Streamline log afterwards: the plugin
     // caches the maximum at its startup, so it has to come after the snippet.
-    if (name_is(d->BaseDllName, L"sl.interposer.dll")) { log_line("sl.interposer.dll mapped"); return; }
+    if (name_is(d->BaseDllName, L"sl.interposer.dll")) {
+        log_line("sl.interposer.dll mapped");
+        arm_multiplier_override((unsigned char *)d->DllBase);
+        return;
+    }
     // Match the path, not the file name. Streamline prefers a newer plugin from
     // NVIDIA's OTA cache when it finds one -- Cyberpunk 2077 loads
     // ...\NGX\models\sl_dlss_g_0\versions\<id>\files\190_E658703.dll and leaves
@@ -1572,6 +1918,13 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             // Left opt-in, it would have reached nobody. The person installing
             // this has the DLL and nothing else, so the thing that makes 4x
             // usable cannot sit behind a file they have to create.
+            {
+                const wchar_t *pn = L"mfg-panel.txt";
+                for (int i = 0; pn[i] != 0; ++i) pb[j + i] = pn[i];
+                pb[j + 13] = 0;
+                g_ov_enabled = GetFileAttributesW(pb) != INVALID_FILE_ATTRIBUTES;
+                if (g_ov_enabled) log_line("panel enabled (experimental, can crash)");
+            }
             const wchar_t *cn = L"mfg-nocubins.txt";
             for (int i = 0; cn[i] != 0; ++i) pb[j + i] = cn[i];
             pb[j + 16] = 0;
@@ -1663,7 +2016,21 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
     }
     PVOID cookie = nullptr;
     if (reg(0, &on_dll_load, nullptr, &cookie) == 0) {
+        AddVectoredExceptionHandler(0, &crash_report);
         log_line("armed, waiting for nvngx_dlssg.dll");
+
+        // The notification only fires for modules mapped *after* this point.
+        // A game that imports sl.interposer.dll statically -- Avatar does --
+        // already has it loaded by the time a proxy runs, so waiting for the
+        // notification means never arming at all. Halo loads it dynamically
+        // and did fire, which is exactly why this was easy to miss.
+        {
+            HMODULE si = GetModuleHandleW(L"sl.interposer.dll");
+            if (si != nullptr) {
+                log_line("sl.interposer.dll already loaded");
+                arm_multiplier_override((unsigned char *)si);
+            }
+        }
         if (g_ota_newest[0] != 0) {
             char b[96] = "NGX will load OTA build ";
             int k = 24;

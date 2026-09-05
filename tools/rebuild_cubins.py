@@ -201,6 +201,15 @@ def harvest(snippet, ptxas, cuobjdump, tmp, seen, out):
         blob = open(dst, "rb").read()
         if len(blob) > orig[1]:
             continue                      # would not fit; leave NVIDIA's alone
+        # Only kernels we can name. "It fits the slot" was never the whole
+        # criterion -- the fixed table it replaced was a curated allowlist of
+        # three kernels that had been identified and validated on the gpu, and
+        # generalising it shipped two more that nobody can name and nobody has
+        # run. Discovery stays, as a way to find these three in a snippet whose
+        # fingerprints have moved; it does not get to invent new ones.
+        if fp[1] not in KNOWN_BY_SHARED:
+            print(f"  -- skipped {fp}: fits, but not one of the known kernels")
+            continue
         seen.add(key)
         out.append((fp, describe(fp), orig[1], blob))
         took += 1
