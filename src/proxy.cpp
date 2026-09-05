@@ -38,6 +38,28 @@
 // Raw file calls, no CRT: some of this runs under the loader lock.
 
 static wchar_t g_log[MAX_PATH];
+// Set the first time this process actually presents a frame. Games ship
+// helper executables in the same folder -- crash handlers, error reporters --
+// and they load a proxy named version.dll exactly like the game does.
+static volatile LONG g_presents_seen = 0;
+// Set from mfg-debug.txt at startup. Everything it turns on writes to the log
+// from a hot path, so none of it may be on in a shipped build.
+static bool g_debug = false;
+
+// True when a file of this name sits next to the dll. The switches are
+// files rather than a config format because the person installing this has
+// the dll and nothing else, and creating an empty file is the least we can
+// ask of them.
+static bool flag_file(const wchar_t *name) {
+    wchar_t p[MAX_PATH];
+    int j = 0;
+    while (g_log[j] != 0 && j < MAX_PATH - 1) { p[j] = g_log[j]; ++j; }
+    while (j > 0 && p[j - 1] != 0x5C) --j;      // back over the file name
+    int i = 0;
+    while (name[i] != 0 && j + i < MAX_PATH - 1) { p[j + i] = name[i]; ++i; }
+    p[j + i] = 0;                                // terminated by measurement
+    return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
+}
 
 static void log_line(const char *text) {
     if (g_log[0] == 0) return;
@@ -125,6 +147,56 @@ static const unsigned char kDlssgOptionsGuid[16] = {
 // (DLSSGMode: eOff 0, eOn 1, eAuto 2) and the generated-frame count at +36,
 // so switching frame generation off is a different field from choosing a
 // multiplier -- writing a count of zero would not do it.
+// Streamline tells us, in the struct itself, whether eDynamic exists. The
+// version sits at +24 of every sl structure; DLSSGOptions reached version 5
+// in 2.11.1, which is where DLSSGMode::eDynamic and dynamicTargetFrameRate
+// were added. On 2.8.0 (version 3) a mode of 3 is eCount -- an invalid value,
+// not dynamic -- and the struct does not even extend to +116. So the row is
+// offered only when the game's own struct says it can be.
+static volatile LONG g_opts_version = 0;
+// Whether this Streamline knows DLSSGMode::eDynamic at all, decided from the
+// plugin's own image rather than from the first slDLSSGSetOptions the game
+// happens to make. Waiting for that call left the row greyed out on a build
+// that supports it, for as long as the game had not touched its settings.
+static bool g_dynamic_known = false;
+
+// Looks for a literal anywhere in a mapped image.
+static bool image_has(unsigned char *base, const char *needle) {
+    auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+    auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+    const size_t n = nt->OptionalHeader.SizeOfImage;
+    const size_t m = strlen(needle);
+    if (m == 0 || n < m) return false;
+    for (size_t i = 0; i + m <= n; ++i)
+        if (base[i] == (unsigned char)needle[0] && memcmp(base + i, needle, m) == 0)
+            return true;
+    return false;
+}
+// The frame rate eDynamic aims at, in whole frames per second; 0 means
+// "the display's refresh rate", which is what NVIDIA's own app calls Max
+// refresh rate.
+//
+// DLSSGOptions::dynamicTargetFrameRate sits at +116 and is a **float**. The
+// offset was carried in a note with no evidence behind it and the type was
+// never established at all, so both were checked before anything was written
+// there. Two independent sources agree:
+//
+//   * sl.dlss_g.dll reports the value with `movss xmm2, dword ptr [r15+0x30]`
+//     into the vtable slot it uses for floats (+0x30; integers go through
+//     +0x20 and strings through +0x18), under the tag DLSSG.TargetFrameRate.
+//   * NVIDIA's published sl_dlss_g.h declares `float dynamicTargetFrameRate{}`
+//     as the last member added in kStructVersion5, and laying the struct out
+//     from the 32-byte base lands it at exactly 116 with sizeof 120 -- which
+//     also reproduces the two offsets already known to be right, mode at 32
+//     and numFramesToGenerate at 36.
+//
+// This mattered: writing 60 as an integer into a float field gives 8.4e-44,
+// a denormal indistinguishable from zero -- so the wrong guess would have
+// read on screen as a working target while silently meaning "auto".
+static volatile LONG g_dyn_target = 0;
+
 static volatile LONG g_force_sel = 0;
 static LONG g_saved_mode = 0;
 static volatile LONG g_force_generated = 0;   // kept: 0 = leave the game alone
@@ -161,24 +233,130 @@ static unsigned copy_bounded(void *dst, const void *src, unsigned want) {
 
 // Applies the current selection to a live options struct, returning what was
 // there so the caller can put it back.
+// Set when force_into wrote the frame-rate target, so the restore afterwards
+// puts back exactly the fields that were touched and no others.
+static bool g_target_written = false;
+static float g_saved_target = 0.0f;
+// 0 nothing said yet, 1 written, 2 declined. Reset when the target changes so
+// a new value gets its own line, and guarded so this never logs per frame:
+// log_line opens and closes the file on every call.
+static int g_dyn_said = 0;
+
 static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     *savedMode = *(LONG *)(p + 32);
     *savedCount = *(LONG *)(p + 36);
+    g_target_written = false;
     const LONG sel = g_force_sel;
     if (sel == 1) {
         *(LONG *)(p + 32) = 0;                 // DLSSGMode::eOff
+    } else if (sel == 5) {
+        // eDynamic, with our own frame-rate target.
+        // Both checks: the plugin knows the mode, and this particular options
+        // struct is new enough to carry it.
+        if (g_dynamic_known && g_opts_version >= 5) {
+            if (g_dyn_said != 1) {
+                g_dyn_said = 1;
+                log_num("dynamic: eDynamic written, target fps ", (unsigned)g_dyn_target);
+            }
+            *(LONG *)(p + 32) = 3;
+            // Only from version 5: on an older struct the allocation does not
+            // reach this field and writing it would land on whatever follows.
+            g_saved_target = *(float *)(p + 116);
+            *(float *)(p + 116) = (float)g_dyn_target;
+            g_target_written = true;
+        } else if (!g_dynamic_known && g_dyn_said != 2) {
+            g_dyn_said = 2;
+            log_line("dynamic: NOT applied -- this plugin does not know eDynamic");
+        }
+        // An older struct is not a dead end any more: the call is remade from
+        // a version 5 copy in options_for_call.
     } else if (sel >= 2) {
         *(LONG *)(p + 32) = 1;                 // DLSSGMode::eOn
         *(LONG *)(p + 36) = sel - 1;           // 2x -> 1 generated frame
     }
 }
 
+// What the last capture was taken from. A game may call slDLSSGSetOptions
+// once per frame, and re-capturing on every call meant two VirtualQuery
+// syscalls per frame on the game's own render thread -- to copy bytes that had
+// not changed since the frame before. The capture itself is still page-bounded
+// every time it runs; what is skipped is running it when there is nothing new.
+static LONG g_cap_mode = -1, g_cap_cnt = -1;
+static const void *g_cap_vp = nullptr;
+
+// A version 5 DLSSGOptions built from an older one, in memory of ours.
+//
+// Cyberpunk fills in version 3. That struct stops at offset 112: it has no
+// dynamicTargetFrameRate at all, so there was nothing to write and DYNAMIC
+// silently did nothing -- while the log still said "override applied now,
+// selection 5", because that line reports the selection and not what reached
+// the struct.
+//
+// Writing past the end of the game's 112 bytes is not an option. Making the
+// call ourselves is: everything the game filled in is copied verbatim, the
+// two fields it never had are given their defined values, and the version is
+// declared to match what the buffer now actually contains. The plugin reads
+// our 256 bytes; the game never sees them, exactly as with the multiplier
+// override that has been running for days.
+//
+// Only ever used when the plugin itself knows eDynamic, which means 2.11.1 or
+// newer -- announcing version 5 to a plugin that predates it would be a lie
+// in the other direction.
+static unsigned char g_v5_copy[256];
+
+static const void *dynamic_upgrade(const void *options) {
+    const unsigned n = copy_bounded(g_v5_copy, options, 120);
+    if (n < 112) return nullptr;         // not even a complete version 3
+    *(unsigned long long *)(g_v5_copy + 24) = 5;      // structVersion
+    *(LONG *)(g_v5_copy + 32) = 3;                    // DLSSGMode::eDynamic
+    // kStructVersion4. The game predates the field, so it never asked for it;
+    // Boolean is a one-byte enum and eFalse is 0.
+    g_v5_copy[112] = 0;
+    g_v5_copy[113] = 0;
+    g_v5_copy[114] = 0;
+    g_v5_copy[115] = 0;
+    // kStructVersion5.
+    *(float *)(g_v5_copy + 116) = (float)g_dyn_target;
+    return g_v5_copy;
+}
+
+// Which struct to actually hand to Streamline for this call.
+static const void *options_for_call(const void *options) {
+    if (g_force_sel != 5 || !g_dynamic_known || g_opts_version >= 5)
+        return options;
+    const void *up = dynamic_upgrade(options);
+    if (up == nullptr) {
+        if (g_dyn_said != 3) {
+            g_dyn_said = 3;
+            log_line("dynamic: could not read a whole options struct to rebuild");
+        }
+        return options;
+    }
+    if (g_dyn_said != 4) {
+        g_dyn_said = 4;
+        log_num("dynamic: game struct is version ", (unsigned)g_opts_version);
+        log_num("  rebuilt as version 5, target fps ", (unsigned)g_dyn_target);
+    }
+    return up;
+}
+
 static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) {
     unsigned char *p = (unsigned char *)options;
     long saved = -1;
+    LONG raw_mode = -1, raw_cnt = -1;
     if (p != nullptr && memcmp(p + 8, kDlssgOptionsGuid, 16) == 0) {
         LONG *n = (LONG *)(p + 36);
         g_last_seen_generated = *n;
+        // Read before force_into rewrites them: what the *game* asked for is
+        // what decides whether this call is worth capturing again.
+        raw_mode = *(LONG *)(p + 32);
+        raw_cnt = *n;
+        g_opts_version = (LONG)*(unsigned long long *)(p + 24);
+        static bool said_ver = false;
+        if (!said_ver) {
+            said_ver = true;
+            log_num("DLSSGOptions version the game fills in: ", (unsigned)g_opts_version);
+        }
         const LONG want = g_force_generated;
         if (g_force_sel > 0) {
             // Written in place and put back straight after the call. The
@@ -197,16 +375,25 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
     }
     // Remember this call so the next key press can repeat it instead of
     // waiting for the game to change a setting on its own.
-    if (p != nullptr && memcmp(p + 8, kDlssgOptionsGuid, 16) == 0) {
+    if (p != nullptr && memcmp(p + 8, kDlssgOptionsGuid, 16) == 0 &&
+        (g_opt_have == 0 || raw_mode != g_cap_mode || raw_cnt != g_cap_cnt ||
+         viewport != g_cap_vp)) {
         if (copy_bounded(g_opt_copy, options, sizeof(g_opt_copy)) >= 40 &&
             copy_bounded(g_vp_copy, viewport, sizeof(g_vp_copy)) >= 8) {
             if (g_opt_have == 0) log_line("override: captured a call to repeat");
             g_opt_thread = (LONG)GetCurrentThreadId();
             g_opt_have = 1;
+            g_cap_mode = raw_mode;
+            g_cap_cnt = raw_cnt;
+            g_cap_vp = viewport;
         }
     }
-    const unsigned r = g_orig_setoptions(viewport, options);
-    if (saved >= 0) { *(LONG *)(p + 36) = saved; *(LONG *)(p + 32) = g_saved_mode; }
+    const unsigned r = g_orig_setoptions(viewport, options_for_call(options));
+    if (saved >= 0) {
+        *(LONG *)(p + 36) = saved;
+        *(LONG *)(p + 32) = g_saved_mode;
+        if (g_target_written) *(float *)(p + 116) = g_saved_target;
+    }
     return r;
 }
 
@@ -249,7 +436,7 @@ static void apply_override_now(void) {
     } else {
         force_into(g_opt_copy, &sm, &sc);
     }
-    g_orig_setoptions(g_vp_copy, g_opt_copy);
+    g_orig_setoptions(g_vp_copy, options_for_call(g_opt_copy));
     log_num("override applied now, selection ", (unsigned)g_force_sel);
 }
 
@@ -259,6 +446,27 @@ static unsigned hk_slGetFeatureFunction(unsigned feature, const char *name, void
         strcmp(name, "slDLSSGSetOptions") == 0 &&
         fn != (void *)&hk_slDLSSGSetOptions) {
         g_orig_setoptions = (PFN_slDLSSGSetOptions)fn;
+        // Settled here, against the module this pointer came out of, and it
+        // overrides whatever the load-time scan concluded -- in both
+        // directions. A game may map several copies of the plugin and run one
+        // of them; only this one answers the calls we are about to make.
+        HMODULE m = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR)g_orig_setoptions, &m) && m != nullptr) {
+            const bool had = g_dynamic_known;
+            g_dynamic_known = image_has((unsigned char *)m, "sl::DLSSGMode::eDynamic");
+            if (g_dynamic_known != had)
+                log_line(g_dynamic_known
+                    ? "  the plugin actually running does know eDynamic"
+                    : "  the plugin actually running does NOT know eDynamic"
+                      " -- DYNAMIC stays unavailable");
+            // A selection made before this was known does not survive it.
+            if (!g_dynamic_known && g_force_sel == 5) {
+                g_force_sel = 0;
+                g_force_generated = 0;
+            }
+        }
         fn = (void *)&hk_slDLSSGSetOptions;
         log_line("multiplier override armed (slDLSSGSetOptions wrapped)");
     }
@@ -271,12 +479,28 @@ static unsigned hk_slGetFeatureFunction(unsigned feature, const char *name, void
 // so the replay cannot happen there; the log said so outright.
 typedef unsigned (*PFN_slGetNewFrameToken)(void *&, const unsigned *);
 static PFN_slGetNewFrameToken g_orig_frametoken = nullptr;
+static void *g_frametoken_addr = nullptr;      // found at startup, hooked later
 static void apply_override_now(void);
 
 static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     const unsigned r = g_orig_frametoken(tok, idx);
     apply_override_now();
     return r;
+}
+
+// Put in place the first time the player picks something, and never before.
+// A game nobody opens the panel in runs with nothing of ours in its per-frame
+// path, which is how it was before the override existed.
+static void arm_frametoken_hook(void) {
+    if (g_orig_frametoken != nullptr || g_frametoken_addr == nullptr) return;
+    if (MH_CreateHook(g_frametoken_addr, (void *)&hk_slGetNewFrameToken,
+                      (void **)&g_orig_frametoken) != MH_OK ||
+        MH_EnableHook(g_frametoken_addr) != MH_OK) {
+        g_orig_frametoken = nullptr;
+        log_line("override: could not hook slGetNewFrameToken");
+        return;
+    }
+    log_line("override: slGetNewFrameToken hooked now (per-frame, on request)");
 }
 
 // ---- who is on the stack when the game dies --------------------------
@@ -290,7 +514,26 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
 static LONG CALLBACK crash_report(EXCEPTION_POINTERS *ep) {
     if (ep == nullptr || ep->ExceptionRecord == nullptr) return EXCEPTION_CONTINUE_SEARCH;
     const DWORD code = ep->ExceptionRecord->ExceptionCode;
-    if (code != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    // Every exception is named, not only access violations. sl.log reports one
+    // five seconds in, and there was no way to tell whether that is the crash
+    // or the ordinary C++ exception traffic Streamline catches on every run --
+    // 0xE06D7363 is a thrown C++ object and means nothing on its own. Capped,
+    // because log_line opens the file per line.
+    static LONG seen = 0;
+    if (InterlockedIncrement(&seen) <= 6) {
+        log_num("exception seen, code ", (unsigned)code);
+        log_num("  at address (low32) ",
+                (unsigned)((ULONG_PTR)ep->ExceptionRecord->ExceptionAddress & 0xFFFFFFFFu));
+    }
+    // A stack for anything that is not ordinary traffic. Restricting this to
+    // access violations assumed the fault would be one, and heap corruption
+    // (0xC0000374) or a failed fast-fail arrive under different codes and
+    // would have been logged as a bare number with nothing to chase.
+    if (code == 0x40010006u ||        // DBG_PRINTEXCEPTION_C, OutputDebugString
+        code == 0x4001000Au ||        // the wide version of the same
+        code == 0x406D1388u ||        // a thread announcing its name
+        code == 0xE06D7363u)          // a thrown C++ object, caught somewhere
+        return EXCEPTION_CONTINUE_SEARCH;
     static LONG once = 0;
     if (InterlockedCompareExchange(&once, 1, 0) != 0) return EXCEPTION_CONTINUE_SEARCH;
 
@@ -355,22 +598,9 @@ static void arm_multiplier_override(unsigned char *base) {
     // it -- the same silent-failure shape fixed for slGetFeatureFunction
     // earlier today, reintroduced in the same function hours later. Every
     // branch says something now.
-    void *ft = (void *)GetProcAddress((HMODULE)base, "slGetNewFrameToken");
-    if (ft == nullptr) { log_line("  ! slGetNewFrameToken not exported"); return; }
-    const MH_STATUS fc = MH_CreateHook(ft, (void *)&hk_slGetNewFrameToken,
-                                       (void **)&g_orig_frametoken);
-    if (fc != MH_OK) {
-        log_num("  ! could not hook slGetNewFrameToken, code ", (unsigned)fc);
-        g_orig_frametoken = nullptr;
-        return;
-    }
-    const MH_STATUS fe = MH_EnableHook(ft);
-    if (fe != MH_OK) {
-        log_num("  ! could not enable slGetNewFrameToken, code ", (unsigned)fe);
-        g_orig_frametoken = nullptr;
-        return;
-    }
-    log_line("  slGetNewFrameToken hooked (per-frame, game thread)");
+    g_frametoken_addr = (void *)GetProcAddress((HMODULE)base, "slGetNewFrameToken");
+    if (g_frametoken_addr == nullptr) log_line("  ! slGetNewFrameToken not exported");
+    else log_line("  slGetNewFrameToken found (hooked only if an override is picked)");
 }
 
 #include "overlay.h"
@@ -692,6 +922,7 @@ static void note_present(const void *info, unsigned char src) {
 }
 
 static int __stdcall hk_present(void *queue, const void *info) {
+    g_presents_seen = 1;
     note_present(info, 0);
     return g_orig_present(queue, info);
 }
@@ -797,14 +1028,47 @@ static void note_display(IDXGISwapChain *sc) {
 
 static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT interval, UINT flags) {
     note_present(nullptr, 2);
+    g_presents_seen = 1;
     if (g_recording != 0) note_display(self);
     ov_draw(self);
     return g_orig_dxgi_present(self, interval, flags);
 }
 
+// Where the detoured Present lives, so an unload of that module can be
+// recognised for what it is.
+static unsigned char *g_present_mod = nullptr;
+static size_t g_present_modsize = 0;
+
 static void hook_swapchain_present(void *sc) {
     if (sc == nullptr || g_orig_dxgi_present != nullptr) return;
     void **vt = *reinterpret_cast<void ***>(sc);
+    {
+        HMODULE m = nullptr;
+        wchar_t nm[MAX_PATH];
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR)vt[8], &m) && m != nullptr &&
+            GetModuleFileNameW(m, nm, MAX_PATH) != 0) {
+            int j = 0;
+            while (nm[j] != 0) ++j;
+            while (j > 0 && nm[j - 1] != 0x5C) --j;
+            char buf[96];
+            int k = 0;
+            buf[k++] = ' '; buf[k++] = ' ';
+            const char *lead = "present lives in ";
+            for (int i = 0; lead[i] != 0; ++i) buf[k++] = lead[i];
+            for (; nm[j] != 0 && k < 90; ++j, ++k) buf[k] = (char)nm[j];
+            buf[k] = 0;
+            log_line(buf);
+            g_present_mod = (unsigned char *)m;
+            auto *dos = (IMAGE_DOS_HEADER *)m;
+            if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
+                auto *nt = (IMAGE_NT_HEADERS *)(g_present_mod + dos->e_lfanew);
+                if (nt->Signature == IMAGE_NT_SIGNATURE)
+                    g_present_modsize = nt->OptionalHeader.SizeOfImage;
+            }
+        }
+    }
     if (MH_CreateHook(vt[8], reinterpret_cast<void *>(&hk_dxgi_present),
                       reinterpret_cast<void **>(&g_orig_dxgi_present)) == MH_OK &&
         MH_EnableHook(vt[8]) == MH_OK)
@@ -828,8 +1092,8 @@ static HRESULT STDMETHODCALLTYPE hk_csc(IDXGIFactory *self, IUnknown *dev,
     // entry point -- Assassin's Creed Shadows does, and every panel open
     // logged "init failed" with nothing to submit on.
     if (SUCCEEDED(hr)) {
-        ov_capture_queue(dev);
         if (desc != nullptr) ov_attach_window(desc->OutputWindow);
+        if (out != nullptr) ov_pair_queue(*out, dev);
     }
     if (SUCCEEDED(hr) && out != nullptr) hook_swapchain_present(*out);
     return hr;
@@ -839,8 +1103,8 @@ static HRESULT STDMETHODCALLTYPE hk_cscfh(void *self, IUnknown *dev, HWND hwnd,
         const void *d1, const void *fs, void *restrict_to, IDXGISwapChain **out) {
     HRESULT hr = g_orig_cscfh(self, dev, hwnd, d1, fs, restrict_to, out);
     if (SUCCEEDED(hr)) {
-        ov_capture_queue(dev);
         ov_attach_window(hwnd);
+        if (out != nullptr) ov_pair_queue(*out, dev);
     }
     if (SUCCEEDED(hr) && out != nullptr) hook_swapchain_present(*out);
     return hr;
@@ -961,7 +1225,11 @@ static DWORD WINAPI recorder(LPVOID) {
     bool was_down = false;
     int ticks = 0;
     for (;;) {
-        Sleep(50);
+        // Faster while the panel is up: WM_INPUT is delivered to the raw
+        // input window on this thread, so the pointer only moves as often as
+        // this pumps.
+        ov_pump_cursor();
+        Sleep(g_ov_visible ? 4 : 50);
         if (g_orig_present == nullptr) {
             HMODULE vk = GetModuleHandleW(L"sl.interposer.dll");
             if (vk != nullptr && g_samples != nullptr) {
@@ -976,7 +1244,6 @@ static DWORD WINAPI recorder(LPVOID) {
                     g_orig_present = nullptr;
                 }
             }
-            continue;
         }
         // The interposer hook above sees one present per rendered frame. The
         // generated ones go straight to the loader, so hook that too and let
@@ -1017,22 +1284,36 @@ static DWORD WINAPI recorder(LPVOID) {
         // the else of anything: both are attempted, and whichever applies wins.
         arm_dxgi_recorder();
 
-        {
+        if (g_presents_seen) {
             static bool tilde_was = false;
             const bool t = (GetAsyncKeyState(VK_OEM_3) & 0x8000) != 0;   // `
             const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
             if (esc && g_ov_visible) {
-                // Escape only closes. The panel swallows it while open, so the
-                // game does not also open its own menu behind us.
-                g_ov_visible = false;
-                log_line("panel: hidden");
+                // Escape backs out one step at a time: an edit in progress
+                // first, the panel only once there is nothing else to leave.
+                // The panel swallows the key either way, so the game does not
+                // open its own menu behind us.
+                if (g_ov_editing) {
+                    ov_edit_cancel();
+                } else {
+                    g_ov_visible = false;
+                    ov_grab_cursor(false);
+                    log_line("panel: hidden");
+                }
             }
             if (t && !tilde_was) {
+                // The same key opens and closes. It used to step through the
+                // rows while open, which meant the only way to leave the panel
+                // was Escape and the only way to reach a row with the keyboard
+                // was to walk past the others, applying each one on the way.
+                // The mouse selects; the key is a door.
                 g_ov_visible = !g_ov_visible;
                 // Re-armed on every open, not once per process. It switched
                 // itself off after the first good draw, so the crash on a
                 // *second* opening left nothing but "panel: shown" behind.
-                if (g_ov_visible) g_ov_trace = 5;
+                if (g_ov_visible && g_debug) g_ov_trace = 5;
+                if (!g_ov_visible) ov_edit_cancel();
+                ov_grab_cursor(g_ov_visible);
                 log_line(g_ov_visible ? "panel: shown" : "panel: hidden");
             }
             tilde_was = t;
@@ -1043,20 +1324,89 @@ static DWORD WINAPI recorder(LPVOID) {
         // every other key, so there is no state shared with the message thread.
         if (g_ov_visible) {
             static bool lmb_was = false;
+            static bool dragging = false;
             const bool lmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-            if (lmb && !lmb_was && g_ov_hot >= 0) {
-                g_force_sel = g_ov_hot;
-                g_force_generated = g_ov_hot >= 2 ? g_ov_hot - 1 : 0;
-                g_override_said = false;
-                log_num("panel: frames to generate now ", (unsigned)g_ov_hot);
+            const bool onslider = g_ov_hot == kHotSlider;
+            const bool onvalue  = g_ov_hot == kHotValue;
+            const bool row_ok = g_ov_hot != 5 || g_dynamic_known;
+
+            if (lmb && !lmb_was) {
+                if (onvalue) {
+                    ov_edit_begin();          // click the box, type a number
+                } else {
+                    // Any other click ends an edit rather than abandoning it
+                    // half-finished: what was typed is what was meant.
+                    const int typed = ov_edit_commit();
+                    if (typed >= 0 && typed != g_dyn_target) {
+                        g_dyn_target = typed;
+                        g_dyn_said = 0;
+                        arm_frametoken_hook();
+                        g_opt_pending = 1;
+                        log_num("panel: dynamic target typed ", (unsigned)typed);
+                    }
+                    if (onslider) {
+                        dragging = true;
+                    } else if (g_ov_hot >= 0 && g_ov_hot < kPanRows && row_ok) {
+                        g_force_sel = g_ov_hot;
+                        g_force_generated = g_ov_hot >= 2 ? g_ov_hot - 1 : 0;
+                        arm_frametoken_hook();
+                        g_opt_pending = 1;
+                        g_override_said = false;
+                        log_num("panel: frames to generate now ", (unsigned)g_ov_hot);
+                    }
+                }
+            }
+            if (!lmb) dragging = false;
+            // Held: the value follows the pointer, but only lands on a stop,
+            // so a drag produces frame rates anyone would actually pick rather
+            // than whatever pixel the hand stopped on.
+            if (dragging) {
+                const LONG v = (LONG)kStops[ov_stop_at(g_ov_mx)];
+                if (v != g_dyn_target) {
+                    g_dyn_target = v;
+                    g_dyn_said = 0;
+                    arm_frametoken_hook();
+                    g_opt_pending = 1;
+                    log_num("panel: dynamic target now ", (unsigned)v);
+                }
             }
             lmb_was = lmb;
+
+            // Typing, polled like every other key here. A game that never
+            // delivers WM_CHAR -- and one using raw input may not -- cannot
+            // stop this, which is the same reason the rest of the panel polls.
+            if (g_ov_editing) {
+                static bool dwas[13] = { false };
+                static const int vks[13] = {
+                    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+                    VK_BACK, VK_RETURN, VK_DECIMAL };
+                for (int k = 0; k < 12; ++k) {
+                    const bool dn = (GetAsyncKeyState(vks[k]) & 0x8000) != 0 ||
+                                    (k < 10 && (GetAsyncKeyState(VK_NUMPAD0 + k) & 0x8000) != 0);
+                    if (dn && !dwas[k]) {
+                        if (k < 10)               ov_edit_digit((char)('0' + k));
+                        else if (vks[k] == VK_BACK) ov_edit_back();
+                        else {
+                            const int typed = ov_edit_commit();
+                            if (typed >= 0 && typed != g_dyn_target) {
+                                g_dyn_target = typed;
+                                g_dyn_said = 0;
+                                arm_frametoken_hook();
+                                g_opt_pending = 1;
+                                log_num("panel: dynamic target typed ", (unsigned)typed);
+                            }
+                        }
+                    }
+                    dwas[k] = dn;
+                }
+            }
         }
 
             // No function-key shortcuts: they collide with what games bind
             // themselves. The panel is driven by the mouse instead.
 
-        const bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
+        const bool down = g_presents_seen &&
+                          (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
         if (down && !was_down) {
             if (g_recording == 0) {
                 g_nsamples = 0; g_written = 0;
@@ -1101,6 +1451,13 @@ static DWORD WINAPI recorder(LPVOID) {
             }
         }
         was_down = down;
+        // The raw input window lives on this thread, so WM_INPUT arrives
+        // only while this pumps. Stop pumping and the pointer freezes.
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
         if (++ticks >= 20) { ticks = 0; if (g_recording) write_samples(); }
     }
     return 0;
@@ -1656,7 +2013,25 @@ static void log_wide(const char *label, const UNICODE_STRING *s) {
 }
 
 static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
-    if (reason != 1 || d == nullptr) return;                 // 1 = LDR_DLL_NOTIFICATION_REASON_LOADED
+    if (d == nullptr) return;
+    if (reason == 2) {                                       // UNLOADED
+        // Only the ones that can carry something of ours. A detour outlives
+        // the module it points into, and calling it afterwards is a jump into
+        // freed memory -- which is what an exception seconds after
+        // `Feature 'kFeatureDLSS_G' unloaded` would look like.
+        if (path_has(d->FullDllName, L"sl.") ||
+            path_has(d->FullDllName, L"sl_") ||
+            path_has(d->FullDllName, L"nvngx")) {
+            log_wide("module unloaded: ", d->FullDllName);
+            if (g_present_mod != nullptr &&
+                (unsigned char *)d->DllBase == g_present_mod) {
+                log_line("  !! this is the module our Present detour lives in");
+                log_line("  !! the next Present would jump into freed memory");
+            }
+        }
+        return;
+    }
+    if (reason != 1) return;                                 // 1 = LOADED
 
     // Load order matters for reading the Streamline log afterwards: the plugin
     // caches the maximum at its startup, so it has to come after the snippet.
@@ -1679,6 +2054,12 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         log_wide("  in ", d->FullDllName);
         const int n = patch_enable_cpu_pacer(reinterpret_cast<unsigned char *>(d->DllBase));
         g_outputs_patched += n;
+        if (!g_dynamic_known &&
+            image_has((unsigned char *)d->DllBase, "sl::DLSSGMode::eDynamic")) {
+            g_dynamic_known = true;
+            log_line("  this copy knows DLSSGMode::eDynamic (confirmed later"
+                     " against the copy that runs)");
+        }
         log_num("  CPU pacer enabled, sites: ", (unsigned)n);
         if (g_meter_off) {
             const int mo = patch_metering_off(reinterpret_cast<unsigned char *>(d->DllBase));
@@ -1873,6 +2254,7 @@ static void find_newest_ota_build() {
 // ---------------------------------------------------------------- attach ---
 
 BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
+    if (g_ov_self == nullptr) g_ov_self = self;
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(self);
 
@@ -1896,14 +2278,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
         g_frames[k + 14] = 0;
         for (int i = 0; i < MAX_PATH; ++i) g_frames_base[i] = g_frames[i];
         {
-            wchar_t pb[MAX_PATH];
-            int j = 0;
-            while (g_frames[j] != 0 && j < MAX_PATH - 1) { pb[j] = g_frames[j]; ++j; }
-            while (j > 0 && pb[j - 1] != 0x5C) --j;
-            const wchar_t *pn = L"mfg-presetb.txt";
-            for (int i = 0; pn[i] != 0; ++i) pb[j + i] = pn[i];
-            pb[j + 15] = 0;
-            g_preset_b = GetFileAttributesW(pb) != INVALID_FILE_ATTRIBUTES;
+            g_preset_b = flag_file(L"mfg-presetb.txt");
             // On by default now, off with mfg-nocubins.txt. It used to be the
             // other way round, from when this was believed to be a speed
             // optimisation -- the script that builds these kernels said in so
@@ -1918,23 +2293,17 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             // Left opt-in, it would have reached nobody. The person installing
             // this has the DLL and nothing else, so the thing that makes 4x
             // usable cannot sit behind a file they have to create.
-            {
-                const wchar_t *pn = L"mfg-panel.txt";
-                for (int i = 0; pn[i] != 0; ++i) pb[j + i] = pn[i];
-                pb[j + 13] = 0;
-                g_ov_enabled = GetFileAttributesW(pb) != INVALID_FILE_ATTRIBUTES;
-                if (g_ov_enabled) log_line("panel enabled (experimental, can crash)");
-            }
-            const wchar_t *cn = L"mfg-nocubins.txt";
-            for (int i = 0; cn[i] != 0; ++i) pb[j + i] = cn[i];
-            pb[j + 16] = 0;
-            g_cubins = GetFileAttributesW(pb) == INVALID_FILE_ATTRIBUTES;
+            g_debug = flag_file(L"mfg-debug.txt");
+            // On by default, off with mfg-nopanel.txt -- the same reasoning
+            // as the cubins. The person installing this has the dll and
+            // nothing else, so anything behind a file they have to create
+            // reaches nobody.
+            g_ov_enabled = !flag_file(L"mfg-nopanel.txt");
+            log_line(g_ov_enabled ? "panel on (` opens it)" : "panel off");
+            g_cubins = !flag_file(L"mfg-nocubins.txt");
             // g_meter_off was declared and read but never assigned, so
             // mfg-nometer.txt did nothing at all.
-            const wchar_t *mn = L"mfg-nometer.txt";
-            for (int i = 0; mn[i] != 0; ++i) pb[j + i] = mn[i];
-            pb[j + 15] = 0;
-            g_meter_off = GetFileAttributesW(pb) != INVALID_FILE_ATTRIBUTES;
+            g_meter_off = flag_file(L"mfg-nometer.txt");
         }
         LARGE_INTEGER f; QueryPerformanceFrequency(&f);
         g_qpc_freq = f.QuadPart ? f.QuadPart : 1;
@@ -1986,25 +2355,20 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
     // turns it on. This is NVIDIA's instrumentation, not ours: no patch, no
     // hook, nothing of ours in the render path. Opt in by dropping
     // mfg-indicator.txt beside this dll.
-    {
+    if (flag_file(L"mfg-indicator.txt")) {
         wchar_t p[MAX_PATH];
         int j = 0;
         while (g_log[j] != 0 && j < MAX_PATH - 1) { p[j] = g_log[j]; ++j; }
         while (j > 0 && p[j - 1] != 0x5C) --j;
-        const wchar_t *fn = L"mfg-indicator.txt";
-        for (int i = 0; fn[i] != 0; ++i) p[j + i] = fn[i];
-        p[j + 17] = 0;
-        if (GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES) {
-            SetEnvironmentVariableW(L"__NGX_SHOW_INDICATOR", L"1024");
-            SetEnvironmentVariableW(L"__NGX_LOG_LEVEL", L"2");
-            if (j > 1) {
-                wchar_t d[MAX_PATH];
-                for (int i = 0; i < j - 1; ++i) d[i] = p[i];
-                d[j - 1] = 0;
-                SetEnvironmentVariableW(L"__NGX_LOG_PATH_OVERRIDE", d);
-            }
-            log_line("NGX indicator on (__NGX_SHOW_INDICATOR=1024) + snippet log");
+        SetEnvironmentVariableW(L"__NGX_SHOW_INDICATOR", L"1024");
+        SetEnvironmentVariableW(L"__NGX_LOG_LEVEL", L"2");
+        if (j > 1) {
+            wchar_t d[MAX_PATH];
+            for (int i = 0; i < j - 1; ++i) d[i] = p[i];
+            d[j - 1] = 0;
+            SetEnvironmentVariableW(L"__NGX_LOG_PATH_OVERRIDE", d);
         }
+        log_line("NGX indicator on (__NGX_SHOW_INDICATOR=1024) + snippet log");
     }
 
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
@@ -2016,7 +2380,10 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
     }
     PVOID cookie = nullptr;
     if (reg(0, &on_dll_load, nullptr, &cookie) == 0) {
-        AddVectoredExceptionHandler(0, &crash_report);
+        if (g_debug) {
+            AddVectoredExceptionHandler(0, &crash_report);
+            log_line("debug: access violations will be logged with a stack");
+        }
         log_line("armed, waiting for nvngx_dlssg.dll");
 
         // The notification only fires for modules mapped *after* this point.
