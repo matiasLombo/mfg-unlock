@@ -30,7 +30,7 @@ and other titles ship EAC or their own. Loading this into a game with anti-cheat
 active — GTA Online especially — can get an account banned. Single-player only,
 and check what your game runs before you install anything.
 
-**Tested on one machine.** One RTX 4070 Ti, driver 616.56, two games, one person.
+**Tested on one machine.** One RTX 4070 Ti, driver 616.56, four games, one person.
 Other Ada cards should work — the architecture gate and every signature are the
 same across the family — but "should" is not "does". Nothing here has been seen
 on a 4060, 4080 or 4090.
