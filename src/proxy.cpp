@@ -520,6 +520,75 @@ static long long g_qpc_freq = 1;   // set in DllMain
 
 // ---- the sub-frame count, made writable ---------------------------------
 
+static volatile unsigned char *g_wic = nullptr;         // the count in the work item
+static bool g_wic_mode = false;                         // mfg-wic.txt
+static bool g_slowalt = false;                          // mfg-slowalt.txt
+static int  g_slowalt_len = 120;                        // frames per block
+
+// The count in the work item, rather than the comparison that reads it.
+//
+// Patching the loop's bound leaves every other consumer reading the real count
+// out of the structure, and they then disagree by construction. The present
+// index is built as `frame*6 + [r13+4]`, so with a bound of 2 the loop makes
+// two sub-frames while the index is still computed from the game's 1: the
+// second one lands on an index the plugin has already passed and is thrown
+// away as "Out of order frame - will skip the present". That is where 530 such
+// skips per run come from -- a stock run has none -- and why a bound of 2
+// measured as 1.85x rather than 3.0x. It was generating two frames and
+// delivering one.
+//
+// So write the field instead and leave every comparison alone. The bound, the
+// present index and the metering all read the same number because it is the
+// same number.
+//
+//   8B 42 04            mov eax, [rdx+4]      -> 6A NN   push NN
+//                                                58      pop rax
+//   41 B8 C0 00 00 00   mov r8d, 0xc0            (unchanged)
+//   89 41 04            mov [rcx+4], eax         (unchanged)
+//
+// Three bytes are rewritten; the twelve are only what the signature matches on.
+// push imm8 sign-extends into rax, so NN under 0x80 arrives zero-extended, and
+// set_count_now clamps to 0..5. `8B 42 04` occurs exactly once in the whole
+// file, and the found != 1 guard below refuses to write anything otherwise.
+//
+// The cost of using the stack here: between the push and the pop, RSP is eight
+// below what this function's unwind information describes, so a stack walk that
+// lands in that two-instruction window -- a profiler, a crash handler, an
+// overlay -- would unwind wrongly. The window is two instructions with no call
+// in it, and no encoding of "put a byte we own into eax" fits in three bytes
+// without touching the stack, so this is a known and accepted risk rather than
+// an oversight.
+static int patch_work_item_count(unsigned char *text, size_t len) {
+    size_t found = 0, at = 0;
+    for (size_t i = 0; i + 12 <= len; ++i) {
+        if (text[i] != 0x8B || text[i+1] != 0x42 || text[i+2] != 0x04) continue;
+        if (text[i+3] != 0x41 || text[i+4] != 0xB8 || text[i+5] != 0xC0) continue;
+        if (text[i+6] || text[i+7] || text[i+8]) continue;
+        if (text[i+9] != 0x89 || text[i+10] != 0x41 || text[i+11] != 0x04) continue;
+        ++found;
+        at = i;
+    }
+    if (found != 1) {
+        log_num("  ! work item count site not unique, sites: ", (unsigned)found);
+        return 0;
+    }
+    unsigned char *q = text + at;
+    DWORD old = 0;
+    // NN is rewritten every frame, so the page stays writable for the life of
+    // the process. VirtualProtect works at page granularity, so this opens the
+    // whole 4 KB code page and there is no narrower way to do it; restoring the
+    // old protection first and reopening immediately afterwards would only look
+    // tidier. Said plainly rather than hidden behind a restore that does not
+    // hold.
+    if (!VirtualProtect(q, 3, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    q[0] = 0x6A;    // push imm8
+    q[1] = 1;       // NN
+    q[2] = 0x58;    // pop rax
+    g_wic = q + 1;
+    log_line("  work item count is ours (bound, index and metering agree)");
+    return 1;
+}
+
 static volatile unsigned char *g_count_imm = nullptr;   // the NN byte, in .text
 static volatile unsigned char *g_count_imm2 = nullptr;  // the same, in the entry guard
 static volatile unsigned char *g_count_imm3 = nullptr;  // and in the metering
@@ -881,6 +950,29 @@ static int patch_subframe_count(unsigned char *base) {
     }
     if (text == nullptr) return 0;
 
+    g_wic_mode = flag_file(L"mfg-wic.txt");
+    if (g_wic_mode) {
+        // The comparison patches are exactly what this replaces; leaving
+        // them in would put the bound back out of step with the field.
+        if (patch_work_item_count(text, len) == 0) {
+            // Nothing downstream reports this on its own: set_count_now would
+            // simply do nothing, the run would execute at the fixed API ceiling,
+            // and the only outward sign would be the absence of the "fractional:"
+            // blocks. That is the silent-regression shape a moved signature
+            // produces after a driver update, so it is said out loud here.
+            log_line("  ! fractional multiplier NOT active: the count site moved");
+            return 0;
+        }
+        // And the flag that says whether this frame interpolates at all. A
+        // count of zero makes the loop produce nothing while the plugin still
+        // believes it is generating, and the frame is then presented down a
+        // path with nothing to present: 88 rendered against 81 presented at
+        // 1.50x, losing the real frame rather than merely not adding one.
+        patch_generation_flag(base, text, len);
+        return 1;
+    }
+
+
     size_t found = 0, at = 0;
     for (size_t i = 0; i + 8 <= len; ++i) {
         if (text[i] != 0xFF || text[i + 1] != 0xC7) continue;   // inc edi
@@ -1135,6 +1227,20 @@ static LONG loop_bound_for(LONG n) {
 }
 
 static void set_count_now(LONG n) {
+    if (g_wic_mode) {
+        // n is generated frames, which is what the field holds: the multiplier
+        // is n + 1.
+        if (g_wic != nullptr) {
+            if (n < 0) n = 0;
+            if (n > 5) n = 5;
+            *g_wic = (unsigned char)n;
+            // Nothing generated means the ordinary present path -- the one that
+            // actually presents the real frame.
+            if (g_gen_flag != nullptr) *g_gen_flag = (unsigned char)(n > 0 ? 1 : 0);
+            g_count_live = n;
+        }
+        return;
+    }
     if (g_count_imm == nullptr) return;
     if (n < 0) n = 0;                    // zero is legal: the loop is skipped
     if (n > 5) n = 5;                    // the plugin's own ceiling
@@ -1179,6 +1285,9 @@ static void set_count_now(LONG n) {
 // and that churn is what a player feels as stutter.
 static double g_token_dt = 0.0;       // the averaged frame time, in seconds
 static double g_last_dt = 0.0;        // and the most recent one, for the spread
+static double g_win_time = 0.0;       // elapsed in the current counting window
+static int    g_win_frames = 0;       // rendered frames in it
+static double g_rendered_fps = 0.0;   // frames / elapsed, unbiased
 static double g_token_fps = 0.0;      // and the rate that follows from it
 static double g_base_fps = 0.0;       // that, divided by the multiplier in force
 static long long g_last_token_qpc = 0;
@@ -1188,6 +1297,31 @@ static void note_rendered_frame(void) {
     QueryPerformanceCounter(&t);
     if (g_last_token_qpc != 0 && g_qpc_freq > 0) {
         const double dt = (double)(t.QuadPart - g_last_token_qpc) / (double)g_qpc_freq;
+        // Frames counted over elapsed time, instead of an average of the gaps
+        // that survived a filter.
+        //
+        // The game calls slGetNewFrameToken about seven times per rendered
+        // frame -- 3780 calls against 540 frames in a fixed-length run -- in a
+        // burst, and only one of those gaps clears the 2 ms floor below.
+        // Averaging the survivors converges not to the frame period P but to P
+        // minus the span of the burst, so the reported rate is always high: at
+        // 2.25x it read 58 where the ratio implies 54.5, a burst span near
+        // 1.1 ms. That six percent is the whole of the "0.94" that appeared in
+        // every measurement and was taken for a systematic cost of generation.
+        //
+        // Counting one frame per burst and dividing by the total elapsed time,
+        // short gaps included, has no such bias: every microsecond of the
+        // window is in the denominator and every frame in the numerator.
+        if (dt > 0.0 && dt < 0.200) {
+            g_win_time += dt;
+            if (dt > 0.002) ++g_win_frames;
+            if (g_win_frames >= 180 && g_win_time > 0.0) {
+                g_rendered_fps = (double)g_win_frames / g_win_time;
+                g_win_frames = 0;
+                g_win_time = 0.0;
+                log_num("measured: rendered fps ", (unsigned)(int)(g_rendered_fps + 0.5));
+            }
+        }
         // 2 ms to 200 ms. Outside that it is a load screen, a breakpoint or a
         // wrapped counter, and feeding it to the average would move the
         // multiplier for a reason that has nothing to do with the game.
@@ -1298,7 +1432,8 @@ static void fractional_tick(void) {
         g_token_fps = 0.0;        // the previous mode's readings say nothing
         g_token_dt = 0.0;
     }
-    if (g_force_sel != kSelDynamic || g_count_imm == nullptr) return;
+    if (g_force_sel != kSelDynamic) return;
+    if (g_wic_mode ? (g_wic == nullptr) : (g_count_imm == nullptr)) return;
     if (g_base_fps <= 1.0) return;
 
     // The multiplier, straight. No target to chase and so no loop to settle:
@@ -1336,7 +1471,26 @@ static void fractional_tick(void) {
     static int pos = 0;
     static int hi_frames = 0;
     if (pos == 0) {
-        g_frac_acc += frac * (double)kFracPeriod;
+        if (g_slowalt) {
+        // Whole blocks at lo, then whole blocks at lo+1, in the proportion the
+        // fraction asks for. The loop byte follows the API exactly so the two
+        // can never disagree, which is the condition every crash so far
+        // violated.
+        static int sa_pos = 0;
+        const int hi_blocks = (int)(frac * 100.0 + 0.5);
+        const int in_cycle = sa_pos / g_slowalt_len;
+        const LONG want = (in_cycle < hi_blocks) ? lo + 1 : lo;
+        sa_pos = (sa_pos + 1) % (100 * g_slowalt_len);
+        const LONG api = want < 1 ? 1 : (want > 5 ? 5 : want);
+        if (api != g_force_generated) {
+            g_force_generated = api;
+            g_opt_pending = 1;
+        }
+        set_count_now(api);
+        return;
+    }
+
+    g_frac_acc += frac * (double)kFracPeriod;
         hi_frames = (int)g_frac_acc;
         if (hi_frames > kFracPeriod) hi_frames = kFracPeriod;
         g_frac_acc -= (double)hi_frames;
@@ -1663,7 +1817,7 @@ static void arm_multiplier_override(unsigned char *base) {
     g_frametoken_addr = (void *)GetProcAddress((HMODULE)base, "slGetNewFrameToken");
     if (g_frametoken_addr == nullptr) {
         log_line("  ! slGetNewFrameToken not exported");
-    } else if (g_force_sel != 0) {
+    } else if (g_force_sel != 0 || g_frac_enabled) {
         // A selection restored from mfg-settings.txt is a selection: it needs
         // the same per-frame hook that picking one in the panel installs.
         // Without this the override was armed only by hand, so a saved DYNAMIC
@@ -3322,6 +3476,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             while (j > 0 && pb[j - 1] != 0x5C) --j;
             g_debug = flag_file(L"mfg-debug.txt");
             g_frac_enabled = flag_file(L"mfg-frac.txt");
+            g_slowalt = flag_file(L"mfg-slowalt.txt");
             if (g_frac_enabled)
                 log_line("fractional multiplier ON (experimental: can stall the game)");
             if (g_debug) log_line("debug: F9 recorder armed (hooks Present)");
