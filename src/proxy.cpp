@@ -53,7 +53,7 @@ static void log_num(const char *label, unsigned long long v);
 static wchar_t g_log[MAX_PATH];
 static bool g_frac_enabled = false;   // mfg-frac.txt
 static bool g_slowalt = false;        // mfg-slowalt.txt
-static int  g_slowalt_len = 45;       // rendered frames per block
+static int  g_slowalt_len = 240;       // rendered frames per block
 
 // True when a file of this name sits beside the dll. The switches are files
 // because the person installing this has the dll and nothing else, and the
@@ -1296,6 +1296,11 @@ static double g_last_dt = 0.0;        // and the most recent one, for the spread
 static double g_win_time = 0.0;       // elapsed in the current counting window
 static int    g_win_frames = 0;       // rendered frames in it
 static double g_rendered_fps = 0.0;   // frames / elapsed, unbiased
+static int    g_lo_frames_seen = 0;   // rendered frames while the low count ran
+static int    g_hi_frames_seen = 0;   // and while the high one did
+static volatile LONG g_present_count = 0;   // presents seen at the swap chain
+static double g_lo_time = 0.0;
+static double g_hi_time = 0.0;
 static double g_token_fps = 0.0;      // and the rate that follows from it
 static double g_base_fps = 0.0;       // that, divided by the multiplier in force
 static long long g_last_token_qpc = 0;
@@ -1333,6 +1338,20 @@ static void note_rendered_frame(void) {
                 g_win_frames = 0;
                 g_win_time = 0.0;
                 log_num("measured: rendered fps ", (unsigned)(int)(g_rendered_fps + 0.5));
+                {
+                    // Frames that left the swap chain over frames the game
+                    // rendered, both counted over the same window of 45
+                    // rendered frames. Neither number is chosen by us.
+                    static LONG last_pres = 0;
+                    const LONG now = g_present_count;
+                    const LONG dp = now - last_pres;
+                    last_pres = now;
+                    if (dp > 0) {
+                        log_num("  presents this window ", (unsigned)dp);
+                        log_num("  counted multiplier x100 ",
+                                (unsigned)((unsigned long long)dp * 100ULL / 45ULL));
+                    }
+                }
             }
         }
         // 2 ms to 200 ms. Outside that it is a load screen, a breakpoint or a
@@ -1494,11 +1513,119 @@ static void fractional_tick(void) {
         // 12000 rendered frames, and a run that renders 540 never reached the
         // second half of it, which is why the count looked as though it never
         // alternated at all.
-        static int sa_pos = 0;
+        // Blocks measured in time, not in rendered frames.
+        //
+        // A block at the low count renders far faster than one at the high
+        // count -- 167 fps against 89.8 with generation off and on -- so equal
+        // frame counts are unequal durations, and what a player sees is the
+        // time-weighted mix, not the frame-weighted one. Counting frames made
+        // the low blocks occupy 5.7 seconds against 10.7 for the high ones
+        // while the arithmetic assumed they were equal, which is most of why
+        // 1.50x delivered 1.81-1.90.
+        static double sa_clock = 0.0;
+        sa_clock += g_last_dt;
+        const double kBlockSecs = 0.75;
         const int kBlocks = 8;
-        const int hi_blocks = (int)(frac * (double)kBlocks + 0.5);
-        const int in_cycle = sa_pos / g_slowalt_len;
-        const LONG want = (in_cycle < hi_blocks) ? lo + 1 : lo;
+        const double cycle_secs = kBlockSecs * (double)kBlocks;
+        if (sa_clock >= cycle_secs) sa_clock -= cycle_secs;
+        const int sa_pos_block = (int)(sa_clock / kBlockSecs);
+        static int sa_pos = 0;
+
+        // How many blocks take the high count, corrected by what came out.
+        //
+        // The open-loop split -- frac x kBlocks -- is right only if a block at
+        // the low count delivers exactly its share, and below 2.0x it does not:
+        // the low count there is zero, generation is off for those blocks, and
+        // the app renders faster without it, so the low blocks contribute more
+        // frames than the arithmetic assumed and the average lands high. 1.50x
+        // asked, 1.90 delivered.
+        //
+        // So the split is nudged by the error between the ratio asked for and
+        // the one the last full cycle actually produced. Presented frames per
+        // rendered frame is (1 + generated per rendered frame), and both are
+        // counted here, on this thread, over whole cycles.
+        static double sa_bias = 0.0;
+        static double cyc_gen = 0.0;
+        static int cyc_frames = 0;
+        if (sa_clock < g_last_dt && g_lo_time + g_hi_time > 0.5) {
+            // Weighted by time, for the same reason the blocks are: presented
+            // frames per second over rendered frames per second is what the
+            // player experiences.
+            const double pres = (double)g_lo_frames_seen * (double)(lo + 1)
+                              + (double)g_hi_frames_seen * (double)(lo + 2);
+            const double ren = (double)(g_lo_frames_seen + g_hi_frames_seen);
+            const double produced = ren > 0.0 ? pres / ren : 1.0;
+            const double want = per_frame + 1.0;
+            // Gently: a cycle is a second or two, and a gain that corrects in
+            // one step would hunt between the two counts instead of settling.
+            // Reported once per cycle: the ratio the dll actually delivered,
+            // counted on this thread over whole cycles. Below 2.0x the
+            // saturated `cap / rendered` estimate is invalid -- generation is
+            // off for part of the cycle, so the base rate itself moves -- and
+            // this is the only figure that stays meaningful there.
+            // The delivered ratio, from the clock rather than from our own
+            // choices. Accumulating the api value just picked and calling its
+            // average "delivered" is circular -- it can only report what was
+            // asked for, which is exactly what it did: 150 on every cycle from
+            // the first, while an independent estimate said 1.81. Same mistake
+            // as `ratio produced x100`.
+            //
+            // These counters are measured: how many frames the app rendered
+            // while each count was in force, and how long that took.
+            // Also with only one block type in play -- an integer ratio never
+            // alternates, so without this the controls report nothing and the
+            // instrument goes unchecked on the two cases whose answer is known.
+            if (g_lo_frames_seen + g_hi_frames_seen > 0) {
+                const double tot_ren = (double)(g_lo_frames_seen + g_hi_frames_seen);
+                const double tot_pres = (double)g_lo_frames_seen * (double)(lo + 1)
+                                      + (double)g_hi_frames_seen * (double)(lo + 2);
+                // CIRCULAR -- kept only because the block rates beside it are
+                // real. This figure decrees that each low-block frame presented
+                // (lo+1) and each high-block frame (lo+2), which is the very
+                // thing under test: it reduces to the fraction of samples taken
+                // while the high count was selected, and returned the request
+                // to within 0.3% even at 2.10x and 2.90x, fractions the
+                // scheduler cannot represent. Use "counted multiplier x100",
+                // which counts presents at the swap chain.
+                log_num("slowalt: CIRCULAR ratio x100 ",
+                        (unsigned)(int)(tot_pres / tot_ren * 100.0 + 0.5));
+                log_num("  low block fps x10 ",
+                        (unsigned)(int)(g_lo_time > 0.0 ?
+                            (double)g_lo_frames_seen / g_lo_time * 10.0 : 0.0));
+                // Presented frames per second, and the ratio against rendered,
+                // both from the clock. This does not assume the display is the
+                // limit -- and it is not: in a 2.50x run the low blocks render
+                // 61 fps where saturation against a 165 Hz panel would put them
+                // at 82, so the "cap / rendered" estimate is invalid there and
+                // read 2.76 against a true 2.47.
+                {
+                    const double t = g_lo_time + g_hi_time;
+                    const double pres_n = (double)g_lo_frames_seen * (double)(lo + 1)
+                                        + (double)g_hi_frames_seen * (double)(lo + 2);
+                    if (t > 0.0) {
+                        log_num("  presented fps x10 ", (unsigned)(int)(pres_n / t * 10.0));
+                        log_num("  rendered fps x10 ",
+                                (unsigned)(int)((double)(g_lo_frames_seen + g_hi_frames_seen) / t * 10.0));
+                    }
+                }
+                log_num("  high block fps x10 ",
+                        (unsigned)(int)(g_hi_time > 0.0 ?
+                            (double)g_hi_frames_seen / g_hi_time * 10.0 : 0.0));
+                g_lo_frames_seen = 0;
+                g_hi_frames_seen = 0;
+                g_lo_time = 0.0;
+                g_hi_time = 0.0;
+            }
+            sa_bias += (want - produced) * 0.35;
+            if (sa_bias < -1.0) sa_bias = -1.0;
+            if (sa_bias > 1.0) sa_bias = 1.0;
+            cyc_gen = 0.0;
+            cyc_frames = 0;
+        }
+        int hi_blocks = (int)((frac + sa_bias) * (double)kBlocks + 0.5);
+        if (hi_blocks < 0) hi_blocks = 0;
+        if (hi_blocks > kBlocks) hi_blocks = kBlocks;
+        const LONG want = (sa_pos_block < hi_blocks) ? lo + 1 : lo;
         sa_pos = (sa_pos + 1) % (kBlocks * g_slowalt_len);
         // Zero is kept as zero here, not clamped to one. Below 2.0x the API
         // cannot express the ratio at all -- its smallest generating value is
@@ -1516,6 +1643,13 @@ static void fractional_tick(void) {
             // enabled/disabled state changes, so its log cannot answer this.
             log_num("slowalt: API count now ", (unsigned)api);
         }
+        // Rendered frames and elapsed time, split by which count was in force.
+        // Their ratio is a fact about the pipeline; the average of the counts we
+        // chose is not.
+        if (api > lo) { ++g_hi_frames_seen; g_hi_time += g_last_dt; }
+        else          { ++g_lo_frames_seen; g_lo_time += g_last_dt; }
+        cyc_gen += (double)api;
+        ++cyc_frames;
         set_count_now(api);
         return;
     }
@@ -1659,7 +1793,14 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
 // Put in place the first time the player picks something, and never before.
 // A game nobody opens the panel in runs with nothing of ours in its per-frame
 // path, which is how it was before the override existed.
+static void arm_dxgi_recorder();
+
 static void arm_frametoken_hook(void) {
+    // The swap chain hook comes with it. Counting presents is the only
+    // non-circular way to measure the multiplier, and the DXGI chain was armed
+    // only from the key-polling loop -- which never runs under the test bench,
+    // so every measurement there had to be inferred instead of counted.
+    arm_dxgi_recorder();
     if (g_orig_frametoken != nullptr || g_frametoken_addr == nullptr) return;
     if (MH_CreateHook(g_frametoken_addr, (void *)&hk_slGetNewFrameToken,
                       (void **)&g_orig_frametoken) != MH_OK ||
@@ -2297,6 +2438,14 @@ static void note_display(IDXGISwapChain *sc) {
 }
 
 static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT interval, UINT flags) {
+    // Presented frames, counted. Nothing else in this file has ever counted
+    // one, and that is why three separate multiplier instruments in one
+    // session were all circular -- the last of them reduced to "what fraction
+    // of my samples did I take while the high count was selected" and returned
+    // the requested ratio to within 0.3% even at 2.10x and 2.90x, fractions its
+    // own scheduler cannot represent. An instrument that cannot fail measures
+    // nothing.
+    ++g_present_count;
     note_present(nullptr, 2);
     if (g_recording != 0) note_display(self);
     return g_orig_dxgi_present(self, interval, flags);
