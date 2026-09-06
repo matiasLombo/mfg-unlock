@@ -27,5 +27,5 @@ g++ -shared -std=c++20 -O2 -DNDEBUG -w -I external/minhook/include \
   -o version.dll src/proxy.cpp \
   external/minhook/src/hook.c external/minhook/src/buffer.c \
   external/minhook/src/trampoline.c external/minhook/src/hde/hde64.c \
-  -static -static-libgcc -static-libstdc++ -Wl,--enable-stdcall-fixup -lkernel32
+  -static -static-libgcc -static-libstdc++ -Wl,--enable-stdcall-fixup -lkernel32 -luser32 -lgdi32
 echo "built: $(ls -la version.dll | awk '{print $5}') bytes"
