@@ -52,6 +52,8 @@ static void log_num(const char *label, unsigned long long v);
 
 static wchar_t g_log[MAX_PATH];
 static bool g_frac_enabled = false;   // mfg-frac.txt
+static bool g_slowalt = false;        // mfg-slowalt.txt
+static int  g_slowalt_len = 45;       // rendered frames per block
 
 // True when a file of this name sits beside the dll. The switches are files
 // because the person installing this has the dll and nothing else, and the
@@ -446,7 +448,15 @@ static void apply_override_now(void) {
         }
         return;
     }
-    if ((LONG)GetCurrentThreadId() != g_opt_thread) {
+    // The thread guard exists because slDLSSGSetOptions is documented as not
+    // thread safe, and replaying it per frame from the render thread produced
+    // 2646 "race condition with Present()" warnings and 167 dropped presents.
+    // In slow-alternation mode the count changes once every couple of seconds,
+    // which is the same rate a player changing a setting would produce, so the
+    // guard is lifted there and only there -- otherwise the count can never
+    // change at all in a game that configures DLSS-G once at startup, which is
+    // exactly what the sample does.
+    if (!g_slowalt && (LONG)GetCurrentThreadId() != g_opt_thread) {
         if (said != 3) {
             said = 3;
             log_num("override: present runs on another thread, game used ",
@@ -522,8 +532,6 @@ static long long g_qpc_freq = 1;   // set in DllMain
 
 static volatile unsigned char *g_wic = nullptr;         // the count in the work item
 static bool g_wic_mode = false;                         // mfg-wic.txt
-static bool g_slowalt = false;                          // mfg-slowalt.txt
-static int  g_slowalt_len = 120;                        // frames per block
 
 // The count in the work item, rather than the comparison that reads it.
 //
@@ -1315,7 +1323,12 @@ static void note_rendered_frame(void) {
         if (dt > 0.0 && dt < 0.200) {
             g_win_time += dt;
             if (dt > 0.002) ++g_win_frames;
-            if (g_win_frames >= 180 && g_win_time > 0.0) {
+            // A short window on purpose: with the API count alternating in
+            // blocks, the rendered rate swings between the two multipliers, and
+            // a window longer than a block averages the swing away. Three
+            // quarters of a second is short enough to show the steps and long
+            // enough that frames/elapsed is still steady.
+            if (g_win_frames >= 45 && g_win_time > 0.0) {
                 g_rendered_fps = (double)g_win_frames / g_win_time;
                 g_win_frames = 0;
                 g_win_time = 0.0;
@@ -1476,15 +1489,32 @@ static void fractional_tick(void) {
         // fraction asks for. The loop byte follows the API exactly so the two
         // can never disagree, which is the condition every crash so far
         // violated.
+        // Eight blocks to a cycle, so the whole pattern fits inside a few
+        // seconds. A hundred blocks -- the first attempt -- made a cycle of
+        // 12000 rendered frames, and a run that renders 540 never reached the
+        // second half of it, which is why the count looked as though it never
+        // alternated at all.
         static int sa_pos = 0;
-        const int hi_blocks = (int)(frac * 100.0 + 0.5);
+        const int kBlocks = 8;
+        const int hi_blocks = (int)(frac * (double)kBlocks + 0.5);
         const int in_cycle = sa_pos / g_slowalt_len;
         const LONG want = (in_cycle < hi_blocks) ? lo + 1 : lo;
-        sa_pos = (sa_pos + 1) % (100 * g_slowalt_len);
-        const LONG api = want < 1 ? 1 : (want > 5 ? 5 : want);
+        sa_pos = (sa_pos + 1) % (kBlocks * g_slowalt_len);
+        // Zero is kept as zero here, not clamped to one. Below 2.0x the API
+        // cannot express the ratio at all -- its smallest generating value is
+        // one, which is 2.0x -- so the only way down is whole blocks with
+        // generation off alternating with blocks at 2.0x. force_into already
+        // writes eOff when the count is zero, so nothing else is needed; what
+        // this cannot do is make the transition free, and at a couple of
+        // seconds per block the question is whether it reads as pulsing.
+        const LONG api = want < 0 ? 0 : (want > 5 ? 5 : want);
         if (api != g_force_generated) {
             g_force_generated = api;
             g_opt_pending = 1;
+            // Twice per cycle at most, so cheap -- and the only direct evidence
+            // that the count moved. The plugin logs a count only when the
+            // enabled/disabled state changes, so its log cannot answer this.
+            log_num("slowalt: API count now ", (unsigned)api);
         }
         set_count_now(api);
         return;
