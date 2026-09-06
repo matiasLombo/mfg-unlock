@@ -37,6 +37,10 @@ extern volatile LONG g_force_generated;
 extern volatile LONG g_last_seen_generated;
 extern volatile LONG g_dyn_target;
 extern bool g_dynamic_known;
+// What the plugin said it accepts, in generated frames. Zero means it has not
+// answered yet -- which is not the same as "nothing", so nothing is greyed on
+// the strength of it.
+extern volatile LONG g_frames_max;
 extern bool g_ov_enabled;
 static void log_line(const char *text);
 static void log_num(const char *label, unsigned long long v);
@@ -77,7 +81,7 @@ static const int kPanW = 340;
 static const int kPad = 14;
 static const int kHdrH = 42;
 static const int kBoxH = 26, kBoxGap = 6;
-static const int kPanRows = 6;
+static const int kPanRows = 8;
 static const int kRowH = 22, kListPad = 6;
 static const int kListH = kPanRows * kRowH + 2 * kListPad;
 static const int kGap = 8;
@@ -89,12 +93,22 @@ static const int kPanHMax = kTgtTop + kTgtH + kGap + kFootH;
 
 static const int kHotSlider = 100, kHotValue = 101;
 
-// Evenly spaced on screen, unevenly spaced in value: these are the frame rates
-// anyone actually targets. A linear 30..240 track spends most of its length on
-// numbers nobody picks. 0 is AUTO -- what Streamline calls the display's
-// refresh rate.
-static const int kStops[] = { 0, 30, 40, 48, 60, 72, 90, 100, 120, 144,
-                              165, 180, 200, 240 };
+// The multiplier, times a hundred: 150 is 1.5x. A multiplier and not a target
+// frame rate, which is what this asked for at first and what made it behave
+// badly -- with a base swinging between 66 and 114 fps, a target of 100 sits
+// in the middle of that, so generation was unnecessary half the time and
+// insufficient the other half. Multiplying whatever the base happens to be has
+// no such middle: 1.5x is 1.5x at 66 and at 114.
+// From 2.0x up. Below that the cadence needs batches that generate nothing,
+// and a batch generating nothing breaks presentation: the render loop spins
+// free -- 128 tokens a second against a base of 70 -- while what reaches the
+// screen collapses to 30. The frames are made and thrown away. Patching the
+// count, the loop bound and the zero-count validation all worked and none of
+// them touch that, because it is downstream of every one of them.
+//
+// Offering 1.5x would be offering 30 fps, so it is not offered.
+static const int kStops[] = { 100, 125, 150, 175, 200, 250, 300,
+                              350, 400, 450, 500, 600 };
 static const int kNStops = (int)(sizeof(kStops) / sizeof(kStops[0]));
 
 static float g_ov_mx = 0.0f, g_ov_my = 0.0f;
@@ -107,7 +121,14 @@ static bool g_ov_editing = false;
 static char g_ov_edit[5] = { 0, 0, 0, 0, 0 };
 static int  g_ov_editlen = 0;
 
-static const char *kRowName[kPanRows] = { "AUTO", "OFF", "2X", "3X", "4X", "DYNAMIC" };
+// Index into this is what g_force_sel holds. kSelDynamic replaces a literal 5
+// that had been written out in seven places; adding two rows in the middle
+// would have needed every one of them found and changed by hand, and the ones
+// missed would each have been a silent wrong branch.
+static const int kSelDynamic = kPanRows - 1;
+static const int kSelMaxFixed = kSelDynamic - 1;    // the last of the 2X..6X rows
+static const char *kRowName[kPanRows] = { "AUTO", "OFF", "2X", "3X", "4X",
+                                          "5X", "6X", "DYNAMIC" };
 
 // ---- the pixel buffer ---------------------------------------------------
 
@@ -182,7 +203,7 @@ static void ov_frame(float x, float y, float w, float h,
 // ---- layout, shared by the drawing and the hit test ---------------------
 
 static bool ov_target_shown(void) {
-    return g_force_sel == 5 && g_dynamic_known;
+    return g_force_sel == kSelDynamic;
 }
 
 static int ov_panel_h(void) {
@@ -288,7 +309,7 @@ static int ov_edit_commit(void) {
     if (g_ov_editlen == 0) return -1;
     int v = 0;
     for (int i = 0; i < g_ov_editlen; ++i) v = v * 10 + (g_ov_edit[i] - '0');
-    if (v > 0 && v < kStops[1]) v = 0;
+    if (v < kStops[0]) v = kStops[0];
     if (v > kStops[kNStops - 1]) v = kStops[kNStops - 1];
     return v;
 }
@@ -354,7 +375,14 @@ static void ov_build_panel(void) {
         for (int i = 0; i < kPanRows; ++i) {
             float rx, ry, rw, rh;
             ov_row_rect(i, &rx, &ry, &rw, &rh);
-            const bool avail = (i != 5) || g_dynamic_known;
+            // A row above what the plugin accepts is not a worse setting, it
+            // is a rejected one: every Streamline back to 2.7.32 refuses a
+            // frame count over its maximum outright, and only 2.11.1 and newer
+            // soften that into a clamp. Offering 6X where it will be refused
+            // would stop frame generation with nothing to explain it.
+            const bool avail = (i == kSelDynamic) ? true
+                             : (i < 2 || g_frames_max == 0 ||
+                                (LONG)(i - 1) <= g_frames_max);
             const bool on  = (sel == i) && avail;
             const bool hot = (g_ov_hot == i) && avail;
             if (on) {
@@ -379,17 +407,23 @@ static void ov_build_panel(void) {
     if (ov_target_shown()) {
         const float ty = (float)kTgtTop;
         ov_frame(in, ty, inw, (float)kTgtH, 0.22f, 0.26f, 0.30f, 1.0f);
-        ov_text("TARGET FPS", in + 12.0f, ty + 17.0f, px, 0.60f, 0.62f, 0.66f);
+        ov_text("MULTIPLIER", in + 12.0f, ty + 17.0f, px, 0.60f, 0.62f, 0.66f);
 
         char t[8];
         if (g_ov_editing) {
             int k = 0;
             for (; k < g_ov_editlen; ++k) t[k] = g_ov_edit[k];
             t[k] = 0;
-        } else if (g_dyn_target <= 0) {
-            t[0] = 'A'; t[1] = 'U'; t[2] = 'T'; t[3] = 'O'; t[4] = 0;
         } else {
-            ov_num(t, (int)g_dyn_target);
+            // Shown the way it is meant: 150 held internally reads as 1.50X.
+            const int v = (int)(g_dyn_target < 100 ? 100 : g_dyn_target);
+            int k = 0;
+            t[k++] = (char)('0' + (v / 100) % 10);
+            t[k++] = '.';
+            t[k++] = (char)('0' + (v / 10) % 10);
+            t[k++] = (char)('0' + v % 10);
+            t[k++] = 'X';
+            t[k] = 0;
         }
 
         float vx, vy, vw, vh;
@@ -439,8 +473,14 @@ static void ov_build_panel(void) {
             ov_rect(tx, sy + 9.0f, 1.0f, 6.0f,
                     cur ? 0.45f : 0.34f, cur ? 0.92f : 0.38f, cur ? 0.48f : 0.42f, 1.0f);
             char lb[8];
-            if (kStops[si] == 0) { lb[0]='A'; lb[1]='U'; lb[2]='T'; lb[3]='O'; lb[4]=0; }
-            else ov_num(lb, kStops[si]);
+            {
+                const int v = kStops[si];
+                int k = 0;
+                lb[k++] = (char)('0' + (v / 100) % 10);
+                lb[k++] = '.';
+                lb[k++] = (char)('0' + (v / 10) % 10);
+                lb[k] = 0;
+            }
             int n = 0;
             while (lb[n] != 0) ++n;
             const float wpx = n * 6.0f * lpx;

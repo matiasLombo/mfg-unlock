@@ -51,6 +51,7 @@ static void log_num(const char *label, unsigned long long v);
 // Raw file calls, no CRT: some of this runs under the loader lock.
 
 static wchar_t g_log[MAX_PATH];
+static bool g_frac_enabled = false;   // mfg-frac.txt
 
 // True when a file of this name sits beside the dll. The switches are files
 // because the person installing this has the dll and nothing else, and the
@@ -165,6 +166,21 @@ static bool image_has(unsigned char *base, const char *needle) {
 static LONG g_saved_mode = 0;
 static bool g_override_said = false;
 
+static const unsigned char kDlssgStateGuid[16] = {
+    0xe1, 0xc8, 0x8a, 0xcc,             // 0xcc8ac8e1, little endian
+    0x79, 0xa1,                         // 0xa179
+    0xf5, 0x44,                         // 0x44f5
+    0x97, 0xfa, 0xe7, 0x41, 0x12, 0xf9, 0xbc, 0x61
+};
+
+typedef unsigned (*PFN_slDLSSGGetState)(const void *, void *, const void *);
+static PFN_slDLSSGGetState g_orig_getstate = nullptr;
+
+// What the plugin says it will accept. Zero means "not asked yet"; the panel
+// offers nothing above this once it is known.
+volatile LONG g_frames_max = 0;      // shared with overlay.h
+static volatile LONG g_asked_state = 0;
+
 typedef unsigned (*PFN_slDLSSGSetOptions)(const void *, const void *);
 typedef unsigned (*PFN_slGetFeatureFunction)(unsigned, const char *, void *&);
 static PFN_slDLSSGSetOptions g_orig_setoptions = nullptr;
@@ -179,6 +195,17 @@ static unsigned char g_vp_copy[64];
 static volatile LONG g_opt_have = 0;
 static volatile LONG g_opt_thread = 0;
 static volatile LONG g_opt_pending = 0;
+// Set when the game itself configures DLSS-G, cleared when the next frame
+// begins. While it is set, our replay stays out of the way.
+//
+// The plugin names this failure in its own log, once per frame:
+//   Repeated slDLSSGSetOptions() call for the frame 9411. A redundant call
+//   or a race condition with Present().
+// Our replay fired on every frame token whether or not the game had just set
+// the options for that same frame -- two calls for one frame. That is what
+// collapsed 54 fps to 22, not the zero count and not which path the frame
+// took through presentCommon.
+static volatile LONG g_game_set_this_frame = 0;
 
 // Copies up to `want` bytes without running off the end of the page the
 // struct sits in: the real size varies by struct version and reading past a
@@ -211,7 +238,36 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     const LONG sel = g_force_sel;
     if (sel == 1) {
         *(LONG *)(p + 32) = 0;                 // DLSSGMode::eOff
-    } else if (sel == 5) {
+    } else if (sel == kSelDynamic) {
+        // Ours, not the plugin's: eOn with the count dynamic_tick chose. The
+        // struct rebuild to version 5 and the eDynamic write below are gone
+        // with it, so nothing here depends on the plugin being 2.11.1.
+        //
+        // Zero generated frames is eOff, not eOn with a count of zero -- the
+        // plugin rejects that outright ("Input data numFramesToGenerate must
+        // be greater than 0") and keeps whatever it had, which is why setting
+        // a target of 30 against a base of 41 computed the right answer and
+        // then changed nothing at all.
+        // eOff for a frame that generates nothing, eOn otherwise.
+        //
+        // This was tried and abandoned once on the strength of a transition
+        // count -- 442 against ten at 2.5x -- without ever measuring the frame
+        // rate it produced. What the disassembly since then shows is that the
+        // "not generating" branch (ctx+0x45da == 0, tested at 0x180046f15) is
+        // the ordinary present path, the one that runs with generation off.
+        // eOn with a count of zero takes the *generation* path instead and
+        // finds nothing to present, which is the collapse to 30 fps: the
+        // render loop spins at 128 while the screen gets 30.
+        //
+        // So the transitions may well be the cheaper of the two. That is a
+        // measurement, not a conclusion, and it has not been made yet.
+        if (g_force_generated <= 0) {
+            *(LONG *)(p + 32) = 0;             // DLSSGMode::eOff
+        } else {
+            *(LONG *)(p + 32) = 1;             // DLSSGMode::eOn
+            *(LONG *)(p + 36) = g_force_generated;
+        }
+    } else if (false) {
         // eDynamic, with our own frame-rate target.
         // Both checks: the plugin knows the mode, and this particular options
         // struct is new enough to carry it.
@@ -284,7 +340,14 @@ static const void *dynamic_upgrade(const void *options) {
 
 // Which struct to actually hand to Streamline for this call.
 static const void *options_for_call(const void *options) {
-    if (g_force_sel != 5 || !g_dynamic_known || g_opts_version >= 5)
+    // Never, now. DYNAMIC is our own controller writing eOn with a count, so
+    // there is nothing here to reach for: rebuilding the struct would put
+    // eDynamic back over the mode force_into just set, and hand the multiplier
+    // to the plugin that was ignoring the target in the first place. Kept
+    // rather than deleted because the layout work in it is the record of how
+    // DLSSGOptions grows, and the next field NVIDIA adds will need it.
+    return options;
+    if (g_force_sel != kSelDynamic || !g_dynamic_known || g_opts_version >= 5)
         return options;
     const void *up = dynamic_upgrade(options);
     if (up == nullptr) {
@@ -340,6 +403,7 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
     if (p != nullptr && memcmp(p + 8, kDlssgOptionsGuid, 16) == 0 &&
         (g_opt_have == 0 || raw_mode != g_cap_mode || raw_cnt != g_cap_cnt ||
          viewport != g_cap_vp)) {
+        g_game_set_this_frame = 1;
         if (copy_bounded(g_opt_copy, options, sizeof(g_opt_copy)) >= 40 &&
             copy_bounded(g_vp_copy, viewport, sizeof(g_vp_copy)) >= 8) {
             if (g_opt_have == 0) log_line("override: captured a call to repeat");
@@ -363,6 +427,8 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
 // hook and only on the thread the game itself used.
 static void apply_override_now(void) {
     if (g_opt_pending == 0) return;
+    // The game already spoke for this frame; ours would be the repeated call.
+    if (g_game_set_this_frame != 0) return;
     // Says which precondition is missing instead of returning quietly. Three
     // can fail and they need different answers: no captured call to replay,
     // no wrapper installed, or the wrong thread.
@@ -405,6 +471,11 @@ static void apply_override_now(void) {
 static unsigned hk_slGetFeatureFunction(unsigned feature, const char *name, void *&fn) {
     const unsigned r = g_orig_getfeaturefn(feature, name, fn);
     if (r == 0 && name != nullptr && fn != nullptr &&
+        strcmp(name, "slDLSSGGetState") == 0 && g_orig_getstate == nullptr) {
+        g_orig_getstate = (PFN_slDLSSGGetState)fn;
+        log_line("state: slDLSSGGetState captured");
+    }
+    if (r == 0 && name != nullptr && fn != nullptr &&
         strcmp(name, "slDLSSGSetOptions") == 0 &&
         fn != (void *)&hk_slDLSSGSetOptions) {
         g_orig_setoptions = (PFN_slDLSSGSetOptions)fn;
@@ -424,10 +495,9 @@ static unsigned hk_slGetFeatureFunction(unsigned feature, const char *name, void
                     : "  the plugin actually running does NOT know eDynamic"
                       " -- DYNAMIC stays unavailable");
             // A selection made before this was known does not survive it.
-            if (!g_dynamic_known && g_force_sel == 5) {
-                g_force_sel = 0;
-                g_force_generated = 0;
-            }
+            // The selection is left alone: DYNAMIC is ours and works on a
+            // plugin that has never heard of eDynamic. g_dynamic_known now
+            // only records what the plugin itself can do.
         }
         fn = (void *)&hk_slDLSSGSetOptions;
         log_line("multiplier override armed (slDLSSGSetOptions wrapped)");
@@ -444,8 +514,960 @@ static PFN_slGetNewFrameToken g_orig_frametoken = nullptr;
 static void *g_frametoken_addr = nullptr;      // found at startup, hooked later
 static void apply_override_now(void);
 
+static void query_state(void);
+
+static long long g_qpc_freq = 1;   // set in DllMain
+
+// ---- the sub-frame count, made writable ---------------------------------
+
+static volatile unsigned char *g_count_imm = nullptr;   // the NN byte, in .text
+static volatile unsigned char *g_count_imm2 = nullptr;  // the same, in the entry guard
+static volatile unsigned char *g_count_imm3 = nullptr;  // and in the metering
+static volatile unsigned char *g_gen_flag = nullptr;    // 1 generating, 0 not
+static volatile unsigned char *g_lat_allow = nullptr;   // 1 reconfigure, 0 leave alone
+
+// The swap chain's frame latency, reconfigured during bring-up and left alone
+// afterwards.
+//
+// Pinning it outright (patch_pin_frame_latency, below) removes the churn and
+// also stops generation from ever starting, because the reconfiguration is part
+// of bringing it up. So the call is gated instead of replaced: allowed while
+// generation establishes itself, suppressed once it has, which is when the
+// cadence starts toggling and the churn would begin.
+//
+//   8B 56 60   mov edx, dword ptr [rsi+0x60]
+//   FF 50 60   call qword ptr [rax+0x60]        ; SetMaximumFrameLatency
+//
+// Six bytes, replaced by a call to a trampoline that performs exactly those two
+// instructions when our byte allows it and returns otherwise. rcx, rsi and rax
+// are all live and set up by the caller; rax is dead after the call, so nothing
+// downstream sees a difference beyond the reconfiguration not happening.
+static int patch_gate_frame_latency(unsigned char *base, unsigned char *text, size_t len) {
+    size_t found = 0, at = 0;
+    for (size_t i = 0; i + 13 <= len; ++i) {
+        if (text[i] != 0x48 || text[i+1] != 0x8B || text[i+2] != 0x01) continue;
+        if (text[i+3] != 0x4C || text[i+4] != 0x8D || text[i+5] != 0x43 || text[i+6] != 0x40) continue;
+        if (text[i+7] != 0x8B || text[i+8] != 0x56 || text[i+9] != 0x60) continue;
+        if (text[i+10] != 0xFF || text[i+11] != 0x50 || text[i+12] != 0x60) continue;
+        ++found;
+        at = i;
+    }
+    if (found != 1) {
+        log_num("  ! frame latency site not unique, sites: ", (unsigned)found);
+        return 0;
+    }
+
+    unsigned char *tr = nullptr;
+    for (unsigned long long step = 0x10000; step < 0x8000000ULL && tr == nullptr; step += 0x10000) {
+        tr = (unsigned char *)VirtualAlloc(base - step, 0x1000,
+                                           MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    }
+    if (tr == nullptr) { log_line("  ! no page for the latency trampoline"); return 0; }
+
+    int k = 0;
+    tr[k++] = 0x48; tr[k++] = 0x83; tr[k++] = 0xEC; tr[k++] = 0x28;   // sub rsp,0x28
+    tr[k++] = 0x80; tr[k++] = 0x3D;                                   // cmp byte [rip+d], 0
+    const int disp_at = k; k += 4;
+    tr[k++] = 0x00;   // the immediate the byte is compared against; leaving it
+                      // out made the next opcode serve as it, shifted the whole
+                      // trampoline by one, and killed the process with
+                      // 0xC0000409 before a single frame was measured.
+    tr[k++] = 0x74; const int je_at = k; tr[k++] = 0x00;              // je skip
+    tr[k++] = 0x8B; tr[k++] = 0x56; tr[k++] = 0x60;                   // mov edx,[rsi+0x60]
+    tr[k++] = 0xFF; tr[k++] = 0x50; tr[k++] = 0x60;                   // call [rax+0x60]
+    const int skip = k;
+    tr[k++] = 0x48; tr[k++] = 0x83; tr[k++] = 0xC4; tr[k++] = 0x28;   // add rsp,0x28
+    tr[k++] = 0xC3;                                                   // ret
+    const int flag_at = k;
+    tr[k] = 1;                                                        // allowed at first
+    tr[je_at] = (unsigned char)(skip - (je_at + 1));
+    const LONG d = (LONG)(flag_at - (disp_at + 4 + 1));   // rip is after the cmp's imm8
+    for (int i = 0; i < 4; ++i) tr[disp_at + i] = (unsigned char)((d >> (8 * i)) & 0xFF);
+    g_lat_allow = tr + flag_at;
+
+    unsigned char *site = text + at + 7;
+    const long long delta = (long long)tr - (long long)(site + 5);
+    if (delta > 0x7FFFFFFFLL || delta < -0x7FFFFFFFLL) {
+        log_line("  ! latency trampoline out of rel32 range");
+        return 0;
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(site, 6, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    site[0] = 0xE8;
+    const LONG rel = (LONG)delta;
+    for (int i = 0; i < 4; ++i) site[1 + i] = (unsigned char)((rel >> (8 * i)) & 0xFF);
+    site[5] = 0x90;
+    VirtualProtect(site, 6, old, &old);
+    log_line("  frame latency gated (reconfigured only during bring-up)");
+    return 1;
+}
+
+// The swap chain's frame latency, pinned.
+//
+// throttleFlipQueue reconfigures IDXGIDevice1::SetMaximumFrameLatency whenever
+// interpolation starts or stops, and a cadence that turns generation off for
+// some frames does that constantly. Measured on the sample at 1.50x:
+//
+//   66  SetMaximumFrameLatency changed from 1 to 2
+//   67  SetMaximumFrameLatency changed from 2 to 1
+//   79  Couldn't lock the mutex on sync present - will skip the present
+//
+// A constant 2.00x run has none of those three. Reconfiguring the swap chain
+// races the present that is already in flight, the present loses, and it is
+// dropped -- 79 of them, which is the missing half of the frame rate. Nothing
+// upstream is at fault: the count, the loop bound, the metering and the
+// generation flag were all correct, and this happens downstream of all four.
+//
+//   8B 56 60   mov edx, dword ptr [rsi+0x60]    ; the latency it wants
+//   FF 50 60   call qword ptr [rax+0x60]        ; SetMaximumFrameLatency
+//
+// becomes `push 2 ; pop rdx` -- three bytes for three -- so the value asked for
+// is always the one a healthy always-on run settles at, and the call becomes a
+// no-op instead of a reconfiguration. This is a deliberate override of the
+// plugin's own judgement, which is why it is worth saying plainly: frame
+// generation was not built to be switched per frame, and this is the piece
+// that assumed it would not be.
+static int patch_pin_frame_latency(unsigned char *text, size_t len) {
+    size_t found = 0, at = 0;
+    for (size_t i = 0; i + 13 <= len; ++i) {
+        if (text[i] != 0x48 || text[i+1] != 0x8B || text[i+2] != 0x01) continue;
+        if (text[i+3] != 0x4C || text[i+4] != 0x8D || text[i+5] != 0x43 || text[i+6] != 0x40) continue;
+        if (text[i+7] != 0x8B || text[i+8] != 0x56 || text[i+9] != 0x60) continue;
+        if (text[i+10] != 0xFF || text[i+11] != 0x50 || text[i+12] != 0x60) continue;
+        ++found;
+        at = i;
+    }
+    if (found != 1) {
+        log_num("  ! frame latency site not unique, sites: ", (unsigned)found);
+        return 0;
+    }
+    unsigned char *q = text + at + 7;
+    DWORD old = 0;
+    if (!VirtualProtect(q, 3, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    q[0] = 0x6A;    // push 2
+    q[1] = 0x02;
+    q[2] = 0x5A;    // pop rdx
+    VirtualProtect(q, 3, old, &old);
+    log_line("  frame latency pinned (no swap chain churn on toggling)");
+    return 1;
+}
+
+// The count the present index is built from, made to agree with the loop.
+//
+// This is the disagreement behind all three boundaries. Our loop patch replaced
+// the bound with an immediate, so the loop makes the number of sub-frames we
+// choose -- but the index the present path builds is still computed from the
+// *real* count in the work item:
+//
+//   41 8B 45 04              mov eax, [r13+4]        ; the real count
+//   48 8D 0C 4D 01 00 00 00  lea rcx, [rcx*2+1]      ; frame x 6 + 1
+//   48 03 C8                 add rcx, rax            ; + the count
+//
+// So a bound below the API count leaves the present path waiting for an index
+// that is never produced -- which is exactly what stops presentation -- and a
+// bound above it walks off the allocation.
+//
+// `33 C0 B0 NN` is xor eax,eax plus mov al,NN: four bytes for four, and the
+// flags it clobbers are already spent on the `je` above it. The index is then
+// built from the same number the loop counts to. Unlike patch_monotonic_index,
+// which replaced the arithmetic wholesale and stopped generation, this leaves
+// the formula exactly as NVIDIA wrote it.
+static volatile unsigned char *g_idx_count = nullptr;
+
+static int patch_index_count(unsigned char *base, unsigned char *text, size_t len) {
+    (void)base;
+    size_t found = 0, at = 0;
+    for (size_t i = 0; i + 20 <= len; ++i) {
+        if (text[i] != 0x4D || text[i+1] != 0x85 || text[i+2] != 0xED) continue;
+        if (text[i+3] != 0x74) continue;
+        if (text[i+5] != 0x41 || text[i+6] != 0x8B ||
+            text[i+7] != 0x45 || text[i+8] != 0x04) continue;
+        if (text[i+9] != 0x48 || text[i+10] != 0x8D || text[i+11] != 0x0C ||
+            text[i+12] != 0x4D || text[i+13] != 0x01) continue;
+        if (text[i+17] != 0x48 || text[i+18] != 0x03 || text[i+19] != 0xC8) continue;
+        ++found;
+        at = i;
+    }
+    if (found != 1) {
+        log_num("  ! index count site not unique, sites: ", (unsigned)found);
+        return 0;
+    }
+    unsigned char *q = text + at + 5;
+    DWORD old = 0;
+    if (!VirtualProtect(q, 4, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    q[0] = 0x33; q[1] = 0xC0;     // xor eax, eax
+    q[2] = 0xB0; q[3] = 1;        // mov al, NN
+    VirtualProtect(q, 4, old, &old);
+    DWORD ig = 0;
+    VirtualProtect(q + 3, 1, PAGE_EXECUTE_READWRITE, &ig);
+    g_idx_count = q + 3;
+    log_line("  present index count now follows the loop");
+    return 1;
+}
+
+// The present index, made monotonic.
+//
+// A present is accepted only if its index is strictly greater than the last
+// one seen (cmp rcx,[rax+0x18] / ja), and the index is built from the count of
+// the frame it belongs to:
+//
+//   48 8D 0C 76              lea rcx, [rsi + rsi*2]     ; frame x 3
+//   4D 85 ED / 74 xx         test r13,r13 / je
+//   41 8B 45 04              mov eax, [r13+4]           ; this frame's count
+//   48 8D 0C 4D 01 00 00 00  lea rcx, [rcx*2 + 1]       ; frame x 6 + 1
+//   48 03 C8                 add rcx, rax               ; + the count
+//
+// With a constant count that is monotonic and nothing is ever dropped -- 2.00x
+// and 3.00x both run at 80 fps with zero drops. With a cadence that alternates,
+// a frame generating one after a frame generating two yields a *lower* index
+// and the present is discarded as out of order: 356 of them at 2.50x, which is
+// why 2.50x presents fewer frames (308) than 2.00x (427).
+//
+// The block is six wide whatever the count, so the room is there; the index
+// simply must not be derived from a number that moves. `add rcx, rax` becomes
+// `add rcx, [rip+d]` -- three bytes for a seven-byte instruction, so the two
+// preceding are absorbed: the `mov eax,[r13+4]` that reads the count is no
+// longer needed and its four bytes are exactly the difference. Our counter is
+// incremented once per frame and only ever rises.
+static volatile unsigned long long *g_pidx = nullptr;
+
+static int patch_monotonic_index(unsigned char *base, unsigned char *text, size_t len) {
+    size_t found = 0, at = 0;
+    for (size_t i = 0; i + 20 <= len; ++i) {
+        if (text[i] != 0x4D || text[i+1] != 0x85 || text[i+2] != 0xED) continue;  // test r13,r13
+        if (text[i+3] != 0x74) continue;                                          // je
+        if (text[i+5] != 0x41 || text[i+6] != 0x8B ||
+            text[i+7] != 0x45 || text[i+8] != 0x04) continue;                     // mov eax,[r13+4]
+        if (text[i+9] != 0x48 || text[i+10] != 0x8D || text[i+11] != 0x0C ||
+            text[i+12] != 0x4D || text[i+13] != 0x01) continue;                   // lea rcx,[rcx*2+1]
+        if (text[i+17] != 0x48 || text[i+18] != 0x03 || text[i+19] != 0xC8) continue;  // add rcx,rax
+        ++found;
+        at = i;
+    }
+    if (found != 1) {
+        log_num("  ! present index site not unique, sites: ", (unsigned)found);
+        return 0;
+    }
+
+    // The counter lives near the plugin so a rip-relative add can reach it.
+    unsigned char *page = nullptr;
+    for (unsigned long long step = 0x10000; step < 0x8000000ULL && page == nullptr; step += 0x10000) {
+        page = (unsigned char *)VirtualAlloc(base - step, 0x1000,
+                                             MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    }
+    if (page == nullptr) { log_line("  ! no page for the present counter"); return 0; }
+    *(unsigned long long *)page = 0;
+
+    // mov eax,[r13+4] (4 bytes) + lea rcx,[rcx*2+1] (8) + add rcx,rax (3) = 15,
+    // rewritten as lea (8) + add rcx,[rip+d] (7) = 15. The count is not read.
+    unsigned char *q = text + at + 5;
+    DWORD old = 0;
+    if (!VirtualProtect(q, 15, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    int k = 0;
+    q[k++] = 0x48; q[k++] = 0x8D; q[k++] = 0x0C; q[k++] = 0x4D;   // lea rcx,[rcx*2+1]
+    q[k++] = 0x01; q[k++] = 0x00; q[k++] = 0x00; q[k++] = 0x00;
+    q[k++] = 0x48; q[k++] = 0x03; q[k++] = 0x0D;                  // add rcx,[rip+d]
+    const long long d = (long long)page - (long long)(q + 15);
+    if (d > 0x7FFFFFFFLL || d < -0x7FFFFFFFLL) {
+        VirtualProtect(q, 15, old, &old);
+        log_line("  ! present counter out of rel32 range");
+        return 0;
+    }
+    const LONG rel = (LONG)d;
+    for (int i = 0; i < 4; ++i) q[k++] = (unsigned char)((rel >> (8 * i)) & 0xFF);
+    VirtualProtect(q, 15, old, &old);
+    g_pidx = (unsigned long long *)page;
+    log_line("  present index made monotonic");
+    return 1;
+}
+
+// A frame that generates nothing has to take the ordinary present path.
+//
+// Measured: at 1.50x the sample presented 198 frames against 427 for a
+// constant 2.00x -- almost exactly half, and half the frames are the ones our
+// cadence gives a count of zero. Those frames present *nothing at all*: the
+// real frame is lost along with the generated one, which is why the rate halves
+// while the median frame time stays healthy and the p99 goes to 138ms.
+//
+// presentCommon decides which path a frame takes from one byte:
+//
+//   0x180046c7d  call <decides whether interpolation runs>   E8 rel32
+//   0x180046c82  mov byte ptr [r14+0x45da], al
+//   ...
+//   0x180046f15  cmp byte ptr [r14+0x45da], 0
+//   0x180046f1d  jne <the generation path>
+//                <falls through to the ordinary present, which does present>
+//
+// The store has no room for an extra instruction -- seven bytes, and the
+// smallest useful edit needs thirteen. The call before it is five bytes and can
+// be redirected whole, so the decision is taken as the plugin makes it and then
+// masked with a byte of ours: the plugin still decides when generation is off
+// for its own reasons, and we can only ever turn it off, never on.
+static int patch_generation_flag(unsigned char *base, unsigned char *text, size_t len) {
+    size_t found = 0, at = 0;
+    for (size_t i = 0; i + 15 <= len; ++i) {
+        if (text[i] != 0x49 || text[i + 1] != 0x8B || text[i + 2] != 0xCE) continue;  // mov rcx,r14
+        if (text[i + 3] != 0xE8) continue;                                            // call rel32
+        if (text[i + 8] != 0x41 || text[i + 9] != 0x88 || text[i + 10] != 0x86) continue;
+        // mov byte ptr [r14+0x45XX], al -- the low byte of the displacement is
+        // the one thing that moves between versions (0x45da in 2.13, 0x45e2 in
+        // 2.12), so it is the one byte not matched on. The pair still resolves
+        // to a single site in both.
+        if (text[i + 12] != 0x45 || text[i + 13] != 0x00 || text[i + 14] != 0x00) continue;
+        ++found;
+        at = i;
+    }
+    if (found != 1) {
+        log_num("  ! generation flag site not unique, sites: ", (unsigned)found);
+        return 0;
+    }
+
+    unsigned char *call_at = text + at + 3;
+    LONG rel = 0;
+    for (int i = 0; i < 4; ++i) rel |= (LONG)call_at[1 + i] << (8 * i);
+    unsigned char *orig = call_at + 5 + rel;
+
+    // The trampoline has to sit within reach of a rel32, so it is allocated
+    // near the plugin rather than wherever our own module happens to be.
+    unsigned char *tr = nullptr;
+    for (unsigned long long step = 0x10000; step < 0x8000000ULL && tr == nullptr; step += 0x10000) {
+        tr = (unsigned char *)VirtualAlloc(base - step, 0x1000,
+                                           MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    }
+    if (tr == nullptr) { log_line("  ! no page within reach for the flag trampoline"); return 0; }
+
+    int k = 0;
+    tr[k++] = 0x48; tr[k++] = 0x83; tr[k++] = 0xEC; tr[k++] = 0x28;   // sub rsp,0x28
+    tr[k++] = 0x48; tr[k++] = 0xB8;                                   // mov rax, imm64
+    for (int i = 0; i < 8; ++i) tr[k++] = (unsigned char)(((unsigned long long)orig >> (8 * i)) & 0xFF);
+    tr[k++] = 0xFF; tr[k++] = 0xD0;                                   // call rax
+    tr[k++] = 0x48; tr[k++] = 0x83; tr[k++] = 0xC4; tr[k++] = 0x28;   // add rsp,0x28
+    tr[k++] = 0x22; tr[k++] = 0x05;                                   // and al, [rip+1]
+    tr[k++] = 0x01; tr[k++] = 0x00; tr[k++] = 0x00; tr[k++] = 0x00;
+    tr[k++] = 0xC3;                                                   // ret
+    tr[k] = 1;                                                        // the flag, on by default
+    g_gen_flag = tr + k;
+
+    const long long delta = (long long)tr - (long long)(call_at + 5);
+    if (delta > 0x7FFFFFFFLL || delta < -0x7FFFFFFFLL) {
+        log_line("  ! flag trampoline out of rel32 range");
+        return 0;
+    }
+    DWORD old = 0;
+    if (!VirtualProtect(call_at, 5, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    const LONG nrel = (LONG)delta;
+    for (int i = 0; i < 4; ++i) call_at[1 + i] = (unsigned char)((nrel >> (8 * i)) & 0xFF);
+    VirtualProtect(call_at, 5, old, &old);
+    log_line("  generation flag redirected (zero-count frames present normally)");
+    return 1;
+}
+
+static int patch_subframe_count(unsigned char *base) {
+    if (!g_frac_enabled) return 0;
+    auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    auto *sec = IMAGE_FIRST_SECTION(nt);
+    unsigned char *text = nullptr;
+    size_t len = 0;
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        const char *n = reinterpret_cast<const char *>(sec[i].Name);
+        if (n[0] == '.' && n[1] == 't' && n[2] == 'e' && n[3] == 'x' && n[4] == 't') {
+            text = base + sec[i].VirtualAddress;
+            len = sec[i].Misc.VirtualSize;
+            break;
+        }
+    }
+    if (text == nullptr) return 0;
+
+    size_t found = 0, at = 0;
+    for (size_t i = 0; i + 8 <= len; ++i) {
+        if (text[i] != 0xFF || text[i + 1] != 0xC7) continue;   // inc edi
+        if (text[i + 2] != 0x41 || text[i + 3] != 0x3B ||
+            text[i + 4] != 0x7D || text[i + 5] != 0x04) continue; // cmp edi,[r13+4]
+        if (text[i + 6] != 0x0F || text[i + 7] != 0x82) continue; // jb rel32
+        ++found;
+        at = i;
+    }
+    if (found != 1) {
+        if (found > 1) log_num("  ! sub-frame loop is ambiguous, sites: ", (unsigned)found);
+        return 0;
+    }
+
+    unsigned char *p = text + at + 2;
+    DWORD old = 0;
+    if (!VirtualProtect(p, 4, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    p[0] = 0x83;        // cmp edi, imm8
+    p[1] = 0xFF;
+    p[2] = 1;           // NN -- one generated frame until we say otherwise
+    p[3] = 0x90;        // nop, so the four bytes stay four bytes
+    VirtualProtect(p, 4, old, &old);
+    // Left writable deliberately: this byte is rewritten every frame, and
+    // calling VirtualProtect that often would be both slow and pointless.
+    DWORD ignored = 0;
+    VirtualProtect(p + 2, 1, PAGE_EXECUTE_READWRITE, &ignored);
+    g_count_imm = p + 2;
+
+    // And the count the flip metering is programmed with.
+    //
+    //   44 8B CB       mov r9d, ebx
+    //   4D 85 ED       test r13, r13
+    //   74 0B          je ...
+    //   45 8B 4D 00    mov r9d, dword ptr [r13]     <- the batch count
+    //
+    // becomes `push imm8 ; pop r9` -- 6A NN 41 59 -- which is also four bytes,
+    // so nothing moves. That matters more than it sounds: with the metering
+    // reading our byte, the count no longer has to be pushed through
+    // slDLSSGSetOptions every frame, and it was that per-frame call that made
+    // the plugin log 2646 "Repeated slDLSSGSetOptions() ... race condition
+    // with Present()" warnings and then 167 "Couldn't lock the mutex on sync
+    // present - will skip the present". Those skipped presents are the frame
+    // rate collapsing; the cadence was never the problem.
+    {
+        size_t mfound = 0, mat = 0;
+        for (size_t i = 0; i + 12 <= len; ++i) {
+            if (text[i] != 0x44 || text[i+1] != 0x8B || text[i+2] != 0xCB) continue;
+            if (text[i+3] != 0x4D || text[i+4] != 0x85 || text[i+5] != 0xED) continue;
+            if (text[i+6] != 0x74) continue;
+            if (text[i+8] != 0x45 || text[i+9] != 0x8B ||
+                text[i+10] != 0x4D || text[i+11] != 0x00) continue;
+            ++mfound;
+            mat = i;
+        }
+        if (mfound == 1) {
+            unsigned char *m = text + mat + 8;
+            DWORD om = 0;
+            if (VirtualProtect(m, 4, PAGE_EXECUTE_READWRITE, &om)) {
+                m[0] = 0x6A;    // push imm8
+                m[1] = 1;       // NN
+                m[2] = 0x41;    // pop r9
+                m[3] = 0x59;
+                VirtualProtect(m, 4, om, &om);
+                DWORD ig = 0;
+                VirtualProtect(m + 1, 1, PAGE_EXECUTE_READWRITE, &ig);
+                g_count_imm3 = m + 1;
+                log_line("  metering count made writable too");
+            }
+        } else {
+            log_num("  ! metering count site not unique, sites: ", (unsigned)mfound);
+        }
+    }
+
+    // And the guard that decides whether the loop runs at all:
+    //
+    //   8B FB           mov edi, ebx
+    //   41 39 5D 04     cmp dword ptr [r13+4], ebx     ; count <= i ?
+    //   0F 86 rel32     jbe <past the loop>
+    //
+    // becomes `cmp ebx, NN` + nop with the branch inverted to `jae`, which is
+    // the same test read the other way round. Without this the top would still
+    // gate on the game's count while the bottom counted to ours -- and zero
+    // generated frames, which is what any ratio under 2.0x needs, would be
+    // unreachable.
+    patch_generation_flag(base, text, len);
+    // Off for a control: with it on, a plain 2.00x run at base 30 renders 30
+    // and presents 30 -- no generated frames at all -- while sl.log fills with
+    // 538 "Out of order frame - will skip the present" against ~30 presents.
+    // This patch is the only thing that touches that comparison.
+    if (flag_file(L"mfg-monoidx.txt")) patch_monotonic_index(base, text, len);
+    // patch_index_count is NOT called. Making the present index agree with the
+    // loop stops generation outright: a plain 2.00x control fell to 0.88x with
+    // the render loop running free at 188 fps, the same failure as a bound
+    // below the API count. The index must be built from the count the plugin
+    // allocated for, not from the number of sub-frames actually produced.
+    // patch_gate_frame_latency is NOT called either. Letting the bring-up
+    // through and suppressing the reconfigurations afterwards makes it worse,
+    // not better: dropped presents went from 79 to 165 and the rate from 35.7
+    // to 31.0 fps. Skipping the DXGI call while the plugin believes the latency
+    // changed leaves the two disagreeing, which is the same class of mistake as
+    // patching one end of the sub-frame loop.
+    //
+    // Note also that the "SetMaximumFrameLatency changed from X to Y" line is
+    // written before the call, so counting it measures the plugin's intent and
+    // not whether the reconfiguration happened. It is not evidence either way.
+
+    // patch_pin_frame_latency is deliberately NOT called. Pinning the latency
+    // does remove the churn -- 133 SetMaximumFrameLatency changes and 79
+    // dropped presents both go to zero -- but the control run gives it away:
+    // at a constant 2.00x, which needs no toggling at all, interpolation then
+    // never starts (1 state change becomes 0, and 0 hitches become 32). The
+    // reconfiguration is part of how generation is brought up, so a constant
+    // there means it is never brought up. Kept in the file because the site and
+    // the measurement are right; it is the conclusion drawn from them that was
+    // wrong.
+
+    // The validation, first: without it nothing below 2.0x is expressible.
+    //
+    //   44 8B 47 24   mov r8d, dword ptr [rdi+0x24]   ; the count from options
+    //   41 83 F8 01   cmp r8d, 1                      ; at least one?
+    //   0F 83 rel32   jae <carry on>
+    //
+    // The immediate goes to zero, so the unsigned test always passes and eOn
+    // may carry a count of nothing. That matters because the alternative --
+    // sending eOff for those frames -- costs a state transition each time:
+    // 442 of them in one run against ten at 2.5x, and the result was worse
+    // than not trying. With zero accepted, generation stays on and the frame
+    // simply produces nothing.
+    //
+    // One byte; the branch and everything after it stay where they are.
+    // Unique across the corpus from 2.8.0 through 2.13.
+    {
+        size_t vfound = 0, vat = 0;
+        for (size_t i = 0; i + 10 <= len; ++i) {
+            if (text[i] != 0x44 || text[i + 1] != 0x8B ||
+                text[i + 2] != 0x47 || text[i + 3] != 0x24) continue;
+            if (text[i + 4] != 0x41 || text[i + 5] != 0x83 ||
+                text[i + 6] != 0xF8 || text[i + 7] != 0x01) continue;
+            if (text[i + 8] != 0x0F || text[i + 9] != 0x83) continue;
+            ++vfound;
+            vat = i;
+        }
+        if (vfound == 1) {
+            unsigned char *v = text + vat + 7;
+            DWORD ov = 0;
+            if (VirtualProtect(v, 1, PAGE_EXECUTE_READWRITE, &ov)) {
+                *v = 0;
+                VirtualProtect(v, 1, ov, &ov);
+                log_line("  zero generated frames accepted (ratios under 2x)");
+            }
+        } else {
+            log_num("  ! zero-count validation not unique, sites: ", (unsigned)vfound);
+        }
+    }
+
+    size_t g_found = 0, g_at = 0;
+    for (size_t i = 0; i + 10 <= len; ++i) {
+        if (text[i] != 0x8B || text[i + 1] != 0xFB) continue;          // mov edi, ebx
+        if (text[i + 2] != 0x41 || text[i + 3] != 0x39 ||
+            text[i + 4] != 0x5D || text[i + 5] != 0x04) continue;      // cmp [r13+4], ebx
+        if (text[i + 6] != 0x0F || text[i + 7] != 0x86) continue;      // jbe rel32
+        ++g_found;
+        g_at = i;
+    }
+    if (g_found == 1) {
+        unsigned char *q = text + g_at + 2;
+        DWORD o2 = 0;
+        if (VirtualProtect(q, 6, PAGE_EXECUTE_READWRITE, &o2)) {
+            q[0] = 0x83;    // cmp ebx, imm8
+            q[1] = 0xFB;
+            q[2] = 1;       // NN
+            q[3] = 0x90;    // nop
+            q[5] = 0x83;    // jbe -> jae   (0F 86 -> 0F 83)
+            VirtualProtect(q, 6, o2, &o2);
+            DWORD ig = 0;
+            VirtualProtect(q + 2, 1, PAGE_EXECUTE_READWRITE, &ig);
+            g_count_imm2 = q + 2;
+        }
+    } else {
+        log_num("  ! loop entry guard not unique, sites: ", (unsigned)g_found);
+    }
+    return 1;
+}
+
+// N generated frames on the next batch. Zero is not expressible here -- the
+// loop is a do-while, so its body has already run once by the time the bound
+// is tested, and one generated frame is the floor.
+// What is actually in force, which is not the same as g_force_generated once
+// the byte is being written directly: a mode picked by hand leaves that
+// variable behind, and dividing the measured rate by a stale multiplier makes
+// the base look far lower than it is -- which asks for more generation, which
+// makes it look lower still.
+static volatile LONG g_count_live = 1;
+
+// One more than asked, on the loop bound only.
+//
+// With generation verified working, both fractional ratios come out exactly one
+// generated frame short per frame: 2.50x (cadence 1,2) presents 22.5 against a
+// base of 15, which is 1.5 generated on average rather than 2.5, and 1.50x
+// (cadence 0,1) presents 15.3, i.e. none. The API is told the right number in
+// both cases, and the cadence logs the ratio asked for, so the shortfall is in
+// the loop -- which is the one thing we rewrote. Turning its do-while into a
+// for with an entry guard costs the iteration the original ran before testing.
+static LONG loop_bound_for(LONG n) {
+    // The bound is one more than the frames wanted, because turning the
+    // original do-while into a for with an entry guard costs the iteration it
+    // used to run before testing. Without this every ratio came out one
+    // generated frame short and the pacing fell apart: 1.50x had a p99 of
+    // 366 ms and eleven hitches, which became 38 ms and none.
+    //
+    // Zero stays zero. Feeding n+1 there generates a whole frame where the
+    // cadence asked for none, which is what turned 1.50x into a flat 2.00x --
+    // 30 presented against the 22.5 the ratio calls for.
+    // Never below the bound a single generated frame needs.
+    //
+    // Zero in the loop is what wrecks the pacing, not merely what skips a
+    // frame: 1.50x with a zero in the cadence gives a p99 of 366 ms and eleven
+    // hitches, and the same run with every count raised gives 38 ms and none.
+    // So the loop always runs, and the fraction is carried by the metering
+    // count below, which is the other byte we own.
+    // The bound counts sub-frames, not generated frames: 2 yields one
+    // generated frame, 3 yields two. So one -- not zero -- is how "generate
+    // nothing" is said, and the loop body still runs its single pass.
+    //
+    // Zero was used before, and zero is skipped outright by the entry guard we
+    // added. That pass appears to be where the real frame is dealt with:
+    // 1.50x with a zero in the cadence presented 15.6 from 15 rendered, an
+    // effective 1.04x, with a p99 of 366 ms. This tries the one value between
+    // the two that was never tested.
+    // Never zero, and never one.
+    //
+    // Measured, with the present cap raised so the multiplier is observable
+    // (base 30, rendered ~89):
+    //
+    //   bound 0  ->  0.89x, p99 66 ms, 39 hitches   -- destructive: skipping
+    //                the loop loses the real frame's present too
+    //   bound 1  ->  1.85x   (one generated)
+    //   bound 2  ->  1.85x   (one generated)
+    //   bound 3  ->  3.0x    (two generated)
+    //
+    // So no value of this byte expresses "generate nothing": the floor is one
+    // generated frame per rendered frame, i.e. 2.0x. Ratios below that are not
+    // expressible here and are held at 2.0x rather than allowed to lose frames.
+    // Never above what the API allocated for, never zero.
+    //
+    // Proved by construction: a bound of 5 with the API told 1 crashes the
+    // sample with 0xC0000005, so the loop really does drive the iteration count
+    // and writing past the allocation is fatal. A bound of 0 measures 0.89x, so
+    // it can reduce as well -- but it reduces by losing the real frame's
+    // present, not by generating one fewer.
+    return n <= 0 ? 2 : n + 1;
+}
+
+static void set_count_now(LONG n) {
+    if (g_count_imm == nullptr) return;
+    if (n < 0) n = 0;                    // zero is legal: the loop is skipped
+    if (n > 5) n = 5;                    // the plugin's own ceiling
+    // The guard first, so a frame can never see a raised bound with the old
+    // gate still shut, or the reverse.
+    if (g_count_imm2 != nullptr) *g_count_imm2 = (unsigned char)loop_bound_for(n);
+    // The same number as the loop, zero included. Clamping this to one "just
+    // in case" was the whole mismatch coming back: the metering programmed a
+    // batch for one generated frame while the loop produced none, and the
+    // symptom moved from a stalled present to Reflex falling behind --
+    // "sl.reflex must be enabled and active 11969 != 17669", one frame counter
+    // frozen while the other ran on.
+    // The metering count does not gate anything: with the loop held at two and
+    // this carrying the cadence, 1.50x still presented 30 rather than 22.5.
+    // Whatever the loop produces is presented regardless of this byte, so the
+    // fraction cannot be moved here. Kept in agreement with the loop.
+    if (g_count_imm3 != nullptr) *g_count_imm3 = (unsigned char)n;
+    // Held on. Measured both ways at 1.50x, base 80: following the count gives
+    // 20.6 fps and 361 state changes, holding it on gives 39.3 fps and one.
+    // Neither reaches the 120 the ratio asks for -- the rate tracks how often
+    // the count is zero either way (19.3 / 39.3 / 54.6 / 80.0 fps at 1.25 /
+    // 1.50 / 1.75 / 2.00x, i.e. 1/4, 1/2, 3/4, 1 of the base) -- but holding it
+    // on is twice as good and costs nothing above 2.0x, where the count never
+    // reaches zero at all.
+    if (g_gen_flag != nullptr) *g_gen_flag = 1;
+    // Bring-up is over well inside a couple of seconds; after that a
+    // reconfiguration can only be the churn this is here to stop.
+    static LONG settled = 0;
+    if (g_lat_allow != nullptr && settled < 400 && ++settled == 400) {
+        *g_lat_allow = 0;
+        log_line("fractional: frame latency now left alone");
+    }
+    *g_count_imm = (unsigned char)loop_bound_for(n);
+    g_count_live = n;
+}
+
+
+// Smoothed over a window rather than taken frame to frame. A single frame
+// time is noisy enough that the multiplier would change on a passing hitch,
+// and every change makes Streamline restart interpolation -- the native
+// controller did that 42 times in one run, twice within seven milliseconds,
+// and that churn is what a player feels as stutter.
+static double g_token_dt = 0.0;       // the averaged frame time, in seconds
+static double g_last_dt = 0.0;        // and the most recent one, for the spread
+static double g_token_fps = 0.0;      // and the rate that follows from it
+static double g_base_fps = 0.0;       // that, divided by the multiplier in force
+static long long g_last_token_qpc = 0;
+
+static void note_rendered_frame(void) {
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    if (g_last_token_qpc != 0 && g_qpc_freq > 0) {
+        const double dt = (double)(t.QuadPart - g_last_token_qpc) / (double)g_qpc_freq;
+        // 2 ms to 200 ms. Outside that it is a load screen, a breakpoint or a
+        // wrapped counter, and feeding it to the average would move the
+        // multiplier for a reason that has nothing to do with the game.
+        if (dt > 0.002 && dt < 0.200) {
+            // The frame *times* are averaged, and the rate comes from the
+            // average -- not the other way round. Averaging 1/dt overstates
+            // the rate whenever the intervals are uneven, which is exactly
+            // what frames look like with generation running: alternating 5 ms
+            // and 20 ms is 12.5 ms on average, or 80 fps, but averaging the
+            // reciprocals gives (200+50)/2 = 125. That is the whole of the gap
+            // between the 118 this reported and the 80 the player was reading
+            // off the game.
+            g_last_dt = dt;
+            g_token_dt = g_token_dt <= 0.0 ? dt : g_token_dt * 0.94 + dt * 0.06;
+            g_token_fps = g_token_dt > 0.0 ? 1.0 / g_token_dt : 0.0;
+            // Divided by the multiplier in force, because the interval turned
+            // out to track the *presented* rate and not the rendered one. The
+            // give-away was in the log: at 2X the base read 102 where it had
+            // read 44 with generation off, and the controller then decided it
+            // no longer needed generation, which dropped the reading back to
+            // 46 and started the whole thing again. The measurement has to be
+            // independent of the decision, or the decision feeds itself.
+            //
+            // Both numbers are logged, so the next run either confirms this or
+            // shows it was the wrong correction -- the reading was assumed to
+            // be the rendered rate once already.
+            g_base_fps = g_token_fps;
+        }
+    }
+    g_last_token_qpc = t.QuadPart;
+}
+
+// How many generated frames it would take to reach the target from the rate
+// the game is actually rendering at, with the ceiling the plugin gave us.
+static LONG dynamic_want(void) {
+    if (g_base_fps <= 1.0) return g_force_generated;      // nothing measured yet
+    const LONG target = g_dyn_target;
+    // Zero is AUTO, which means the display: the same thing the native mode
+    // treats as its default.
+    double want_fps = (double)target;
+    if (target <= 0) {
+        DEVMODEW dm = {};
+        dm.dmSize = sizeof(dm);
+        want_fps = EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) &&
+                   dm.dmDisplayFrequency > 1 ? (double)dm.dmDisplayFrequency : 120.0;
+    }
+    LONG n = (LONG)(want_fps / g_base_fps + 0.5) - 1;     // presented / rendered
+    if (n < 0) n = 0;
+    const LONG cap = g_frames_max > 0 ? g_frames_max : 3; // 3 = 4x, the safe floor
+    if (n > cap) n = cap;
+    return n;
+}
+
+// Changed only when the answer has been the same for a while and differs from
+// what is in force. Without the dwell, a base rate sitting between two
+// multipliers would flip every few frames for as long as the player stood
+// there.
+// Superseded by fractional_tick, which does the same job without rounding to
+// a whole multiplier. Kept only so the integer path is one edit away if the
+// immediate patch ever fails to apply.
+static void dynamic_tick(void) {
+    if (g_count_imm != nullptr) return;
+    if (g_force_sel != kSelDynamic) return;
+    const LONG want = dynamic_want();
+    static LONG last_want = -1;
+    static int steady = 0;
+    if (want != last_want) { last_want = want; steady = 0; return; }
+    if (++steady < 45) return;                            // ~a third of a second
+    steady = 0;
+    if (want == g_force_generated) return;
+    log_num("dynamic: measured fps ", (unsigned)(int)g_token_fps);
+    log_num("  base fps behind it ", (unsigned)(int)g_base_fps);
+    log_num("  generating N frames now: ", (unsigned)want);
+    g_force_generated = want;
+    g_opt_pending = 1;
+    // Re-seeded: the old multiplier's readings say nothing about the new one,
+    // and blending them in is what would make the average chase its own tail.
+    g_token_fps = 0.0;
+    g_token_dt = 0.0;
+}
+
+// A fractional multiplier, spread over frames.
+//
+// The count is an integer -- it is a loop bound, and a loop cannot run 2.1
+// times -- so the fraction lives in the cadence instead of in the number. An
+// error accumulator carries the remainder from one frame to the next: at a
+// ratio of 2.1x nine frames generate one extra and the tenth generates two,
+// and the average over any window is 2.1 exactly.
+//
+// This writes the immediate the loop now compares against, so it takes effect
+// on the very next batch and needs no thread of ours.
+// How many frames a count is held before it may change. One is the old
+// behaviour -- change as soon as the accumulator says so.
+// Frames per cadence period. Longer means fewer changes and coarser bursts;
+// shorter means smoother distribution and more changes, which is what costs.
+static int kFracPeriod = 8;
+static double g_frac_acc = 0.0;
+// What the cadence is actually producing, averaged. The correction above is
+// meaningless without it: the error has to be measured against the output, and
+// the output is this.
+static double g_produced_avg = 0.0;
+
+static void fractional_tick(void) {
+    static LONG was_sel = -1;
+    if (g_force_sel != was_sel) {
+        was_sel = g_force_sel;
+        g_frac_acc = 0.0;
+        g_token_fps = 0.0;        // the previous mode's readings say nothing
+        g_token_dt = 0.0;
+    }
+    if (g_force_sel != kSelDynamic || g_count_imm == nullptr) return;
+    if (g_base_fps <= 1.0) return;
+
+    // The multiplier, straight. No target to chase and so no loop to settle:
+    // the ratio is what was asked for, and the frame rate is whatever the base
+    // multiplied by it comes to. Closing a loop over the presented rate was
+    // solving a problem this does not have -- and it could not win anyway,
+    // since generation cannot lower a base that is already above the target.
+    double per_frame = (double)g_dyn_target / 100.0 - 1.0;
+    if (per_frame < 0.0) per_frame = 0.0;
+    if (per_frame > 5.0) per_frame = 5.0;
+
+    // The shape of a whole period, decided once, rather than a value decided
+    // per frame and then held back.
+    //
+    // Spreading the fraction as evenly as possible -- 0,1,0,1 for 1.5x -- is
+    // right for the average and wrong for the pacing: the cost is per change,
+    // and that spreads the changes as widely as they can go. Measured in MFG
+    // Lab on the Streamline sample, everything else held constant:
+    //
+    //   2.00x  never changes     0 hitches   p99  38ms   30.0 fps
+    //   2.10x  changes 1 in 10   0 hitches   p99  65ms   28.5 fps
+    //   2.50x  changes 1 in 2   19 hitches   p99 121ms   30.0 fps
+    //   1.50x  changes 1 in 2    6 hitches   p99 235ms   13.9 fps
+    //
+    // So the frames that take the higher count are grouped at the front of the
+    // period: two changes per period instead of one per frame. Holding a
+    // per-frame decision back was tried first and does not work -- the held
+    // value and the demand fight, the accumulator cannot settle the difference
+    // without going negative, and 1.5x came out as 2.0x. Deciding the period
+    // has no such conflict: the count of high frames is what carries the
+    // fraction, and it is exact over each period.
+    const LONG lo = (LONG)per_frame;
+    const double frac = per_frame - (double)lo;
+
+    static int pos = 0;
+    static int hi_frames = 0;
+    if (pos == 0) {
+        g_frac_acc += frac * (double)kFracPeriod;
+        hi_frames = (int)g_frac_acc;
+        if (hi_frames > kFracPeriod) hi_frames = kFracPeriod;
+        g_frac_acc -= (double)hi_frames;
+    }
+    LONG n = pos < hi_frames ? lo + 1 : lo;
+    pos = (pos + 1) % kFracPeriod;
+
+    // Zero is fine now: the entry guard is ours too, so a frame with nothing
+    // generated simply skips the loop. That is what every ratio under 2.0x is
+    // made of.
+    g_produced_avg = g_produced_avg * 0.995 + (double)n * 0.005;
+    set_count_now(n);
+    // The API still has to be told to turn generation ON, and with a count it
+    // will accept. Our byte decides how many frames each batch really makes,
+    // but the plugin never reaches that loop unless it has been enabled first
+    // -- and `eOn` with a count of zero is refused outright. Asking for zero
+    // through the API is exactly what left sl.log without a single
+    // "interpolation state changed" line while the byte sat there unread.
+    // The API is told the *floor* of the cadence, never more.
+    //
+    // A batch stalls when the loop delivers fewer frames than the presentation
+    // side was promised -- that is what turned 75 fps into 35, and what froze
+    // the game outright at 1.00x where every batch was promised one and given
+    // none. Promising the smallest number the cadence ever produces means the
+    // loop can only ever match it or exceed it, and nothing waits.
+    //
+    // It also draws the line honestly: at 2.5x the cadence is 1 and 2, so the
+    // floor is 1 and every batch is safe. At 1.5x it is 0 and 1, the floor is
+    // 0, and zero is refused by the API -- so ratios under 2.0x still cannot
+    // work this way and are held at 2.0x rather than allowed to stall.
+    // Exactly what this frame will generate, including none of them. Zero
+    // goes through as eOff rather than as eOn with a count of zero, which the
+    // plugin refuses -- and that refusal is what held every ratio under 2.0x
+    // at 2.0x. force_into already writes eOff when the count is zero.
+    // No API call per frame any more. The three bytes carry the count -- loop
+    // bound, entry guard and metering -- so slDLSSGSetOptions is left to the
+    // game, and the race against Present goes with it.
+    // The API is told the ceiling of the ratio, not this frame's count.
+    //
+    // The plugin sizes its per-sub-frame resources from the count it is given,
+    // and the loop bound writing past that is an access violation: 2.50x, whose
+    // cadence alternates one and two generated frames, crashed the sample with
+    // 0xC0000005 reproducibly while the API count alternated with it. Asking
+    // for the maximum the cadence will ever reach means the allocation always
+    // covers the loop, and the loop is then free to produce fewer.
+    // The API is told the ceiling of the ratio, not this frame's count.
+    //
+    // The plugin sizes its per-sub-frame resources from the count it is given,
+    // and a loop bound past that allocation is an access violation: 2.50x
+    // crashed the sample with 0xC0000005, reproducibly, while the API count
+    // alternated with the cadence. The ceiling covers the largest bound the
+    // cadence will use. (Pinning it at the declared maximum of 5 also avoids
+    // the crash, but asks the plugin to do five frames of work for a ratio that
+    // needs one or two.)
+    const LONG ceil_n = (LONG)(per_frame + 0.999);
+    // Varying the API count at runtime crashes, in every arrangement tried:
+    // per frame, in blocks of eight, and in blocks with the loop bound clamped
+    // to what the plugin had actually applied so the two could never be out of
+    // step. All three end in 0xC0000005. The count is fixed for the life of the
+    // run at the ceiling of the ratio.
+    g_force_generated = ceil_n < 1 ? 1 : (ceil_n > 5 ? 5 : ceil_n);
+
+    // Reported rarely: this runs on the render thread and log_line opens the
+    // file per line.
+    // The cadence, not a single frame of it. Sampling one frame in 240 and
+    // printing its count says almost nothing when the interesting ratios are
+    // made of mostly-zeros with an occasional one: every sample landed on a
+    // zero and the log looked like nothing was happening. Counting how many
+    // frames took each value over the window shows the ratio directly, and it
+    // is the thing being claimed.
+    static int hist[7] = { 0, 0, 0, 0, 0, 0, 0 };
+    // How evenly the frames are spaced, not just how many there are. The
+    // average rate can be exactly right while delivery is not: at 1.25x three
+    // frames in four go out at the base interval and the fourth carries two,
+    // which is a stutter the frame counter cannot show. That would separate
+    // 2.5x -- cadence 1,2,1,2 -- from 1.25x -- cadence 0,0,0,1 -- and it is a
+    // different problem from cost.
+    static int spread[5] = { 0, 0, 0, 0, 0 };
+    if (g_token_dt > 0.0 && g_last_dt > 0.0) {
+        const double r = g_last_dt / g_token_dt;
+        const int b = r < 0.6 ? 0 : r < 0.85 ? 1 : r < 1.15 ? 2 : r < 1.4 ? 3 : 4;
+        ++spread[b];
+    }
+    static int beat = 0;
+    if (n >= 0 && n <= 6) ++hist[n];
+    if (++beat >= 240) {
+        beat = 0;
+        int total = 0, frames = 0;
+        for (int i = 0; i <= 6; ++i) { total += i * hist[i]; frames += hist[i]; }
+        log_num("fractional: over the last N rendered frames ", (unsigned)frames);
+        log_num("  ratio asked x100 ", (unsigned)(int)((per_frame + 1.0) * 100.0));
+        log_num("  ratio produced x100 ",
+                (unsigned)(frames > 0 ? (unsigned)((total + frames) * 100 / frames) : 0));
+        for (int i = 0; i <= 6; ++i)
+            if (hist[i] > 0) {
+                log_num("    frames generating this many: ", (unsigned)i);
+                log_num("      how many such frames ", (unsigned)hist[i]);
+            }
+        {
+            static const char *kName[5] = {
+                "    much shorter than average ", "    shorter ",
+                "    about right ", "    longer ", "    much longer " };
+            int tot = 0;
+            for (int i = 0; i < 5; ++i) tot += spread[i];
+            log_num("  frame-time spread, out of ", (unsigned)tot);
+            for (int i = 0; i < 5; ++i)
+                if (spread[i] > 0) log_num(kName[i], (unsigned)spread[i]);
+            for (int i = 0; i < 5; ++i) spread[i] = 0;
+        }
+        log_num("  token fps (raw) ", (unsigned)(int)g_token_fps);
+        log_num("  presented fps (what you should see) ",
+                (unsigned)(int)(g_token_fps * (1.0 + g_produced_avg)));
+        log_num("  multiplier x100 ", (unsigned)g_dyn_target);
+        for (int i = 0; i <= 6; ++i) hist[i] = 0;
+    }
+}
+
 static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     const unsigned r = g_orig_frametoken(tok, idx);
+    note_rendered_frame();
+    g_game_set_this_frame = 0;      // a new frame; the last one is settled
+    // The present index advances here, with the frame, and not in
+    // set_count_now: that only runs in fractional mode, so the counter feeding
+    // *every* present sat at zero whenever the cadence was constant. A control
+    // run at 2.00x then reported 1414 out-of-order drops where the unpatched
+    // plugin had none -- the patch was manufacturing the very failure it was
+    // written to remove. The stride matches the block the original arithmetic
+    // reserved per frame.
+    if (g_pidx != nullptr) *g_pidx += 6;
+    query_state();
+    fractional_tick();
     apply_override_now();
     return r;
 }
@@ -481,7 +1503,17 @@ static void settings_save(void) {
     int k = 0;
     const char *l1 = "mode ";
     for (int i = 0; l1[i] != 0; ++i) buf[k++] = l1[i];
-    buf[k++] = (char)('0' + (g_force_sel % 10));
+    {
+        // Written as a number rather than a single digit: the row count has
+        // already grown once, and a mode of 10 would otherwise be saved as 0,
+        // which is AUTO -- a silent reset rather than an error.
+        int v = (int)g_force_sel, n = 0, d[3];
+        if (v <= 0) buf[k++] = '0';
+        else {
+            while (v > 0 && n < 3) { d[n++] = v % 10; v /= 10; }
+            while (n > 0) buf[k++] = (char)('0' + d[--n]);
+        }
+    }
     buf[k++] = '\r'; buf[k++] = '\n';
     const char *l2 = "target ";
     for (int i = 0; l2[i] != 0; ++i) buf[k++] = l2[i];
@@ -528,11 +1560,18 @@ static void settings_load(void) {
         while (j < n && buf[j] >= '0' && buf[j] <= '9' && v < 100000)
             v = v * 10 + (buf[j++] - '0');
         if (is_mode) {
-            if (v >= 0 && v <= 5) {
+            if (v >= 0 && v < kPanRows) {
                 g_force_sel = v;
-                g_force_generated = (v >= 2 && v <= 4) ? v - 1 : 0;
+                g_force_generated = (v >= 2 && v <= kSelMaxFixed) ? v - 1 : 0;
+                // DYNAMIC has to start somewhere. Restored from disk it landed
+                // on zero generated frames, which asks the plugin to turn
+                // generation on and produce none -- so DLSS-G never started,
+                // and the controller cannot measure a base rate without it
+                // running. It waited for itself. One generated frame is the
+                // seed; the controller moves off it on the first measurement.
+                if (v == kSelDynamic) g_force_generated = 1;
             }
-        } else if (v >= 0 && v <= 480) {
+        } else if (is_tgt && v >= 0 && v <= 600) {
             g_dyn_target = v;
         }
         i = j;
@@ -540,6 +1579,53 @@ static void settings_load(void) {
     log_num("settings: restored mode ", (unsigned)g_force_sel);
     log_num("  target fps ", (unsigned)g_dyn_target);
 }
+
+// Must run on the thread that presents -- the plugin's own log says so:
+// "slDLSSGGetState must be synchronized with the present thread". That is the
+// game thread, which is where the frame-token hook already runs.
+static void query_state(void) {
+    if (g_orig_getstate == nullptr || g_asked_state != 0 || g_opt_have == 0) return;
+    if ((LONG)GetCurrentThreadId() != g_opt_thread) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            log_num("state: not asked -- frame tokens come from thread ",
+                    (unsigned)GetCurrentThreadId());
+            log_num("  but the game configured DLSS-G from thread ",
+                    (unsigned)g_opt_thread);
+            log_line("  and the plugin requires the present thread for this call");
+        }
+        return;
+    }
+    g_asked_state = 1;
+
+    // Generous and zeroed: the plugin writes as much of this as its own
+    // version defines, and a buffer sized to our reading of the header would
+    // be a guess about how much that is.
+    unsigned char st[256];
+    for (int i = 0; i < 256; ++i) st[i] = 0;
+    for (int i = 0; i < 16; ++i) st[8 + i] = kDlssgStateGuid[i];
+    *(unsigned long long *)(st + 24) = 4;          // kStructVersion4
+
+    const unsigned r = g_orig_getstate(g_vp_copy, st, g_opt_copy);
+    if (r != 0) {
+        log_num("state: slDLSSGGetState refused, code ", (unsigned)r);
+        return;
+    }
+    const unsigned mx = *(unsigned *)(st + 52);
+    const unsigned char dyn = st[80];
+    log_num("state: the plugin accepts up to N generated frames: ", mx);
+    log_num("  which is a maximum multiplier of ", mx + 1);
+    log_num("  dynamic MFG supported (1 = yes): ", (unsigned)dyn);
+    // Sanity before it is allowed to shape the interface: a plugin claiming
+    // hundreds is a layout mistake on our side, not a discovery.
+    if (mx >= 1 && mx <= 16) {
+        g_frames_max = (LONG)mx;
+    } else {
+        log_line("  that is out of range, so it is ignored and the rows stay as they were");
+    }
+}
+
 
 static void arm_multiplier_override(unsigned char *base) {
     if (base == nullptr || g_orig_getfeaturefn != nullptr) return;
@@ -575,8 +1661,17 @@ static void arm_multiplier_override(unsigned char *base) {
     // earlier today, reintroduced in the same function hours later. Every
     // branch says something now.
     g_frametoken_addr = (void *)GetProcAddress((HMODULE)base, "slGetNewFrameToken");
-    if (g_frametoken_addr == nullptr) log_line("  ! slGetNewFrameToken not exported");
-    else log_line("  slGetNewFrameToken found (hooked only if an override is picked)");
+    if (g_frametoken_addr == nullptr) {
+        log_line("  ! slGetNewFrameToken not exported");
+    } else if (g_force_sel != 0) {
+        // A selection restored from mfg-settings.txt is a selection: it needs
+        // the same per-frame hook that picking one in the panel installs.
+        // Without this the override was armed only by hand, so a saved DYNAMIC
+        // came back looking chosen and did nothing at all.
+        arm_frametoken_hook();
+    } else {
+        log_line("  slGetNewFrameToken found (hooked only if an override is picked)");
+    }
 }
 
 // ----------------------------------------------------------- the rewrite ---
@@ -875,7 +1970,6 @@ static volatile LONG g_recording = 0;
 static long long g_rec_qpc0 = 0;
 static LONG g_written = 0;
 static const int kMaxSamples = 200000;
-static long long g_qpc_freq = 1;
 static wchar_t g_frames[MAX_PATH];
 static wchar_t g_frames_base[MAX_PATH];   // unnumbered name, per-run suffix added at F9
 static int g_run_no = 0;
@@ -1222,7 +2316,10 @@ static DWORD WINAPI recorder(LPVOID) {
                 const bool lmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
                 const bool onslider = g_ov_hot == kHotSlider;
                 const bool onvalue  = g_ov_hot == kHotValue;
-                const bool row_ok = g_ov_hot != 5 || g_dynamic_known;
+                const bool row_ok =
+                    (g_ov_hot == kSelDynamic) ? true
+                  : (g_ov_hot < 2 || g_frames_max == 0 ||
+                     (LONG)(g_ov_hot - 1) <= g_frames_max);
 
                 if (lmb && !lmb_was) {
                     if (onvalue) {
@@ -1996,6 +3093,10 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         }
         log_line("sl.dlss_g mapped");
         log_wide("  in ", d->FullDllName);
+        {
+            const int sc = patch_subframe_count(reinterpret_cast<unsigned char *>(d->DllBase));
+            log_num("  sub-frame count made writable, sites: ", (unsigned)sc);
+        }
         const int n = patch_enable_cpu_pacer(reinterpret_cast<unsigned char *>(d->DllBase));
         g_outputs_patched += n;
         log_num("  CPU pacer enabled, sites: ", (unsigned)n);
@@ -2220,6 +3321,9 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             while (g_frames[j] != 0 && j < MAX_PATH - 1) { pb[j] = g_frames[j]; ++j; }
             while (j > 0 && pb[j - 1] != 0x5C) --j;
             g_debug = flag_file(L"mfg-debug.txt");
+            g_frac_enabled = flag_file(L"mfg-frac.txt");
+            if (g_frac_enabled)
+                log_line("fractional multiplier ON (experimental: can stall the game)");
             if (g_debug) log_line("debug: F9 recorder armed (hooks Present)");
             g_ov_enabled = !flag_file(L"mfg-nopanel.txt");
             settings_load();
