@@ -769,7 +769,31 @@ static bool g_pace_follow = false;    // mfg-pacefollow.txt
 // (la caida de latencia 3->1 si se reproduce, el desorden no), forzar un cambio
 // de sincronizacion, y robarle el foco a la ventana.
 //
-// Lo que hay que perseguir es el campo en [r15+0].
+// [r15+0] resulto ser numFramesToGenerate: la estructura es
+// {cuenta, cuenta, cuenta+1, ..., modo en +0x20}, armada en rbp+0x620.
+//
+// Y hay DOS salidas de apagado para eOn:
+//
+//   0x4ad4f  cmp  dword ptr [r15], 0    ; cuenta 0 -> APAGADA
+//            je   0x4ad18               ;   (nuestro estado bajo sub-2.0x)
+//   0x4ad54  cmp  byte ptr [rdi+0x42b8], 0
+//            je   0x4b1b8               ; la otra:
+//   0x4b1b8      movsd  xmm0, [rdi+0x4488]   ; un acumulador
+//                comisd xmm0, 0
+//                jbe    0x4b1f9              ; ya drenado -> seguir
+//                subsd  xmm0, [rdi+0x478]    ; menos el delta del frame
+//                maxsd  xmm0, 0
+//                movsd  [rdi+0x4488], xmm0
+//                comisd xmm0, 0
+//                ja     0x4ad18              ; todavia cuenta -> APAGADA
+//
+// O sea [ctx+0x4488] es un ENFRIAMIENTO: mientras sea mayor que cero el plugin
+// se niega a interpolar, descontando el delta de cada frame. Eso es lo que
+// apago la generacion en GTA V con mode=eOn y cuenta 2 -- no un evento de
+// ventana, no una cuenta en cero. Al vencerse vuelve, y los frames en vuelo de
+// esa transicion son los que llegan desordenados.
+//
+// Falta: quien escribe [ctx+0x4488] y con que duracion.
 
 // The pacer's wait, made to follow the frame's own count.
 //
