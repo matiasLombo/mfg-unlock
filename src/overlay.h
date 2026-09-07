@@ -92,7 +92,7 @@ static const int kVisRows = kPanRows - kFirstRow;
 static const int kRowH = 22, kListPad = 6;
 static const int kListH = kVisRows * kRowH + 2 * kListPad;
 static const int kGap = 8;
-static const int kTgtH = 46;   // sin slider: solo el valor escrito
+static const int kTgtH = 80;   // el maximo: DYNAMIC lleva slider, CUSTOM no
 static const int kFootH = 38;
 static const int kListTop = kHdrH + 2 * (kBoxH + kBoxGap) + 2;
 static const int kTgtTop = kListTop + kListH + kGap;
@@ -144,6 +144,22 @@ static const int kStops[] = { 100, 125, 150, 175,
                               450, 500, 550, 600 };
 static const int kNStops = (int)(sizeof(kStops) / sizeof(kStops[0]));
 static const int kMinCustom = 200, kMaxCustom = 600;
+
+// Objetivos de DYNAMIC, en fps presentados. El cero es AUTO y significa el
+// refresh del monitor, que es lo que el controlador usa cuando no se le da un
+// numero. Paradas y no un continuo: el objetivo se elige entre valores que
+// significan algo -- 60, 120, el refresh -- y no en 137.
+static const int kFpsStops[] = { 0, 60, 72, 90, 100, 120, 144, 165, 180, 200, 240 };
+static const int kNFps = (int)(sizeof(kFpsStops) / sizeof(kFpsStops[0]));
+
+static int ov_fps_index(int fps) {
+    int best = 0, bd = 1 << 30;
+    for (int i = 0; i < kNFps; ++i) {
+        const int d = kFpsStops[i] > fps ? kFpsStops[i] - fps : fps - kFpsStops[i];
+        if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+}
 
 static float g_ov_mx = 0.0f, g_ov_my = 0.0f;
 static int   g_ov_hot = -1;
@@ -254,8 +270,14 @@ static bool ov_target_shown(void) {
     return g_force_sel == kSelDynamic || g_force_sel == kSelDynFuture;
 }
 
+// CUSTOM solo necesita la caja del numero; DYNAMIC lleva ademas el slider del
+// objetivo, asi que el panel crece solo cuando esa fila esta elegida.
+static int ov_tgt_h(void) {
+    return g_force_sel == kSelDynFuture ? kTgtH : 46;
+}
+
 static int ov_panel_h(void) {
-    return kTgtTop + (ov_target_shown() ? kTgtH + kGap : 0) + kFootH;
+    return kTgtTop + (ov_target_shown() ? ov_tgt_h() + kGap : 0) + kFootH;
 }
 
 static void ov_row_rect(int i, float *rx, float *ry, float *rw, float *rh) {
@@ -296,6 +318,19 @@ static int ov_stop_index(int fps) {
 
 // The stop nearest a pointer x, so dragging lands on a real value rather than
 // on whatever pixel the hand stopped at.
+// Que parada de fps cae bajo el puntero.
+static int ov_fps_at(float mx) {
+    float x0, x1, ty;
+    ov_track_rect(&x0, &x1, &ty);
+    float t = (mx - x0) / (x1 - x0);
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    int i = (int)(t * (float)(kNFps - 1) + 0.5f);
+    if (i < 0) i = 0;
+    if (i >= kNFps) i = kNFps - 1;
+    return i;
+}
+
 static int ov_stop_at(float mx) {
     float x0, x1, ty;
     ov_track_rect(&x0, &x1, &ty);
@@ -315,6 +350,17 @@ static void ov_update_pointer(void) {
         ov_value_rect(&vx, &vy, &vw, &vh);
         if (g_ov_mx >= vx && g_ov_mx < vx + vw && g_ov_my >= vy && g_ov_my < vy + vh) {
             g_ov_hot = kHotValue;
+            return;
+        }
+    }
+    if (g_force_sel == kSelDynFuture) {
+        float x0, x1, ty;
+        ov_track_rect(&x0, &x1, &ty);
+        // Banda generosa: la pista tiene cuatro pixeles de alto y nadie le
+        // acierta a eso moviendo el mouse con la mano.
+        if (g_ov_mx >= x0 - 10.0f && g_ov_mx <= x1 + 10.0f &&
+            g_ov_my >= ty - 12.0f && g_ov_my <= ty + 14.0f) {
+            g_ov_hot = kHotSlider;
             return;
         }
     }
@@ -489,11 +535,24 @@ static void ov_build_panel(void) {
     // rather than carrying a control that does nothing.
     if (ov_target_shown()) {
         const float ty = (float)kTgtTop;
-        ov_frame(in, ty, inw, (float)kTgtH, 0.22f, 0.26f, 0.30f, 1.0f);
-        ov_text("MULTIPLIER", in + 12.0f, ty + 17.0f, px, 0.60f, 0.62f, 0.66f);
+        const bool dyn = g_force_sel == kSelDynFuture;
+        ov_frame(in, ty, inw, (float)ov_tgt_h(), 0.22f, 0.26f, 0.30f, 1.0f);
+        ov_text(dyn ? "TARGET FPS" : "MULTIPLIER", in + 12.0f, ty + 17.0f, px,
+                0.60f, 0.62f, 0.66f);
 
         char t[8];
-        if (g_ov_editing) {
+        if (dyn) {
+            // AUTO cuando es cero: el controlador toma el refresh.
+            const int v = (int)g_dyn_fps;
+            int k = 0;
+            if (v <= 0) { t[k++] = 'A'; t[k++] = 'U'; t[k++] = 'T'; t[k++] = 'O'; }
+            else {
+                if (v >= 100) t[k++] = (char)('0' + (v / 100) % 10);
+                if (v >= 10)  t[k++] = (char)('0' + (v / 10) % 10);
+                t[k++] = (char)('0' + v % 10);
+            }
+            t[k] = 0;
+        } else if (g_ov_editing) {
             int k = 0;
             for (; k < g_ov_editlen; ++k) t[k] = g_ov_edit[k];
             t[k] = 0;
@@ -526,9 +585,30 @@ static void ov_build_panel(void) {
                     0.55f, 0.98f, 0.58f, 1.0f);
         }
 
-        // El slider se fue: CUSTOM se escribe. Un slider de doce paradas no
-        // podia expresar 2.35, y cada paso intermedio era una escritura de
-        // opciones que el plugin cobra.
+        // CUSTOM se escribe: un slider de doce paradas no podia expresar 2.35.
+        // DYNAMIC si lleva slider, porque su objetivo son fps y los valores que
+        // importan son pocos y conocidos.
+        if (dyn) {
+            float x0, x1, sy;
+            ov_track_rect(&x0, &x1, &sy);
+            const int si = ov_fps_index((int)g_dyn_fps);
+            const float fr = (float)si / (float)(kNFps - 1);
+            const float hx = x0 + (x1 - x0) * fr;
+            ov_rect(x0, sy, x1 - x0, 4.0f, 0.16f, 0.20f, 0.18f, 1.0f);
+            ov_rect(x0, sy, hx - x0, 4.0f, 0.36f, 0.92f, 0.40f, 1.0f);
+            const bool shot = g_ov_hot == kHotSlider;
+            ov_rect(hx - 7.0f, sy - 7.0f, 14.0f, 18.0f,
+                    shot ? 0.50f : 0.36f, shot ? 1.00f : 0.92f,
+                    shot ? 0.52f : 0.40f, 1.0f);
+            for (int q = 0; q < kNFps; ++q) {
+                const float tx = x0 + (x1 - x0) * ((float)q / (float)(kNFps - 1));
+                ov_rect(tx, sy + 9.0f, 1.0f, q == si ? 6.0f : 3.0f,
+                        q == si ? 0.45f : 0.24f, q == si ? 0.92f : 0.28f,
+                        q == si ? 0.48f : 0.30f, 1.0f);
+            }
+            ov_text("AUTO", x0 - 2.0f, sy + 19.0f, 1.5f, 0.44f, 0.46f, 0.50f);
+            ov_text("240", x1 - 26.0f, sy + 19.0f, 1.5f, 0.44f, 0.46f, 0.50f);
+        }
     }
 
     {

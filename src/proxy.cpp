@@ -4506,7 +4506,9 @@ static DWORD WINAPI recorder(LPVOID) {
 
             if (g_ov_visible) {
                 const bool lmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-                const bool onslider = false;   // el slider se fue: CUSTOM se escribe
+                // El slider vuelve solo para DYNAMIC, y mueve fps, no ratio.
+                const bool onslider = g_ov_hot == kHotSlider &&
+                                     g_force_sel == kSelDynFuture;
                 const bool onvalue  = g_ov_hot == kHotValue;
                 const bool onhud    = g_ov_hot == kHotHud;
                 if (onhud && lmb && !lmb_was) {
@@ -4550,9 +4552,9 @@ static DWORD WINAPI recorder(LPVOID) {
                 }
                 if (!lmb) dragging = false;
                 if (dragging) {
-                    const LONG v = (LONG)kStops[ov_stop_at(g_ov_mx)];
-                    if (v != g_dyn_target) {
-                        g_dyn_target = v;
+                    const LONG v = (LONG)kFpsStops[ov_fps_at(g_ov_mx)];
+                    if (v != g_dyn_fps) {
+                        g_dyn_fps = v;
                         g_dyn_said = 0;
                         arm_frametoken_hook();
                         g_opt_pending = 1;
