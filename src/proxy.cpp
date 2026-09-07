@@ -54,6 +54,7 @@ static wchar_t g_log[MAX_PATH];
 static bool g_frac_enabled = false;   // mfg-frac.txt
 static bool g_slowalt = false;        // mfg-slowalt.txt
 static int  g_slowalt_len = 240;       // rendered frames per block
+static int  g_block_ms = 0;           // mfg-blockms.txt, 0 = default
 
 // True when a file of this name sits beside the dll. The switches are files
 // because the person installing this has the dll and nothing else, and the
@@ -1299,6 +1300,15 @@ static double g_rendered_fps = 0.0;   // frames / elapsed, unbiased
 static int    g_lo_frames_seen = 0;   // rendered frames while the low count ran
 static int    g_hi_frames_seen = 0;   // and while the high one did
 static volatile LONG g_present_count = 0;   // presents seen at the swap chain
+static long long g_pres_qpc = 0;            // when the last present went out
+static volatile LONG g_last_change_pres = 0; // present index at the last count change
+static int g_hitch_near = 0;                 // hitches within 4 presents of one
+static int g_hitch_far = 0;                  // and the rest
+static double g_pres_ms_sum = 0.0;
+static double g_pres_ms_max = 0.0;
+static int    g_pres_n = 0;
+static int    g_pres_hitch = 0;             // intervals over 33 ms
+static int    g_pres_bucket[6] = { 0, 0, 0, 0, 0, 0 };
 static double g_lo_time = 0.0;
 static double g_hi_time = 0.0;
 static double g_token_fps = 0.0;      // and the rate that follows from it
@@ -1348,6 +1358,26 @@ static void note_rendered_frame(void) {
                     last_pres = now;
                     if (dp > 0) {
                         log_num("  presents this window ", (unsigned)dp);
+                        if (g_pres_n > 0) {
+                            log_num("  present ms avg x10 ",
+                                    (unsigned)(g_pres_ms_sum / (double)g_pres_n * 10.0));
+                            log_num("  present ms max x10 ", (unsigned)(g_pres_ms_max * 10.0));
+                            log_num("  hitches over 33ms ", (unsigned)g_pres_hitch);
+                            if (g_hitch_near + g_hitch_far > 0) {
+                                log_num("    at a count change ", (unsigned)g_hitch_near);
+                                log_num("    away from one ", (unsigned)g_hitch_far);
+                                g_hitch_near = 0;
+                                g_hitch_far = 0;
+                            }
+                            for (int b = 0; b < 6; ++b)
+                                if (g_pres_bucket[b] > 0) {
+                                    log_num("    bucket ", (unsigned)b);
+                                    log_num("      count ", (unsigned)g_pres_bucket[b]);
+                                }
+                            g_pres_ms_sum = 0.0; g_pres_ms_max = 0.0;
+                            g_pres_n = 0; g_pres_hitch = 0;
+                            for (int b = 0; b < 6; ++b) g_pres_bucket[b] = 0;
+                        }
                         log_num("  counted multiplier x100 ",
                                 (unsigned)((unsigned long long)dp * 100ULL / 45ULL));
                     }
@@ -1524,7 +1554,11 @@ static void fractional_tick(void) {
         // 1.50x delivered 1.81-1.90.
         static double sa_clock = 0.0;
         sa_clock += g_last_dt;
-        const double kBlockSecs = 0.75;
+        // Read from mfg-blockms.txt when present, so the block length can be
+        // swept without a rebuild. The unit is milliseconds of the cadence
+        // clock, which advances once per frame-token call -- about seven times
+        // per rendered frame -- so 750 here is ~125 ms of wall clock, not 750.
+        const double kBlockSecs = g_block_ms > 0 ? (double)g_block_ms / 1000.0 : 0.75;
         const int kBlocks = 8;
         const double cycle_secs = kBlockSecs * (double)kBlocks;
         if (sa_clock >= cycle_secs) sa_clock -= cycle_secs;
@@ -1642,6 +1676,7 @@ static void fractional_tick(void) {
             // that the count moved. The plugin logs a count only when the
             // enabled/disabled state changes, so its log cannot answer this.
             log_num("slowalt: API count now ", (unsigned)api);
+            g_last_change_pres = g_present_count;
         }
         // Rendered frames and elapsed time, split by which count was in force.
         // Their ratio is a fact about the pipeline; the average of the counts we
@@ -2446,6 +2481,38 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     // own scheduler cannot represent. An instrument that cannot fail measures
     // nothing.
     ++g_present_count;
+    // Present pacing, from the same hook. The multiplier says how many frames
+    // reach the screen; this says whether they arrive evenly, which is the half
+    // of the question a player actually feels. Histogram rather than a mean:
+    // block alternation is expected to produce two populations, and an average
+    // would hide exactly that.
+    {
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        if (g_pres_qpc != 0 && g_qpc_freq > 0) {
+            const double dt = (double)(t.QuadPart - g_pres_qpc) / (double)g_qpc_freq;
+            if (dt > 0.0 && dt < 0.500) {
+                const double ms = dt * 1000.0;
+                g_pres_ms_sum += ms;
+                ++g_pres_n;
+                if (ms > g_pres_ms_max) g_pres_ms_max = ms;
+                // Buckets in milliseconds: under 4, 4-8, 8-12, 12-20, 20-33,
+                // over 33. A 165 Hz panel refreshes every 6.06 ms.
+                const int b = ms < 4.0 ? 0 : ms < 8.0 ? 1 : ms < 12.0 ? 2
+                            : ms < 20.0 ? 3 : ms < 33.0 ? 4 : 5;
+                ++g_pres_bucket[b];
+                if (ms > 33.0) {
+                    ++g_pres_hitch;
+                    // How many presents ago the count last changed. Zero means
+                    // this hitch is the change itself.
+                    const LONG since = g_present_count - g_last_change_pres;
+                    if (since < 4) ++g_hitch_near;
+                    else ++g_hitch_far;
+                }
+            }
+        }
+        g_pres_qpc = t.QuadPart;
+    }
     note_present(nullptr, 2);
     if (g_recording != 0) note_display(self);
     return g_orig_dxgi_present(self, interval, flags);
@@ -3656,6 +3723,33 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             g_debug = flag_file(L"mfg-debug.txt");
             g_frac_enabled = flag_file(L"mfg-frac.txt");
             g_slowalt = flag_file(L"mfg-slowalt.txt");
+            {
+                // A one-line integer beside the dll; the sweep needs to move
+                // this without a rebuild.
+                wchar_t bp[MAX_PATH];
+                int bj = 0;
+                while (g_log[bj] != 0 && bj < MAX_PATH - 1) { bp[bj] = g_log[bj]; ++bj; }
+                while (bj > 0 && bp[bj - 1] != 0x5C) --bj;
+                const wchar_t *bn = L"mfg-blockms.txt";
+                for (int i = 0; bn[i] != 0; ++i) bp[bj + i] = bn[i];
+                bp[bj + 15] = 0;
+                HANDLE bh = CreateFileW(bp, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                        OPEN_EXISTING, 0, nullptr);
+                if (bh != INVALID_HANDLE_VALUE) {
+                    char buf[16] = { 0 };
+                    DWORD got = 0;
+                    if (ReadFile(bh, buf, 15, &got, nullptr) && got > 0) {
+                        int v = 0;
+                        for (DWORD i = 0; i < got && buf[i] >= '0' && buf[i] <= '9'; ++i)
+                            v = v * 10 + (buf[i] - '0');
+                        if (v > 0 && v < 100000) {
+                            g_block_ms = v;
+                            log_num("slowalt: block length from file, ms ", (unsigned)v);
+                        }
+                    }
+                    CloseHandle(bh);
+                }
+            }
             if (g_frac_enabled)
                 log_line("fractional multiplier ON (experimental: can stall the game)");
             if (g_debug) log_line("debug: F9 recorder armed (hooks Present)");
