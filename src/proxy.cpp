@@ -752,6 +752,22 @@ static bool g_pace_follow = false;    // mfg-pacefollow.txt
 // same trade patch_work_item_count already makes, so the count the pacer waits
 // on becomes a byte this file writes per frame.
 //
+// AND THE WHOLE PREMISE WAS A BENCH ARTIFACT. Measured in GTA V, standing
+// still and switching selection without moving the camera:
+//
+//   2.00x  28 windows  base 60  ratio 2.01  presented 121
+//   2.50x  20 windows  base 55  ratio 2.48  presented 137
+//   3.00x  17 windows  base 57  ratio 2.61  presented 145
+//
+// 2.50x presents MORE than 2.00x and the base barely moves -- 60, 55, 57 --
+// instead of dropping to refresh/(ceiling + 1). There is no pinning in a real
+// game. The sample renders 1280x720 of nothing, so it is refresh-bound in every
+// configuration and the pacer divides that ceiling; a GPU-bound game is not.
+//
+// So the law below, and every throughput number this file records, describes
+// the one environment where the problem exists. The seven patches that failed
+// to move the base failed because there was nothing to move.
+//
 // IT DOES NOT MOVE THE BASE. The patch applies, the integer controls stay exact
 // (1.000, 2.001, 3.000) so it is safe, and 2.50x reads base 55 and 138
 // presented with it and without it -- identical. The wait is computed from our
