@@ -1332,6 +1332,7 @@ static long long g_last_token_qpc = 0;
 
 static volatile LONG g_token_calls = 0;
 static volatile LONG g_frames_gated = 0;
+static bool g_novsync = false;        // mfg-novsync.txt: diagnostic
 static volatile LONG g_rt_present_count = 0;
 // The swap chain, kept so the runtime's own present counter can be sampled
 // from anywhere -- specifically from the frame-token hook, once per rendered
@@ -1451,8 +1452,15 @@ static void note_rendered_frame(void) {
                                     (unsigned)g_present_mismatch);
                     }
                     if (dp > 0 && !g_quiet) {
-                        log_num("  presents this window ", (unsigned)dp);
-                        log_num("  runtime presents this window ",
+                        // Named for which counter each one is, because the
+                        // string is what every analysis script keys on and the
+                        // meaning of "presents this window" changed identity
+                        // between two builds without a rename -- it was the
+                        // hook's count, then it was PresentCount. That is the
+                        // silent instrument swap this project keeps warning
+                        // itself about.
+                        log_num("  runtime PresentCount this window ", (unsigned)dp);
+                        log_num("  our hook count this window ",
                                 (unsigned)(rt_dp > 0 ? rt_dp : 0));
                         log_num("  raw token calls ", (unsigned)g_raw_calls);
                         log_num("  hook calls total ", (unsigned)g_token_calls);
@@ -1626,6 +1634,19 @@ static void fractional_tick(void) {
     if (g_force_sel != kSelDynamic) {
         if (g_force_sel >= 1 && g_force_sel <= kSelMaxFixed)
             set_count_now(g_force_sel >= 2 ? g_force_sel - 1 : 0);
+        else if (g_force_sel == 0)
+            // AUTO, and this row is the one that ships: with no settings file
+            // beside the dll the panel starts here. The first version of this
+            // guard began at row 1 and left AUTO out, so the patched byte kept
+            // the seed -- one generated frame -- and a game that asked for 3x
+            // or 4x on its own got pinned to 2x without a word. That is the
+            // same shape as the integer break it was written to fix, on the
+            // one row nobody selects deliberately.
+            //
+            // g_last_seen_generated is what the game asked for, captured in the
+            // options wrapper and already trusted enough to hand back on the
+            // AUTO restore path.
+            set_count_now(g_last_seen_generated);
         return;
     }
     if (g_wic_mode ? (g_wic == nullptr) : (g_count_imm == nullptr)) return;
@@ -2209,7 +2230,11 @@ static void settings_load(void);
 static void settings_watch(void) {
     if (!g_watch_settings) return;
     static int n = 0;
-    if (++n < 120) return;          // roughly twice a second at 240 fps
+    // Every 20 rendered frames. The measurement window is 45 frames, so the
+    // poll has to be several times finer than that or the answer is the poll
+    // interval rather than the response. At 120 it was 1.0 to 2.7 windows --
+    // coarser than the thing being measured.
+    if (++n < 20) return;
     n = 0;
     settings_load();
 }
@@ -3030,6 +3055,34 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     }
     note_present(nullptr, 2);
     if (g_recording != 0) note_display(self);
+    // Diagnostic only, behind mfg-novsync.txt.
+    //
+    // Every throughput comparison in this file was taken against a 165 Hz
+    // display that 2.00x already saturates, so nothing above it could show a
+    // gain and the numbers could not answer the question. Worse, the pacer
+    // settles the producer at refresh/(count+1), so a cadence whose ceiling is
+    // 3 renders at 165/3 whatever its average is: 2.25x pays 3x's base and
+    // returns 2.25x of it, 124 presented against 2.00x's 166. That reads as
+    // "fractional is strictly worse" and it may be nothing but vsync.
+    //
+    // Forcing the interval to zero takes the refresh out of the loop and lets
+    // the comparison come out either way.
+    //
+    // interval 0 on its own changed nothing: base 165/83/55 and 165 presented,
+    // identical to vsync on, because a flip-model swap chain still waits for
+    // vblank unless the present asks to tear. So ask, and fall back if the
+    // chain was not created allowing it -- Present returns DXGI_ERROR_INVALID_CALL
+    // rather than tearing, and a failed present would break the run.
+    if (g_novsync) {
+        static int tearing = 1;          // 1 = try, 0 = chain refused it
+        if (tearing) {
+            const HRESULT hr = g_orig_dxgi_present(self, 0, flags | 0x00000200 /*ALLOW_TEARING*/);
+            if (SUCCEEDED(hr)) return hr;
+            tearing = 0;
+            log_line("novsync: the swap chain refuses tearing; the refresh cap stays");
+        }
+        interval = 0;
+    }
     return g_orig_dxgi_present(self, interval, flags);
 }
 
@@ -4314,6 +4367,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             // Nothing generates by itself: the scheduler still returns before
             // any cadence work unless the panel is on DYNAMIC.
             g_watch_settings = flag_file(L"mfg-watch.txt");
+            g_novsync = flag_file(L"mfg-novsync.txt");
             g_frac_enabled = !flag_file(L"mfg-nofrac.txt");
             g_slowalt = !flag_file(L"mfg-noslowalt.txt");
             g_quiet = flag_file(L"mfg-quiet.txt");
