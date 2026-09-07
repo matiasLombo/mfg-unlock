@@ -2652,9 +2652,22 @@ static void fractional_tick(void) {
         // cuenta. Cada cambio de cuenta hace que el plugin libere y reserve del
         // orden de 750 MB, medido en GTA V.
         //
-        // No se cambia sin medir: la misma tabla dice que los bloques largos
-        // hacen la cadencia mas a saltos, y eso no esta medido con el
-        // instrumento honesto.
+        // MEDIDO, y los 16 ms se quedan. A 2.50x, misma escena, 47 ventanas:
+        //
+        //   bloque   vram alloc  cambios de latencia  distribucion por ventana
+        //   16 ms       297           148             46 de 47 en 2.50
+        //   125 ms      233            20             15 en 2.00 y 18 en 3.00
+        //
+        // Los cambios de latencia caen 86%, pero la cadencia se rompe: el
+        // jugador pasa dos segundos a 2x y dos a 3x en vez de 2.5x estable.
+        // Un ciclo mas largo que la ventana de medicion no es un problema del
+        // instrumento -- es lo que se ve.
+        //
+        // Y de paso corrige la premisa: las reservas de VRAM casi no son
+        // nuestras. Bajaron 297 -> 233, y 233 es lo que mide un entero fijo que
+        // hace tres cambios de cuenta en toda la corrida. El piso es del plugin
+        // y lo nuestro agrega unas 64. Lo que si escala con nuestros cambios son
+        // las reconfiguraciones de latencia: 148, 20, 3.
         const double kBlockSecs = g_block_ms > 0 ? (double)g_block_ms / 1000.0 : 0.016;
         // Thirty-two blocks, not eight. The split is quantised to 1/kBlocks of
         // the cycle, and below 2.0x the rate weighting pushes the useful range
@@ -3255,6 +3268,12 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     // su llamada: con el puesto, un 2.00x normal renderiza 30 y presenta 30
     // -- cero frames generados -- con 538 "Out of order frame" en sl.log. No
     // es el arreglo del desorden; lo empeora dos ordenes de magnitud.
+    // Se evaluo sacarla en la auditoria y se decidio dejarla. Es codigo muerto
+    // en la configuracion por defecto, si, pero el costo es UNA comparacion por
+    // frame contra un puntero que siempre es nulo: el predictor la acierta
+    // siempre y no aparece en ninguna medicion. Y sacarla romperia en silencio
+    // el camino sin wic, donde patch_monotonic_index si puede asignar el
+    // puntero si alguien pone mfg-monoidx.txt. Basura, no costo.
     if (g_pidx != nullptr) *g_pidx += 6;
     // Make the frame cost something, from mfg-slowframe.txt (milliseconds).
     //
