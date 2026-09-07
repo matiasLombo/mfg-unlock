@@ -1978,6 +1978,11 @@ static void note_rendered_frame(void) {
                                 (unsigned)(g_present_block_us / 1000.0));
                         log_num("  window elapsed, ms ",
                                 (unsigned)(win_elapsed * 1000.0));
+                        // Alimenta el HUD con lo mismo que se registra, no con
+                        // una segunda cuenta: dos medidas del mismo numero se
+                        // separan y despues no se sabe cual creer.
+                        if (win_elapsed > 0.0)
+                            g_hud_fps_x10 = (LONG)(dp * 10.0 / win_elapsed + 0.5);
                         g_present_block_us = 0.0;
                         if (g_clamp_latency > 0)
                             log_num("  SetMaximumFrameLatency calls so far ",
@@ -2006,6 +2011,7 @@ static void note_rendered_frame(void) {
                                         (unsigned)(g_rfx_gpu / g_rfx_n));
                                 log_num("  latency sim to driver end us ",
                                         (unsigned)(g_rfx_drv / g_rfx_n));
+                                g_hud_lat_us = (LONG)(g_rfx_drv / g_rfx_n);
                                 log_num("  reflex frame time us ",
                                         (unsigned)(g_rfx_ft / g_rfx_n));
                                 log_num("    driver latency min us ",
@@ -3005,6 +3011,14 @@ static void settings_save(void) {
         }
     }
     buf[k++] = '\r'; buf[k++] = '\n';
+    {
+        // El HUD se guarda como el resto: si alguien lo deja prendido,
+        // sigue prendido la proxima vez que abre el juego.
+        const char *l3 = "hud ";
+        for (int i = 0; l3[i] != 0; ++i) buf[k++] = l3[i];
+        buf[k++] = g_hud_on ? '1' : '0';
+        buf[k++] = '\r'; buf[k++] = '\n';
+    }
     DWORD w = 0;
     WriteFile(h, buf, (DWORD)k, &w, nullptr);
     CloseHandle(h);
@@ -3028,9 +3042,17 @@ static void settings_load(void) {
     for (DWORD i = 0; i < n; ++i) {
         const bool is_mode = (i + 5 < n) && buf[i] == 'm' && buf[i+1] == 'o' &&
                              buf[i+2] == 'd' && buf[i+3] == 'e';
+        const bool is_hud  = (i + 4 < n) && buf[i] == 'h' &&
+                             buf[i+1] == 'u' && buf[i+2] == 'd' &&
+                             buf[i+3] == ' ';
         const bool is_tgt  = (i + 7 < n) && buf[i] == 't' && buf[i+1] == 'a' &&
                              buf[i+2] == 'r' && buf[i+3] == 'g' && buf[i+4] == 'e' &&
                              buf[i+5] == 't';
+        if (is_hud) {
+            g_hud_on = buf[i+4] == '1';
+            i += 4;
+            continue;
+        }
         if (!is_mode && !is_tgt) continue;
         DWORD j = i + (is_mode ? 4 : 6);
         while (j < n && (buf[j] == ' ' || buf[j] == '=')) ++j;
@@ -3050,8 +3072,10 @@ static void settings_load(void) {
                 // seed; the controller moves off it on the first measurement.
                 if (v == kSelDynamic) g_force_generated = 1;
             }
-        } else if (is_tgt && v >= 0 && v <= 600) {
-            g_dyn_target = v;
+        } else if (is_tgt && v >= 0 && v <= kMaxCustom) {
+            // Un ajuste guardado por una version anterior puede traer 150. Se
+            // sube al piso en vez de aceptarlo: el panel ya no ofrece ese valor.
+            g_dyn_target = v < kMinCustom ? kMinCustom : v;
         }
         i = j;
     }
@@ -4124,12 +4148,23 @@ static DWORD WINAPI recorder(LPVOID) {
             }
             tilde_was = t;
 
+            // Fuera del bloque de abajo a proposito: el HUD no depende de que
+            // el panel este abierto.
+            hud_tick();
+
             if (g_ov_visible) {
                 const bool lmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-                const bool onslider = g_ov_hot == kHotSlider;
+                const bool onslider = false;   // el slider se fue: CUSTOM se escribe
                 const bool onvalue  = g_ov_hot == kHotValue;
+                const bool onhud    = g_ov_hot == kHotHud;
+                if (onhud && lmb && !lmb_was) {
+                    g_hud_on = !g_hud_on;
+                    log_num("panel: HUD ", (unsigned)(g_hud_on ? 1 : 0));
+                    g_settings_dirty = 1;
+                }
                 const bool row_ok =
-                    (g_ov_hot == kSelDynamic) ? true
+                    (g_ov_hot == kSelDynFuture) ? false
+                  : (g_ov_hot == kSelDynamic) ? true
                   : (g_ov_hot < 2 || g_frames_max == 0 ||
                      (LONG)(g_ov_hot - 1) <= g_frames_max);
 

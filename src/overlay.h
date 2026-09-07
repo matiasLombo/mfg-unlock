@@ -81,17 +81,39 @@ static const int kPanW = 340;
 static const int kPad = 14;
 static const int kHdrH = 42;
 static const int kBoxH = 26, kBoxGap = 6;
-static const int kPanRows = 8;
+// Nueve filas internas, ocho visibles. AUTO sigue existiendo con su indice 0
+// para no cambiarle el numero a ninguna de las otras -- siete lugares del
+// proxy comparan contra kSelDynamic y kSelMaxFixed por valor -- pero no se
+// dibuja ni se puede elegir. La fila 8 es DYNAMIC, grisada, reservada para la
+// reimplementacion.
+static const int kPanRows = 9;
+static const int kFirstRow = 1;                    // 0 es AUTO, oculta
+static const int kVisRows = kPanRows - kFirstRow;
 static const int kRowH = 22, kListPad = 6;
-static const int kListH = kPanRows * kRowH + 2 * kListPad;
+static const int kListH = kVisRows * kRowH + 2 * kListPad;
 static const int kGap = 8;
-static const int kTgtH = 80;
+static const int kTgtH = 46;   // sin slider: solo el valor escrito
 static const int kFootH = 38;
 static const int kListTop = kHdrH + 2 * (kBoxH + kBoxGap) + 2;
 static const int kTgtTop = kListTop + kListH + kGap;
 static const int kPanHMax = kTgtTop + kTgtH + kGap + kFootH;
 
 static const int kHotSlider = 100, kHotValue = 101;
+static const int kHotHud = 102;          // el casillero del pie
+
+// El HUD es una segunda ventana, no un dibujo dentro del swapchain del juego.
+// Misma receta que el panel, que es la unica que en este proyecto nunca rompio
+// el render: capa propia, sin foco, transparente a los clicks.
+static const int kHudW = 340, kHudH = 30;
+static unsigned *g_hud_px = nullptr;
+static HWND g_hud_hwnd = nullptr;
+static HDC  g_hud_dc = nullptr;
+static HBITMAP g_hud_bmp = nullptr;
+static bool g_hud_on = false;            // lo enciende el casillero del panel
+static bool g_hud_open = false;          // si la ventana esta creada y mostrada
+// Los alimenta el hook de present y la sonda de Reflex.
+static volatile LONG g_hud_fps_x10 = 0;
+static volatile LONG g_hud_lat_us = 0;
 
 // The multiplier, times a hundred: 150 is 1.5x. A multiplier and not a target
 // frame rate, which is what this asked for at first and what made it behave
@@ -121,6 +143,7 @@ static const int kStops[] = { 100, 125, 150, 175,
                               200, 225, 250, 275, 300, 325, 350, 375, 400,
                               450, 500, 550, 600 };
 static const int kNStops = (int)(sizeof(kStops) / sizeof(kStops[0]));
+static const int kMinCustom = 200, kMaxCustom = 600;
 
 static float g_ov_mx = 0.0f, g_ov_my = 0.0f;
 static int   g_ov_hot = -1;
@@ -136,10 +159,14 @@ static int  g_ov_editlen = 0;
 // that had been written out in seven places; adding two rows in the middle
 // would have needed every one of them found and changed by hand, and the ones
 // missed would each have been a silent wrong branch.
-static const int kSelDynamic = kPanRows - 1;
-static const int kSelMaxFixed = kSelDynamic - 1;    // the last of the 2X..6X rows
+// Fijados por valor a proposito: derivarlos de kPanRows los movia al agregar
+// la fila nueva, y eso le habria cambiado el significado a cada comparacion
+// del proxy sin un solo error de compilacion.
+static const int kSelDynamic = 7;                  // la fila CUSTOM
+static const int kSelDynFuture = 8;                // DYNAMIC, grisada
+static const int kSelMaxFixed = 6;                 // la ultima de 2X..6X
 static const char *kRowName[kPanRows] = { "AUTO", "OFF", "2X", "3X", "4X",
-                                          "5X", "6X", "DYNAMIC" };
+                                          "5X", "6X", "CUSTOM", "DYNAMIC" };
 
 // ---- the pixel buffer ---------------------------------------------------
 
@@ -163,18 +190,28 @@ static inline unsigned ov_argb(float r, float g, float b, float a) {
     return (A << 24) | (R << 16) | (G << 8) | B;
 }
 
+// El destino es elegible para que el HUD reuse estas primitivas tal cual. Sin
+// esto habria que duplicar ov_rect, ov_text y la fuente entera, y dos copias de
+// un dibujado divergen calladas.
+static unsigned *g_dst_px = nullptr;
+static int g_dst_w = 0, g_dst_h = 0;
+
+static void ov_target(unsigned *px, int w, int h) {
+    g_dst_px = px; g_dst_w = w; g_dst_h = h;
+}
+
 static void ov_rect(float fx, float fy, float fw, float fh,
                     float r, float g, float b, float a) {
-    if (g_ov_px == nullptr) return;
+    if (g_dst_px == nullptr) return;
     int x0 = (int)fx, y0 = (int)fy;
     int x1 = (int)(fx + fw), y1 = (int)(fy + fh);
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    if (x1 > kPanW) x1 = kPanW;
-    if (y1 > kPanHMax) y1 = kPanHMax;
+    if (x1 > g_dst_w) x1 = g_dst_w;
+    if (y1 > g_dst_h) y1 = g_dst_h;
     const unsigned c = ov_argb(r, g, b, a);
     for (int y = y0; y < y1; ++y) {
-        unsigned *row = g_ov_px + (size_t)y * kPanW;
+        unsigned *row = g_dst_px + (size_t)y * g_dst_w;
         for (int x = x0; x < x1; ++x) row[x] = c;
     }
 }
@@ -223,7 +260,7 @@ static int ov_panel_h(void) {
 
 static void ov_row_rect(int i, float *rx, float *ry, float *rw, float *rh) {
     *rx = (float)(kPad + 4);
-    *ry = (float)(kListTop + kListPad + i * kRowH);
+    *ry = (float)(kListTop + kListPad + (i - kFirstRow) * kRowH);
     *rw = (float)(kPanW - 2 * kPad - 8);
     *rh = (float)(kRowH - 2);
 }
@@ -232,6 +269,13 @@ static void ov_track_rect(float *x0, float *x1, float *y) {
     *x0 = (float)(kPad + 18);
     *x1 = (float)(kPanW - kPad - 18);
     *y  = (float)(kTgtTop + 48);
+}
+
+static void ov_hud_box(float *x, float *y, float *w, float *h) {
+    *w = 16.0f;
+    *h = 16.0f;
+    *x = (float)(kPanW - kPad - 60);
+    *y = (float)(ov_panel_h() - kFootH) + 11.0f;
 }
 
 static void ov_value_rect(float *x, float *y, float *w, float *h) {
@@ -273,17 +317,18 @@ static void ov_update_pointer(void) {
             g_ov_hot = kHotValue;
             return;
         }
-        float x0, x1, ty;
-        ov_track_rect(&x0, &x1, &ty);
-        // A generous band: the track is four pixels tall and nobody hits that
-        // with a pointer they are moving by hand.
-        if (g_ov_mx >= x0 - 10.0f && g_ov_mx <= x1 + 10.0f &&
-            g_ov_my >= ty - 12.0f && g_ov_my <= ty + 14.0f) {
-            g_ov_hot = kHotSlider;
+    }
+    {
+        float bx, by, bw, bh;
+        ov_hud_box(&bx, &by, &bw, &bh);
+        // Banda generosa: el casillero mide 16 px y se apunta con el mouse.
+        if (g_ov_mx >= bx - 6.0f && g_ov_mx <= bx + bw + 46.0f &&
+            g_ov_my >= by - 6.0f && g_ov_my <= by + bh + 6.0f) {
+            g_ov_hot = kHotHud;
             return;
         }
     }
-    for (int i = 0; i < kPanRows; ++i) {
+    for (int i = kFirstRow; i < kPanRows; ++i) {
         float rx, ry, rw, rh;
         ov_row_rect(i, &rx, &ry, &rw, &rh);
         if (g_ov_mx >= rx && g_ov_mx < rx + rw && g_ov_my >= ry && g_ov_my < ry + rh) {
@@ -320,8 +365,11 @@ static int ov_edit_commit(void) {
     if (g_ov_editlen == 0) return -1;
     int v = 0;
     for (int i = 0; i < g_ov_editlen; ++i) v = v * 10 + (g_ov_edit[i] - '0');
-    if (v < kStops[0]) v = kStops[0];
-    if (v > kStops[kNStops - 1]) v = kStops[kNStops - 1];
+    // CUSTOM va de 2.00 a 6.00. El piso ya no es 1.00: AUTO se fue del panel y
+    // los fraccionarios por debajo de 2.0 todavia no estan medidos. El techo es
+    // el limite estructural del plugin, no una preferencia.
+    if (v < kMinCustom) v = kMinCustom;
+    if (v > kMaxCustom) v = kMaxCustom;
     return v;
 }
 
@@ -343,6 +391,7 @@ static void ov_num(char *out, int v) {
 
 static void ov_build_panel(void) {
     ++g_ov_frame;
+    ov_target(g_ov_px, kPanW, kPanHMax);
     const float px = 2.0f;
     const int h = ov_panel_h();
     const float in = (float)kPad, inw = (float)(kPanW - 2 * kPad);
@@ -383,7 +432,7 @@ static void ov_build_panel(void) {
 
     {
         ov_frame(in, (float)kListTop, inw, (float)kListH, 0.22f, 0.26f, 0.30f, 1.0f);
-        for (int i = 0; i < kPanRows; ++i) {
+        for (int i = kFirstRow; i < kPanRows; ++i) {
             float rx, ry, rw, rh;
             ov_row_rect(i, &rx, &ry, &rw, &rh);
             // A row above what the plugin accepts is not a worse setting, it
@@ -391,7 +440,8 @@ static void ov_build_panel(void) {
             // frame count over its maximum outright, and only 2.11.1 and newer
             // soften that into a clamp. Offering 6X where it will be refused
             // would stop frame generation with nothing to explain it.
-            const bool avail = (i == kSelDynamic) ? true
+            const bool avail = (i == kSelDynFuture) ? false
+                             : (i == kSelDynamic) ? true
                              : (i < 2 || g_frames_max == 0 ||
                                 (LONG)(i - 1) <= g_frames_max);
             const bool on  = (sel == i) && avail;
@@ -427,7 +477,8 @@ static void ov_build_panel(void) {
             t[k] = 0;
         } else {
             // Shown the way it is meant: 150 held internally reads as 1.50X.
-            const int v = (int)(g_dyn_target < 100 ? 100 : g_dyn_target);
+            const int v = (int)(g_dyn_target < kMinCustom ? kMinCustom
+                                                          : g_dyn_target);
             int k = 0;
             t[k++] = (char)('0' + (v / 100) % 10);
             t[k++] = '.';
@@ -453,65 +504,9 @@ static void ov_build_panel(void) {
                     0.55f, 0.98f, 0.58f, 1.0f);
         }
 
-        float x0, x1, sy;
-        ov_track_rect(&x0, &x1, &sy);
-        // The handle follows the value in force, not the half-typed digits:
-        // "1" on the way to "120" would otherwise throw it to the far left.
-        const int shown = ov_stop_index((int)g_dyn_target);
-        const float f = (float)shown / (float)(kNStops - 1);
-        const float hx = x0 + (x1 - x0) * f;
-        ov_rect(x0, sy, x1 - x0, 4.0f, 0.16f, 0.20f, 0.18f, 1.0f);
-        ov_rect(x0, sy, hx - x0, 4.0f, 0.36f, 0.92f, 0.40f, 1.0f);
-        const bool shot = g_ov_hot == kHotSlider;
-        ov_rect(hx - 7.0f, sy - 7.0f, 14.0f, 18.0f,
-                shot ? 0.50f : 0.36f, shot ? 1.00f : 0.92f, shot ? 0.52f : 0.40f, 1.0f);
-
-        // Ticks at the stops worth naming. Their positions are their real
-        // ones: the spacing is even because the stops are, not because the
-        // labels were placed where they looked good.
-        // A faint tick at every stop, so the track reads as a ruler and the
-        // handle visibly lands on one rather than anywhere it likes.
-        for (int si = 0; si < kNStops; ++si) {
-            const float tx = x0 + (x1 - x0) * ((float)si / (float)(kNStops - 1));
-            ov_rect(tx, sy + 9.0f, 1.0f, 3.0f, 0.24f, 0.28f, 0.30f, 1.0f);
-        }
-        // 1.00, 2.00, 3.00, 4.00 and the top, found by value rather than by
-        // index, so the list can change length without the labels lying.
-        static const int kLabelValues[] = { 100, 200, 300, 400, 600 };
-        int kLabelled[5];
-        for (int li = 0; li < 5; ++li) {
-            kLabelled[li] = kNStops - 1;
-            for (int sj = 0; sj < kNStops; ++sj)
-                if (kStops[sj] == kLabelValues[li]) { kLabelled[li] = sj; break; }
-        }
-        const float lpx = 1.5f;
-        for (int i = 0; i < 5; ++i) {
-            const int si = kLabelled[i];
-            const float tx = x0 + (x1 - x0) * ((float)si / (float)(kNStops - 1));
-            const bool cur = si == shown;
-            ov_rect(tx, sy + 9.0f, 1.0f, 6.0f,
-                    cur ? 0.45f : 0.34f, cur ? 0.92f : 0.38f, cur ? 0.48f : 0.42f, 1.0f);
-            char lb[8];
-            {
-                const int v = kStops[si];
-                int k = 0;
-                lb[k++] = (char)('0' + (v / 100) % 10);
-                lb[k++] = '.';
-                lb[k++] = (char)('0' + (v / 10) % 10);
-                if (v % 10 != 0) lb[k++] = (char)('0' + v % 10);
-                lb[k] = 0;
-            }
-            int n = 0;
-            while (lb[n] != 0) ++n;
-            const float wpx = n * 6.0f * lpx;
-            float lx = tx - wpx * 0.5f;
-            if (i == 0) lx = tx;                       // first: from the tick
-            if (i == 4) lx = tx - wpx;                 // last: back to it
-            if (lx < (float)kPad) lx = (float)kPad;
-            if (lx + wpx > (float)(kPanW - kPad)) lx = (float)(kPanW - kPad) - wpx;
-            ov_text(lb, lx, sy + 19.0f, lpx,
-                    cur ? 0.45f : 0.44f, cur ? 0.95f : 0.46f, cur ? 0.48f : 0.50f);
-        }
+        // El slider se fue: CUSTOM se escribe. Un slider de doce paradas no
+        // podia expresar 2.35, y cada paso intermedio era una escritura de
+        // opciones que el plugin cobra.
     }
 
     {
@@ -521,8 +516,21 @@ static void ov_build_panel(void) {
         ov_text("ESC", in + 6.0f, fy + 15.0f, 1.6f, 0.45f, 0.95f, 0.48f);
         ov_text(g_ov_editing ? "CANCELS" : "CLOSES", in + 44.0f, fy + 15.0f, 1.6f,
                 0.50f, 0.52f, 0.56f);
-        ov_text("///", (float)(kPanW - kPad - 24), fy + 15.0f, 1.6f,
-                0.25f, 0.60f, 0.30f);
+
+        // El casillero del HUD. Vive en el pie y no en la lista de modos porque
+        // no es un modo: no cambia nada de lo que la dll hace, solo si se ve.
+        float bx, by, bw, bh;
+        ov_hud_box(&bx, &by, &bw, &bh);
+        const bool bhot = g_ov_hot == kHotHud;
+        ov_frame(bx, by, bw, bh,
+                 bhot ? 0.45f : 0.30f, bhot ? 0.95f : 0.60f,
+                 bhot ? 0.48f : 0.34f, 1.0f);
+        if (g_hud_on)
+            ov_rect(bx + 4.0f, by + 4.0f, bw - 8.0f, bh - 8.0f,
+                    0.36f, 0.92f, 0.40f, 1.0f);
+        ov_text("HUD", bx + bw + 8.0f, fy + 15.0f, 1.6f,
+                g_hud_on ? 0.45f : 0.40f, g_hud_on ? 0.95f : 0.42f,
+                g_hud_on ? 0.48f : 0.46f);
     }
 
     // Pointer last, so it is never painted over.
@@ -702,6 +710,148 @@ static void ov_present_window(void) {
     BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
     UpdateLayeredWindow(g_ov_hwnd, nullptr, &dst, &size, g_ov_dc, &src,
                         0, &bf, ULW_ALPHA);
+}
+
+// ---- el HUD ---------------------------------------------------------------
+
+static bool ov_game_in_front(void);   // definida mas abajo, junto al panel
+
+
+static bool hud_make_window(void) {
+    if (g_hud_hwnd != nullptr) return true;
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = &ov_proc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"MfgUnlockHud";
+    RegisterClassExW(&wc);
+    g_hud_hwnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW |
+        WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+        L"MfgUnlockHud", L"", WS_POPUP,
+        0, 0, kHudW, kHudH, nullptr, nullptr, wc.hInstance, nullptr);
+    if (g_hud_hwnd == nullptr) { log_line("hud: window FAILED"); return false; }
+    BITMAPINFO bi = {};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = kHudW;
+    bi.bmiHeader.biHeight = -kHudH;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    HDC screen = GetDC(nullptr);
+    g_hud_dc = CreateCompatibleDC(screen);
+    g_hud_bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS,
+                                 (void **)&g_hud_px, nullptr, 0);
+    ReleaseDC(nullptr, screen);
+    if (g_hud_dc == nullptr || g_hud_bmp == nullptr || g_hud_px == nullptr) {
+        log_line("hud: bitmap FAILED");
+        DestroyWindow(g_hud_hwnd);
+        g_hud_hwnd = nullptr;
+        return false;
+    }
+    SelectObject(g_hud_dc, g_hud_bmp);
+    return true;
+}
+
+static void hud_build(void) {
+    if (g_hud_px == nullptr) return;
+    ov_target(g_hud_px, kHudW, kHudH);
+    for (int i = 0; i < kHudW * kHudH; ++i) g_hud_px[i] = 0;
+    ov_rect(0.0f, 0.0f, (float)kHudW, (float)kHudH, 0.02f, 0.03f, 0.03f, 0.72f);
+    ov_rect(0.0f, 0.0f, (float)kHudW, 1.0f, 0.36f, 0.92f, 0.40f, 0.9f);
+
+    char line[64];
+    int k = 0;
+    const int fps = (int)((g_hud_fps_x10 + 5) / 10);
+    if (fps >= 100) line[k++] = (char)(48 + (fps / 100) % 10);
+    if (fps >= 10)  line[k++] = (char)(48 + (fps / 10) % 10);
+    line[k++] = (char)(48 + fps % 10);
+    line[k++] = 32; line[k++] = 70; line[k++] = 80; line[k++] = 83;  // " FPS"
+    line[k++] = 32; line[k++] = 45; line[k++] = 32;                  // " - "
+
+    // El modo es el nombre de la fila, y si es CUSTOM tambien el numero escrito.
+    const int sel = (int)g_force_sel;
+    const char *nm = (sel >= 0 && sel < kPanRows) ? kRowName[sel] : "?";
+    for (const char *q = nm; *q != 0 && k < 40; ++q) line[k++] = *q;
+    if (sel == kSelDynamic) {
+        const int v = (int)g_dyn_target;
+        line[k++] = 32;
+        line[k++] = (char)(48 + (v / 100) % 10);
+        line[k++] = 46;
+        line[k++] = (char)(48 + (v / 10) % 10);
+        line[k++] = (char)(48 + v % 10);
+    }
+    line[k] = 0;
+    ov_text(line, 10.0f, 11.0f, 1.7f, 0.72f, 0.96f, 0.74f);
+
+    // La latencia va a la derecha, y solo si hay dato: mostrar un cero
+    // inventado seria peor que no mostrar nada.
+    const LONG us = g_hud_lat_us;
+    char lat[16];
+    int j = 0;
+    if (us > 0) {
+        const int ms10 = (int)((us + 50) / 100);
+        if (ms10 >= 1000) lat[j++] = (char)(48 + (ms10 / 1000) % 10);
+        if (ms10 >= 100)  lat[j++] = (char)(48 + (ms10 / 100) % 10);
+        lat[j++] = (char)(48 + (ms10 / 10) % 10);
+        lat[j++] = 46;
+        lat[j++] = (char)(48 + ms10 % 10);
+        lat[j++] = 32; lat[j++] = 109; lat[j++] = 115;   // " ms"
+    } else {
+        lat[j++] = 45; lat[j++] = 45; lat[j++] = 32;
+        lat[j++] = 109; lat[j++] = 115;                  // "-- ms"
+    }
+    lat[j] = 0;
+    ov_text_right(lat, (float)(kHudW - 10), 11.0f, 1.7f, 0.60f, 0.86f, 0.62f);
+}
+
+static void hud_present(void) {
+    if (g_hud_hwnd == nullptr || g_hud_px == nullptr) return;
+    if (g_ov_game == nullptr || !IsWindow(g_ov_game))
+        EnumWindows(&ov_find_game, (LPARAM)&g_ov_game);
+    POINT origin = { 0, 0 };
+    int cw = 1920;
+    if (g_ov_game != nullptr) {
+        ClientToScreen(g_ov_game, &origin);
+        RECT rc;
+        if (GetClientRect(g_ov_game, &rc)) cw = rc.right - rc.left;
+    }
+    POINT dst = { origin.x + (cw - kHudW) / 2, origin.y + 12 };
+    SIZE  size = { kHudW, kHudH };
+    POINT src = { 0, 0 };
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(g_hud_hwnd, nullptr, &dst, &size, g_hud_dc, &src,
+                        0, &bf, ULW_ALPHA);
+}
+
+// Corre en cada present, este el panel abierto o no: el HUD es independiente y
+// tiene que sobrevivir a cerrar el panel con la tilde.
+static void hud_tick(void) {
+    const bool want = g_hud_on && ov_game_in_front();
+    if (want && !g_hud_open) {
+        if (!hud_make_window()) return;
+        hud_build();
+        hud_present();
+        ShowWindow(g_hud_hwnd, SW_SHOWNOACTIVATE);
+        SetWindowPos(g_hud_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        g_hud_open = true;
+        log_line("hud: shown");
+        return;
+    }
+    if (!want && g_hud_open) {
+        if (g_hud_hwnd != nullptr) ShowWindow(g_hud_hwnd, SW_HIDE);
+        g_hud_open = false;
+        return;
+    }
+    if (!g_hud_open) return;
+    // Dos refrescos por segundo: alcanza para leerlo y no compite con el render.
+    static ULONGLONG last = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - last < 500) return;
+    last = now;
+    hud_build();
+    hud_present();
 }
 
 static void ov_show(bool on) {
