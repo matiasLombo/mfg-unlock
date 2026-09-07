@@ -724,6 +724,81 @@ static int patch_gate_frame_latency(unsigned char *base, unsigned char *text, si
 // generation was not built to be switched per frame, and this is the piece
 // that assumed it would not be.
 static bool g_pin_latency = false;    // mfg-pinlatency.txt: diagnostic
+static bool g_pace_follow = false;    // mfg-pacefollow.txt
+// The pacer's wait, made to follow the frame's own count.
+//
+// This is where the throughput law lives. presentCommon's pacing block computes
+// how long to wait before letting the producer go:
+//
+//   48 8B B6 C8 0C 00 00   mov  rsi, [r14+0xcc8]   ; the refresh interval, us
+//   41 8B 4D 04            mov  ecx, [r13+4]       ; the count
+//   48 0F AF CE            imul rcx, rsi           ; wait = count * interval
+//   48 2B C8               sub  rcx, rax           ; less what already elapsed
+//
+// and [r13+4] holds the count the *API* was told, which is ceil(ratio - 1) --
+// the cadence ceiling, because telling the API anything else crashes. So every
+// frame waits ceiling * interval even when it generates fewer, and the producer
+// settles at refresh/(ceiling + 1). That is exactly the measured law,
+// presented = refresh * ratio / (ceiling + 1): at 2.25x the base is 55 = 165/3,
+// the base 3.00x pays, and a quarter of the display's slots go unused.
+//
+// Five other approaches were measured and none moved it: the refresh cap (six
+// levers), pinning the latency in the plugin's bytes (kills the run), the block
+// distribution (base 55 across four layouts), the queue parallelism mode (base
+// 55 across all four) and clamping SetMaximumFrameLatency from the DXGI side
+// (3915 calls counted in a 2.50x run, base unchanged).
+//
+// `mov ecx, [r13+4]` is four bytes and `push imm8; pop rcx; nop` is four, the
+// same trade patch_work_item_count already makes, so the count the pacer waits
+// on becomes a byte this file writes per frame.
+//
+// IT DOES NOT MOVE THE BASE. The patch applies, the integer controls stay exact
+// (1.000, 2.001, 3.000) so it is safe, and 2.50x reads base 55 and 138
+// presented with it and without it -- identical. The wait is computed from our
+// per-frame count now and the producer still settles at refresh/(ceiling + 1).
+//
+// So the pinning is not this arithmetic, and the number that says so plainly:
+// at 2.25x the app renders 55 and 124 presents leave. If presents were the
+// limited resource at 165/s the render rate would be 73. Something waits three
+// intervals per rendered frame and it is not this computation. Kept behind
+// mfg-pacefollow.txt, off by default, because the site and the reasoning are
+// right and the next idea will start here.
+static volatile unsigned char *g_pace_count = nullptr;
+static int patch_pacer_count(unsigned char *text, size_t len) {
+    static const unsigned char sig[18] = {
+        0x49, 0x8B, 0xB6, 0xC8, 0x0C, 0x00, 0x00,
+        0x41, 0x8B, 0x4D, 0x04,
+        0x48, 0x0F, 0xAF, 0xCE,
+        0x48, 0x2B, 0xC8 };
+    size_t found = 0, at = 0;
+    for (size_t i = 0; i + sizeof sig <= len; ++i) {
+        bool ok = true;
+        for (size_t k = 0; k < sizeof sig; ++k)
+            if (text[i + k] != sig[k]) { ok = false; break; }
+        if (!ok) continue;
+        ++found; at = i;
+    }
+    if (found != 1) {
+        log_num("  ! pacer wait site not unique, sites: ", (unsigned)found);
+        return 0;
+    }
+    unsigned char *q = text + at + 7;      // the mov ecx, [r13+4]
+    DWORD old = 0;
+    if (!VirtualProtect(q, 4, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    q[0] = 0x6A;    // push imm8
+    q[1] = 0x01;    // seeded at one; set_count_now owns it from here
+    q[2] = 0x59;    // pop rcx
+    q[3] = 0x90;    // nop
+    // The protection stays open, the way patch_work_item_count leaves its own
+    // site open, because the immediate is rewritten every frame from here.
+    // Restoring it cost four runs: the patch applied, the log said so, and the
+    // first per-frame write faulted on a page that had been put back to
+    // read-only -- every arm with the patch died while the unpatched control
+    // beside it ran clean.
+    g_pace_count = q + 1;
+    return 1;
+}
+
 static int patch_pin_frame_latency(unsigned char *text, size_t len) {
     size_t found = 0, at = 0;
     for (size_t i = 0; i + 13 <= len; ++i) {
@@ -1017,6 +1092,10 @@ static int patch_subframe_count(unsigned char *base) {
         // counter and the hook that miscounted presents, so it is not evidence
         // any more. Behind a flag so the control can say so again if it was
         // right the first time.
+        if (g_pace_follow) {
+            if (patch_pacer_count(text, len))
+                log_line("  pacer waits on the frame's own count (mfg-pacefollow.txt)");
+        }
         if (g_pin_latency) {
             if (patch_pin_frame_latency(text, len))
                 log_line("  frame latency pinned (mfg-pinlatency.txt)");
@@ -1300,6 +1379,10 @@ static void set_count_now(LONG n) {
             if (n < 0) n = 0;
             if (n > 5) n = 5;
             *g_wic = (unsigned char)n;
+            // The pacer waits on its own copy. Without this it keeps waiting
+            // for the ceiling the API was told, which is the whole throughput
+            // loss above 2.0x.
+            if (g_pace_count != nullptr) *g_pace_count = (unsigned char)n;
             // Nothing generated means the ordinary present path -- the one that
             // actually presents the real frame.
             if (g_gen_flag != nullptr) *g_gen_flag = (unsigned char)(n > 0 ? 1 : 0);
@@ -4512,6 +4595,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             g_watch_settings = flag_file(L"mfg-watch.txt");
             g_novsync = flag_file(L"mfg-novsync.txt");
             g_pin_latency = flag_file(L"mfg-pinlatency.txt");
+            g_pace_follow = flag_file(L"mfg-pacefollow.txt");
             g_frac_enabled = !flag_file(L"mfg-nofrac.txt");
             g_slowalt = !flag_file(L"mfg-noslowalt.txt");
             g_quiet = flag_file(L"mfg-quiet.txt");
