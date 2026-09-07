@@ -393,6 +393,26 @@ static LONG g_cap_mode = -1, g_cap_cnt = -1;
 // si la ventana no tiene el foco, o el juego dejo de estar en primer plano,
 // el apagon es del menu/pausa/alt-tab y no un defecto nuestro.
 static HWND g_game_hwnd = nullptr;
+// Latencia: sl.reflex la calcula solo. El sample llama a slReflexGetState
+// todos los frames (StreamlineSample.cpp:901, sin condicion), asi que envolver
+// esa llamada da el struct ya armado por el, con su GUID y su version -- no
+// hay que adivinar nada. La cuenta que importa la escribe NVIDIA en su propio
+// sample: totalGameToRenderLatency = gpuRenderEndTime - inputSampleTime.
+// Paso 1, y por ahora lo unico: volcar los bytes para leer el layout. Nada de
+// calcular latencias sobre offsets supuestos.
+typedef unsigned (*PFN_slReflexGetState)(void *);
+static PFN_slReflexGetState g_orig_reflexstate = nullptr;
+static bool g_reflex_dumped = false;
+// Offsets confirmados con el volcado y con dos chequeos internos: el
+// gpuActiveRenderTimeUs que escribe NVIDIA coincide con gpuRenderEnd-Start
+// (3802 vs 3883 us) y su gpuFrameTimeUs de 16854 us es exactamente la base de
+// 59 fps que medimos aparte. El cuerpo del informe 63, el mas reciente, cae en
+// 72 + 152*63 = 9648.
+static double g_rfx_gpu = 0.0;     // sim start -> fin de render en GPU
+static double g_rfx_drv = 0.0;     // sim start -> fin de driver
+static double g_rfx_ft = 0.0;          // gpuFrameTimeUs, para validar contra la base
+static LONG g_rfx_n = 0;
+static unsigned long long g_rfx_lastid = 0;
 static const void *g_cap_vp = nullptr;
 
 // A version 5 DLSSGOptions built from an older one, in memory of ours.
@@ -668,12 +688,71 @@ static unsigned hk_slReflexSetMarker(unsigned marker, void *frame) {
     return g_orig_reflexmarker ? g_orig_reflexmarker(marker, frame) : 0;
 }
 
+static unsigned hk_slReflexGetState(void *state) {
+    const unsigned r = g_orig_reflexstate ? g_orig_reflexstate(state) : 1;
+    // El layout salio del volcado, no de suponer: GUID en +8, version 2 en +24,
+    // banderas en +32, y frameReport[i] es a su vez una estructura de Streamline
+    // de 152 bytes con cabecera propia de 32, asi que su cuerpo arranca en
+    // 72 + 152*i. El [63] es el mas reciente: 72 + 152*63 = 9648.
+    static int calls = 0;
+    ++calls;
+    if (r == 0 && state != nullptr) {
+        const unsigned char *q = (const unsigned char *)state + 9648;
+        const unsigned long long id = *(const unsigned long long *)(q + 0);
+        const unsigned long long sim = *(const unsigned long long *)(q + 16);
+        const unsigned long long drv = *(const unsigned long long *)(q + 72);
+        const unsigned long long gpu = *(const unsigned long long *)(q + 104);
+        const unsigned ft = *(const unsigned *)(q + 116);
+        // Un informe por frame: llamadas seguidas devuelven el mismo.
+        if (id != 0 && id != g_rfx_lastid && sim != 0 && gpu > sim && drv > sim) {
+            g_rfx_lastid = id;
+            g_rfx_gpu += (double)(gpu - sim);
+            g_rfx_drv += (double)(drv - sim);
+            g_rfx_ft += (double)ft;
+            ++g_rfx_n;
+        }
+    }
+    if (r == 0 && state != nullptr && !g_reflex_dumped && calls > 300) {
+        g_reflex_dumped = true;
+        log_num("reflex: latencyReportAvailable ",
+                (unsigned)((const unsigned char *)state)[33]);
+        const unsigned char *p = (const unsigned char *)state + 9648;
+        for (int row = 0; row < 8; ++row) {
+            char line[80];
+            int k = 0;
+            const char *pre = "reflex dump +";
+            while (pre[k] != 0) { line[k] = pre[k]; ++k; }
+            const int off = row * 16;
+            line[k++] = (char)('0' + (off / 100) % 10);
+            line[k++] = (char)('0' + (off / 10) % 10);
+            line[k++] = (char)('0' + off % 10);
+            line[k++] = ':';
+            for (int c = 0; c < 16; ++c) {
+                const unsigned char v = p[off + c];
+                line[k++] = ' ';
+                line[k++] = "0123456789abcdef"[v >> 4];
+                line[k++] = "0123456789abcdef"[v & 15];
+            }
+            line[k] = 0;
+            log_line(line);
+        }
+    }
+    return r;
+}
+
 static unsigned hk_slGetFeatureFunction(unsigned feature, const char *name, void *&fn) {
     const unsigned r = g_orig_getfeaturefn(feature, name, fn);
     if (r == 0 && name != nullptr && fn != nullptr &&
         strcmp(name, "slDLSSGGetState") == 0 && g_orig_getstate == nullptr) {
         g_orig_getstate = (PFN_slDLSSGGetState)fn;
         log_line("state: slDLSSGGetState captured");
+    }
+    if (r == 0 && name != nullptr && fn != nullptr &&
+        strcmp(name, "slReflexGetState") == 0 &&
+        fn != (void *)&hk_slReflexGetState) {
+        g_orig_reflexstate = (PFN_slReflexGetState)fn;
+        fn = (void *)&hk_slReflexGetState;
+        log_line("reflex: slReflexGetState wrapped (latency probe)");
     }
     if (r == 0 && name != nullptr && fn != nullptr && g_marker_every > 0.0) {
         if (strcmp(name, "slPCLSetMarker") == 0 && fn != (void *)&hk_slPCLSetMarker) {
@@ -1913,6 +1992,17 @@ static void note_rendered_frame(void) {
                             log_num("  hitches over 33ms ", (unsigned)g_pres_hitch);
                             // Dos datos que separan "el juego estaba en el
                             // menu" de "se apago solo mientras jugabas".
+                            if (g_rfx_n > 0) {
+                                log_num("  latency sim to gpu end us ",
+                                        (unsigned)(g_rfx_gpu / g_rfx_n));
+                                log_num("  latency sim to driver end us ",
+                                        (unsigned)(g_rfx_drv / g_rfx_n));
+                                log_num("  reflex frame time us ",
+                                        (unsigned)(g_rfx_ft / g_rfx_n));
+                                log_num("    frames reported ", (unsigned)g_rfx_n);
+                                g_rfx_gpu = 0.0; g_rfx_drv = 0.0;
+                                g_rfx_ft = 0.0; g_rfx_n = 0;
+                            }
                             log_num("  game window in front (1 = yes) ",
                                     (unsigned)(g_game_hwnd != nullptr &&
                                                GetForegroundWindow() == g_game_hwnd
