@@ -2391,28 +2391,24 @@ static void dyn_apply(double base_fps) {
     const double target_eff = target + debt * 2.0;
     const double raw = (target_eff > 1.0 ? target_eff : 1.0) / base_fps;
     double want = raw * g_dyn_bias[dyn_bucket(raw)];
-    // El techo del controlador es 4.0, no el 6.0 estructural, y esto costo un
-    // crash de GTA V para aprenderlo. Con objetivo 165 y base 38 el controlador
-    // pidio ratio 5.12 y cuenta de API 5, que es el maximo de la estructura.
-    // Cada cambio de cuenta hace que el plugin libere y reserve del orden de
-    // 750 MB -- y el tamano crece con la cuenta: 721, 735, 749, 763 MB -- varias
-    // veces por segundo. El presupuesto de VRAM se habia encogido de 10 GB a
-    // 8 GB durante la sesion, y la ultima linea del sl.log es una reserva de
-    // 763 MB justo despues de un "NGX evaluate feature failed".
+    // El techo es el estructural, 6.0.
     //
-    // Operar pegado al techo estructural mientras se realoja memoria a ese ritmo
-    // no es una configuracion valida. Cuatro deja dos cuentas de margen.
-    if (want > 4.0) {
+    // Se probo bajarlo a 4.0 despues de un crash de GTA V: las ultimas lineas
+    // mostraban cuenta de API 5, una reserva de 763 MB y un "NGX evaluate
+    // feature failed". Pero es UNA sola muestra, y en el banco 5.50x -- que es
+    // cuenta 4 y 5 -- corrio muchas veces sin crashear. O sea la cuenta alta por
+    // si sola no es la causa, y el limite costaba precision real: 79% de
+    // ventanas dentro del +-5% contra 89%. Se retira hasta tener una causa
+    // demostrada en vez de una coincidencia.
+    if (want > 6.0) {
         static bool said_hi = false;
         if (!said_hi) {
             said_hi = true;
-                log_num("dynamic: target needs more than 4x at this base, fps ",
+                log_num("dynamic: target needs more than 6x at this base, fps ",
                     (unsigned)target);
             log_num("  base is ", (unsigned)(base_fps + 0.5));
-            log_line("  holding at 4x: past that the plugin reallocates ~750 MB "
-                     "per count change and GTA V crashed there");
         }
-        want = 4.0;
+        want = 6.0;
     }
     if (want < 2.0) want = 2.0;
     // Se acumula todos los frames, se cambie o no el ratio: la ganancia necesita
