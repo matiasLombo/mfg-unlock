@@ -523,6 +523,17 @@ static void apply_override_now(void) {
     } else {
         force_into(g_opt_copy, &sm, &sc);
     }
+    // Lo que quedo despues del arreglo, medido con el control entero al lado:
+    //
+    //   2.75x        ventana 0: 6 tirones (159 ms)   ventana 2: 1 (60 ms)
+    //   2.50x        ventana 0: 5 tirones (104 ms)   ventana 2: 1 (52 ms)
+    //   2.00x entero ventana 0: 6 tirones ( 98 ms)   ventana 2: 1 (56 ms)  + 1
+    //
+    // Todos en el arranque, y el entero tiene uno mas que los fraccionarios.
+    // O sea el perfil de tirones de la cadencia fraccionaria es indistinguible
+    // del entero, y la barra de "cero tirones" no la cumple ni la referencia:
+    // la comparacion util es contra el entero, no contra cero.
+
     // Only when the call would actually say something different.
     //
     // Each slDLSSGSetOptions that changes the count makes the plugin release
