@@ -1876,6 +1876,7 @@ static double g_lo_time = 0.0;
 static double g_hi_time = 0.0;
 static double g_token_fps = 0.0;      // and the rate that follows from it
 static double g_token_dt_fast = 0.0;  // la misma senal, para el controlador
+static double g_ctrl_fps = 0.0;       // frames/tiempo, insesgada, para el controlador
 static double g_base_fps = 0.0;       // that, divided by the multiplier in force
 static long long g_last_token_qpc = 0;
 
@@ -2145,6 +2146,38 @@ static void note_rendered_frame(void) {
             // despues de cada escalon: 11 ventanas entre 150 y 178 con objetivo
             // 140, todas del lado alto. No se toca la original porque la
             // comparten el metering y dynamic_want.
+            // La base del controlador se calcula frames/tiempo sobre los
+            // ultimos 8, que es la misma definicion que usa la ventana de
+            // medicion. Antes se tomaba 1/promedio(dt), y promediar intervalos
+            // para despues invertir NO da la tasa media: por Jensen
+            // 1/E[dt] <= E[1/dt], asi que con tiempos de frame que varian la
+            // base salia sistematicamente baja, el controlador pedia de mas y
+            // las presentadas quedaban 2% arriba del objetivo. Ese era el sesgo
+            // residual que no se explicaba.
+            {
+                static double ring[8] = { 0,0,0,0,0,0,0,0 };
+                static int ri = 0, rn = 0;
+                static double rsum = 0.0;
+                if (rn == 8) rsum -= ring[ri];
+                ring[ri] = dt;
+                rsum += dt;
+                ri = (ri + 1) & 7;
+                if (rn < 8) ++rn;
+                g_ctrl_fps = rsum > 0.0 ? (double)rn / rsum : 0.0;
+                // Un escalon invalida la historia: se reempieza con el valor
+                // nuevo en vez de arrastrar ocho frames de la carga anterior.
+                static double prev2 = 0.0;
+                if (prev2 > 0.0 && rn > 1) {
+                    const double media = rsum / (double)rn;
+                    const bool lejos2 = dt < media * 0.75 || dt > media * 1.33;
+                    const bool igual2 = dt > prev2 * 0.88 && dt < prev2 * 1.12;
+                    if (lejos2 && igual2) {
+                        ring[0] = dt; ri = 1; rn = 1; rsum = dt;
+                        g_ctrl_fps = 1.0 / dt;
+                    }
+                }
+                prev2 = dt;
+            }
             if (g_token_dt_fast <= 0.0) {
                 g_token_dt_fast = dt;
             } else {
@@ -2177,7 +2210,7 @@ static void note_rendered_frame(void) {
             // shows it was the wrong correction -- the reading was assumed to
             // be the rendered rate once already.
             g_base_fps = g_token_fps;
-            dyn_apply(g_token_dt_fast > 0.0 ? 1.0 / g_token_dt_fast : g_base_fps);
+            dyn_apply(g_ctrl_fps > 0.0 ? g_ctrl_fps : g_base_fps);
             if (g_probe_left > 0) {
                 const LONG pc = g_rt_present_count;
                 LONG d = pc - g_probe_pc0;
