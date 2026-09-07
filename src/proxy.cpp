@@ -58,6 +58,8 @@ static bool g_slowalt = false;        // mfg-slowalt.txt
 static int  g_slowalt_len = 240;       // rendered frames per block
 static int  g_block_ms = 0;           // mfg-blockms.txt, 0 = default
 static bool g_peralt = false;         // mfg-peralt.txt: diffuse per frame
+static bool g_blockalt = false;       // mfg-blockalt.txt: blocks above 2.0x too
+static int  g_blocks = 0;             // mfg-blocks.txt, 0 = 32
 
 // True when a file of this name sits beside the dll. The switches are files
 // because the person installing this has the dll and nothing else, and the
@@ -1802,7 +1804,26 @@ static void fractional_tick(void) {
         // blocks can only render as 8/8 -- a flat 2.00x, 5% high. Thirty-two
         // brings every point inside 1%. The block *length* is unchanged, so the
         // count changes no more often than before; only the cycle is longer.
-        const int kBlocks = 32;
+        // Blocks per cycle, from mfg-blocks.txt when present.
+        //
+        // The pair (block length, blocks per cycle) has to keep the whole cycle
+        // inside the 45-frame window or every window reads a whole integer.
+        //
+        // It was added to test whether the base rate being refresh/(ceiling + 1)
+        // instead of the cadence average is a pacer that never settles: fewer
+        // and longer blocks give it a longer stretch at the low count. It is
+        // not. At 2.50x, with the cycle held inside the window throughout:
+        //
+        //   per frame            base 55   presented 136
+        //   8 blocks x 60 ms     base 55   presented 139
+        //   4 blocks x 100 ms    base 55   presented 137
+        //   16 blocks x 30 ms    base 55   presented 138
+        //
+        // Stretches of 200 ms at the low count read the same as changing every
+        // frame. The pinning does not depend on settling time, so no
+        // arrangement of the same two counts moves it, and the only lever left
+        // is the pacer's own throttle arithmetic.
+        const int kBlocks = g_blocks > 0 ? g_blocks : 32;
         const double cycle_secs = kBlockSecs * (double)kBlocks;
         bool cycle_wrapped = false;
         if (sa_clock >= cycle_secs) { sa_clock -= cycle_secs; cycle_wrapped = true; }
@@ -2082,7 +2103,7 @@ static void fractional_tick(void) {
         // mfg-peralt.txt forces diffusion below 2.0x as well, which is how
         // the destructive case stays reproducible rather than becoming a
         // number in a comment.
-        const bool diffuse = (lo > 0 || g_peralt) && !g_nullalt;
+        const bool diffuse = (lo > 0 || g_peralt) && !g_nullalt && !g_blockalt;
         LONG want;
         if (diffuse) {
             static double acc = 0.0;
@@ -4436,6 +4457,21 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 }
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
+            g_blockalt = flag_file(L"mfg-blockalt.txt");
+            { wchar_t bp[MAX_PATH]; beside_dll(bp, L"mfg-blocks.txt");
+              HANDLE bh = CreateFileW(bp, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+              if (bh != INVALID_HANDLE_VALUE) {
+                  char b2[32]; DWORD r2 = 0;
+                  if (ReadFile(bh, b2, sizeof(b2) - 1, &r2, nullptr) && r2 > 0) {
+                      b2[r2] = 0; int v = 0;
+                      for (DWORD k = 0; k < r2 && b2[k] >= '0' && b2[k] <= '9'; ++k)
+                          v = v * 10 + (b2[k] - '0');
+                      if (v >= 2 && v <= 64) { g_blocks = v;
+                          log_num("slowalt: blocks per cycle from file ", (unsigned)v); }
+                  }
+                  CloseHandle(bh);
+              } }
             if (g_frac_enabled)
                 log_line("fractional multiplier ON (experimental: can stall the game)");
             if (g_peralt)
