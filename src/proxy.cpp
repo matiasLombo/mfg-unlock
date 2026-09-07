@@ -1329,6 +1329,12 @@ static long long g_last_token_qpc = 0;
 static volatile LONG g_token_calls = 0;
 static volatile LONG g_frames_gated = 0;
 static volatile LONG g_rt_present_count = 0;
+// The swap chain, kept so the runtime's own present counter can be sampled
+// from anywhere -- specifically from the frame-token hook, once per rendered
+// frame, off the present path entirely.
+static IDXGISwapChain *g_swapchain = nullptr;
+
+static volatile LONG g_present_mismatch = 0;   // windows where we disagree
 // Gap histogram, in the token hook. Buckets in milliseconds:
 //   0: <0.5   1: 0.5-2   2: 2-4   3: 4-8   4: 8-16   5: >=16
 static int g_gap_hist[6] = {0,0,0,0,0,0};
@@ -1394,14 +1400,52 @@ static void note_rendered_frame(void) {
                     // Frames that left the swap chain over frames the game
                     // rendered, both counted over the same window of 45
                     // rendered frames. Neither number is chosen by us.
+                    // The multiplier is measured with PresentCount, a counter
+                    // this file does not maintain, sampled once per rendered
+                    // frame from the token hook.
+                    //
+                    // Counting in the Present hook cannot be made reliable
+                    // either way. A byte detour catches every caller including
+                    // DLSS-G's pacer thread, but shares its bytes with Steam's
+                    // overlay and gets displaced -- one 1.50x run read 45
+                    // presents per window against the runtime's 66. Swapping
+                    // the vtable slot is stable and is this project's rule, but
+                    // the pacer cached the function pointer before we swapped,
+                    // so it never comes through us: a 2.00x control then read
+                    // 1.000 while rendering at 83, having missed exactly the
+                    // generated half.
+                    //
+                    // PresentCount is a running total, so sampling it at any
+                    // moment gives the true cumulative count no matter which
+                    // calls we intercept. Our own hook count stays as the
+                    // cross-check, not as the measurement.
+                    // Sampled in the present hook, never here. Calling
+                    // GetFrameStatistics from the frame-token thread crashed
+                    // the sample within ten seconds on four runs out of four --
+                    // one window logged and gone. It is not needed either: the
+                    // app's own present still comes through the swapped slot
+                    // once per frame, and PresentCount is a running total, so
+                    // sampling it there already includes the pacer's presents
+                    // that never reach us.
                     static LONG last_pres = 0;
-                    const LONG now = g_present_count;
+                    static LONG last_hook = 0;
+                    const LONG now = g_rt_present_count;
                     const LONG dp = now - last_pres;
                     last_pres = now;
-                    static LONG last_rt = 0;
-                    const LONG rt_now = g_rt_present_count;
-                    const LONG rt_dp = rt_now - last_rt;
-                    last_rt = rt_now;
+                    const LONG hook_now = g_present_count;
+                    const LONG rt_dp_unused = hook_now - last_hook;
+                    last_hook = hook_now;
+                    const LONG rt_dp = rt_dp_unused;   // the hook's count
+                    // Say it out loud when the two disagree. The comparison
+                    // was already being logged and no analysis script read it,
+                    // so a run whose present hook had been displaced still got
+                    // reported as a result.
+                    if (rt_dp > 0 && (dp - rt_dp > 2 || rt_dp - dp > 2)) {
+                        InterlockedIncrement(&g_present_mismatch);
+                        if (!g_quiet)
+                            log_num("  WARNING present count disagrees, windows so far ",
+                                    (unsigned)g_present_mismatch);
+                    }
                     if (dp > 0 && !g_quiet) {
                         log_num("  presents this window ", (unsigned)dp);
                         log_num("  runtime presents this window ",
@@ -1789,9 +1833,24 @@ static void fractional_tick(void) {
             // from 1.48 to 1.36 and every point settled about 9% low. The
             // changes are the loop tracking a base rate that really does move,
             // not noise, and damping it just leaves the error uncorrected.
-            sa_bias += (want - produced) * 0.35;
-            if (sa_bias < -1.0) sa_bias = -1.0;
-            if (sa_bias > 1.0) sa_bias = 1.0;
+            // Removed, not retuned. An independent audit reduced this loop to
+            // its setpoint: `produced` is presents per rendered frame under the
+            // assumption that each count-c frame presents c+1 times, which is
+            // the same quantity `presents / 45` reports. So the integrator ran
+            // until its estimate of the reported metric equalled the request,
+            // and the sweep could only ever return the request. It did: the
+            // loop's own `CIRCULAR ratio x100` read 109/113/125/150/174/188/190
+            // against 110/113/125/150/175/187/190 asked.
+            //
+            // What the open-loop split actually delivers is recorded a few
+            // lines up, from before this loop existed: 1.50x asked, 1.90
+            // delivered; 1.10x delivered 1.00. Those are the numbers to beat,
+            // and beating them has to come from the schedule.
+            //
+            // The tuning history above is void for the same reason -- "full
+            // gain beat a dead band" compares two ways of reverse-fitting.
+            (void)produced;
+            sa_bias = 0.0;
             cyc_gen = 0.0;
             cyc_frames = 0;
         }
@@ -2818,7 +2877,7 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     // the requested ratio to within 0.3% even at 2.10x and 2.90x, fractions its
     // own scheduler cannot represent. An instrument that cannot fail measures
     // nothing.
-    ++g_present_count;
+    InterlockedIncrement(&g_present_count);
     // The runtime's own tally, so our hook can be checked against something we
     // do not maintain. If these two agree, a shortfall of presents against
     // rendered frames is the frame counter's fault and not the hook's.
@@ -2927,12 +2986,23 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
 static void hook_swapchain_present(void *sc) {
     if (sc == nullptr || g_orig_dxgi_present != nullptr) return;
     void **vt = *reinterpret_cast<void ***>(sc);
-    if (MH_CreateHook(vt[8], reinterpret_cast<void *>(&hk_dxgi_present),
-                      reinterpret_cast<void **>(&g_orig_dxgi_present)) == MH_OK &&
-        MH_EnableHook(vt[8]) == MH_OK)
-        log_line("recorder: D3D12 present hooked (src=2 rows)");
-    else
-        g_orig_dxgi_present = nullptr;
+    // The slot, not the bytes. This used to call MH_CreateHook on vt[8], which
+    // detours the Present implementation itself -- the one thing this project
+    // has a standing rule against, because Steam's overlay detours the same
+    // bytes and whoever installs second wins.
+    //
+    // It cost a measurement. In one 1.50x run our counter read exactly 45
+    // presents in 86 of 86 windows while the runtime's own PresentCount
+    // advanced 66 to 69 in each, so the run reported 1.00 where the runtime
+    // said 1.49. The failure is silent and reads as a clean integer, which at
+    // 1.10x would be indistinguishable from a correct answer.
+    DWORD prot = 0;
+    if (!VirtualProtect(&vt[8], sizeof(void *), PAGE_READWRITE, &prot)) return;
+    g_orig_dxgi_present = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
+    g_swapchain = reinterpret_cast<IDXGISwapChain *>(sc);
+    vt[8] = reinterpret_cast<void *>(&hk_dxgi_present);
+    VirtualProtect(&vt[8], sizeof(void *), prot, &prot);
+    log_line("recorder: present slot swapped (vt[8], not detoured)");
 }
 
 typedef HRESULT(STDMETHODCALLTYPE *PFN_CSC)(IDXGIFactory *, IUnknown *,
