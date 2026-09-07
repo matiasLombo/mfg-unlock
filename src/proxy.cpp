@@ -3389,10 +3389,9 @@ static void hook_swapchain_present(void *sc) {
         if (SUCCEEDED(g_swapchain->GetDesc(&sd))) {
             log_num("  swap chain flags ", (unsigned)sd.Flags);
             log_num("  buffers ", (unsigned)sd.BufferCount);
-            if (sd.Flags & 0x800)
-                log_line("  swap chain is FRAME_LATENCY_WAITABLE -- the app waits on a handle");
-            else
-                log_line("  swap chain is NOT waitable");
+            log_line((sd.Flags & 0x40u)
+                     ? "  this chain IS frame-latency waitable"
+                     : "  this chain is not waitable");
         }
     }
     vt[8] = reinterpret_cast<void *>(&hk_dxgi_present);
@@ -3415,7 +3414,7 @@ static void hook_swapchain_present(void *sc) {
 static bool g_no_waitable = false;
 static UINT strip_waitable(UINT flags) {
     if (!g_no_waitable) return flags;
-    return flags & ~0x800u;
+    return flags & ~0x40u;
 }
 
 typedef HRESULT(STDMETHODCALLTYPE *PFN_CSC)(IDXGIFactory *, IUnknown *,
@@ -3427,7 +3426,12 @@ static PFN_CSCFH g_orig_cscfh = nullptr;
 
 static HRESULT STDMETHODCALLTYPE hk_csc(IDXGIFactory *self, IUnknown *dev,
         DXGI_SWAP_CHAIN_DESC *desc, IDXGISwapChain **out) {
-    if (g_no_waitable && desc != nullptr && (desc->Flags & 0x800u)) {
+    if (desc != nullptr) {
+        log_num("  CreateSwapChain asked for flags ", (unsigned)desc->Flags);
+        log_line((desc->Flags & 0x40u) ? "    WAITABLE requested" : "    not waitable");
+        if (desc->Flags & 0x800u) log_line("    ALLOW_TEARING requested");
+    }
+    if (g_no_waitable && desc != nullptr && (desc->Flags & 0x40u)) {
         desc->Flags = strip_waitable(desc->Flags);
         log_line("  waitable flag stripped at creation (mfg-nowaitable.txt)");
     }
@@ -3445,12 +3449,38 @@ static HRESULT STDMETHODCALLTYPE hk_cscfh(void *self, IUnknown *dev, HWND hwnd,
     // does not need to be: Flags is the trailing UINT at offset 0x2C, after
     // Width, Height, Format, Stereo, SampleDesc(2), BufferUsage, BufferCount,
     // Scaling, SwapEffect and AlphaMode.
+    // What the caller asked for, before anyone else touches it.
+    //
+    // Upstream Donut -- which this sample is built on -- does not set
+    // FRAME_LATENCY_WAITABLE_OBJECT at all; it sets ALLOW_TEARING and waits on
+    // its own per-buffer fences. Yet the swap chain we end up with reports flag
+    // 0x800. So either the sample modified Donut, or Streamline's interposer
+    // adds it. That distinction decides whether the gate belongs to the bench
+    // or to Streamline -- and if it is Streamline's, it applies to every game.
+    if (d1 != nullptr) {
+        const UINT f = *reinterpret_cast<const UINT *>(
+                            reinterpret_cast<const unsigned char *>(d1) + 0x2C);
+        // 0x40 is FRAME_LATENCY_WAITABLE_OBJECT. 0x800 is ALLOW_TEARING, and
+        // reading one for the other is what made the first pass conclude the
+        // app used a waitable chain: it reported flags 2048, which is tearing
+        // alone -- exactly what upstream Donut sets. Stripping "0x800" then
+        // took ALLOW_TEARING away from a fullscreen chain and killed the app,
+        // which was read as evidence for the wrong thing.
+        log_num("  CreateSwapChainForHwnd asked for flags ", (unsigned)f);
+        log_line((f & 0x40u) ? "    WAITABLE requested"
+                             : "    not waitable");
+        if (f & 0x800u) log_line("    ALLOW_TEARING requested");
+        {
+            static int n = 0;
+            log_num("    swap chain number ", (unsigned)(++n));
+        }
+    }
     unsigned char copy[0x30];
     if (g_no_waitable && d1 != nullptr) {
         for (int i = 0; i < 0x30; ++i)
             copy[i] = reinterpret_cast<const unsigned char *>(d1)[i];
         UINT *pf = reinterpret_cast<UINT *>(copy + 0x2C);
-        if (*pf & 0x800u) {
+        if (*pf & 0x40u) {
             *pf = strip_waitable(*pf);
             log_line("  waitable flag stripped at creation (mfg-nowaitable.txt)");
             d1 = copy;
