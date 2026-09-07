@@ -90,6 +90,26 @@ static void log_line(const char *text) {
     if (h == INVALID_HANDLE_VALUE) return;
     DWORD n = 0;
     SetFilePointer(h, 0, nullptr, FILE_END);
+    // Milliseconds since the dll attached, so this file can be lined up against
+    // sl.log. Without it, "panel: shown" and "Out of order frame" cannot be put
+    // on the same timeline, which is exactly the correlation under test: in GTA
+    // V the three out-of-order frames follow a sync-state change, and the panel
+    // is a separate window whose appearance can change the fullscreen flip
+    // state. sl.log stamps every line; this one stamped none.
+    {
+        static ULONGLONG t0 = 0;
+        if (t0 == 0) t0 = GetTickCount64();
+        const unsigned long long ms = GetTickCount64() - t0;
+        char ts[24];
+        int k = 0, d[12], nd = 0;
+        unsigned long long v = ms;
+        ts[k++] = '[';
+        if (v == 0) d[nd++] = 0;
+        while (v > 0 && nd < 12) { d[nd++] = (int)(v % 10); v /= 10; }
+        while (nd > 0) ts[k++] = (char)('0' + d[--nd]);
+        ts[k++] = 'm'; ts[k++] = 's'; ts[k++] = ']'; ts[k++] = ' ';
+        WriteFile(h, ts, (DWORD)k, &n, nullptr);
+    }
     size_t len = 0;
     while (text[len] != 0) ++len;
     WriteFile(h, text, (DWORD)len, &n, nullptr);
@@ -1500,6 +1520,7 @@ static volatile LONG g_token_calls = 0;
 static volatile LONG g_frames_gated = 0;
 static bool g_novsync = false;        // mfg-novsync.txt: diagnostic
 static int  g_slow_frame_us = 0;      // mfg-slowframe.txt, en microsegundos
+static int  g_jitter_pct = 0;         // mfg-jitter.txt, porcentaje
 static double g_present_block_us = 0.0;   // blocked inside Present, per window
 static double g_token_block_us = 0.0;     // blocked inside slGetNewFrameToken
 static volatile LONG g_rt_present_count = 0;
@@ -2526,9 +2547,23 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     // which is just as well, because -GpuLoad is not one of its options and
     // 400, 8000 and 32000 all render 164.
     if (g_slow_frame_us > 0 && g_qpc_freq > 0) {
+        int us = g_slow_frame_us;
+        // Jitter, from mfg-jitter.txt as a percentage.
+        //
+        // 57 archived bench runs -- 21 of them at 2.50x -- record zero
+        // "Out of order frame", while a single GTA V session records three.
+        // The bench renders on a fixed delta and the game does not, so the
+        // first thing to try is a frame time that moves.
+        if (g_jitter_pct > 0) {
+            static unsigned seed = 22695477u;
+            seed = seed * 1103515245u + 12345u;
+            const int span = us * g_jitter_pct / 100;
+            us += (int)(seed >> 16) % (2 * span + 1) - span;
+            if (us < 100) us = 100;
+        }
         LARGE_INTEGER a, b;
         QueryPerformanceCounter(&a);
-        const long long want = (long long)g_slow_frame_us * g_qpc_freq / 1000000;
+        const long long want = (long long)us * g_qpc_freq / 1000000;
         do { QueryPerformanceCounter(&b); } while (b.QuadPart - a.QuadPart < want);
     }
     settings_watch();
@@ -4824,6 +4859,20 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                           log_num("bench: frame slowed by us ", (unsigned)v); }
                   }
                   CloseHandle(sh);
+              } }
+            { wchar_t jp[MAX_PATH]; beside_dll(jp, L"mfg-jitter.txt");
+              HANDLE jh = CreateFileW(jp, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+              if (jh != INVALID_HANDLE_VALUE) {
+                  char b4[16]; DWORD r6 = 0;
+                  if (ReadFile(jh, b4, sizeof(b4)-1, &r6, nullptr) && r6 > 0) {
+                      b4[r6] = 0; int v = 0;
+                      for (DWORD k = 0; k < r6 && b4[k] >= '0' && b4[k] <= '9'; ++k)
+                          v = v * 10 + (b4[k] - '0');
+                      if (v > 0 && v <= 90) { g_jitter_pct = v;
+                          log_num("bench: frame jitter pct ", (unsigned)v); }
+                  }
+                  CloseHandle(jh);
               } }
             { wchar_t cp[MAX_PATH]; beside_dll(cp, L"mfg-clamplatency.txt");
               HANDLE ch = CreateFileW(cp, GENERIC_READ, FILE_SHARE_READ, nullptr,
