@@ -745,6 +745,32 @@ static int patch_gate_frame_latency(unsigned char *base, unsigned char *text, si
 // that assumed it would not be.
 static bool g_pin_latency = false;    // mfg-pinlatency.txt: diagnostic
 static bool g_pace_follow = false;    // mfg-pacefollow.txt
+// Por que el plugin apaga la interpolacion solo, con mode=eOn.
+//
+// En GTA V el log dice "interpolation state changed from enabled to disabled
+// (mode=eOn, numFramesToGenerate=2)" mientras nosotros seguimos pidiendo
+// generacion, y 33 ms despues llegan tres frames fuera de orden. La decision
+// esta en una sola funcion de sl.dlss_g.dll:
+//
+//   0x18004a930   devuelve AL = interpola este frame
+//      [rdx+0x20] es el modo   0 eOff  1 eOn  2 eAuto  3 eDynamic
+//      eAuto -> el analisis largo de camara y escena
+//      eOn   -> 0x4ae5a
+//      todos convergen en 0x4ad4f:
+//          cmp  dword ptr [r15], 0
+//          je   0x4ad18      ->  xor al,al ; ret     = APAGADA
+//
+// El llamador guarda el resultado en [r14+0x45da], el anterior en [r14+0x45db],
+// y loguea cuando difieren.
+//
+// O sea es una condicion de DATOS sobre la estructura por frame, no un evento
+// de ventana. Eso explica por que cinco hipotesis de entorno dieron todas cero
+// en el banco: alternancia fraccionaria, 40% de jitter, apagar desde cuenta 2
+// (la caida de latencia 3->1 si se reproduce, el desorden no), forzar un cambio
+// de sincronizacion, y robarle el foco a la ventana.
+//
+// Lo que hay que perseguir es el campo en [r15+0].
+
 // The pacer's wait, made to follow the frame's own count.
 //
 // This is where the throughput law lives. presentCommon's pacing block computes
