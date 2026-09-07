@@ -4211,14 +4211,19 @@ static DWORD WINAPI recorder(LPVOID) {
                 lmb_was = lmb;
 
                 if (g_ov_editing) {
-                    static bool dwas[12] = { false };
-                    static const int vks[12] = { '0','1','2','3','4','5','6','7','8','9',
-                                                 VK_BACK, VK_RETURN };
-                    for (int k = 0; k < 12; ++k) {
+                    // Punto y coma, del teclado y del bloque numerico: la
+                    // coma porque en este teclado es lo que cae al escribir
+                    // un decimal, y ov_edit_digit la normaliza a punto.
+                    static bool dwas[15] = { false };
+                    static const int vks[15] = { '0','1','2','3','4','5','6','7','8','9',
+                                                 VK_BACK, VK_RETURN,
+                                                 VK_DECIMAL, VK_OEM_PERIOD, VK_OEM_COMMA };
+                    for (int k = 0; k < 15; ++k) {
                         const bool dn = (GetAsyncKeyState(vks[k]) & 0x8000) != 0 ||
                                         (k < 10 && (GetAsyncKeyState(VK_NUMPAD0 + k) & 0x8000) != 0);
                         if (dn && !dwas[k]) {
                             if (k < 10)                 ov_edit_digit((char)('0' + k));
+                            else if (k >= 12)           ov_edit_digit('.');
                             else if (vks[k] == VK_BACK) ov_edit_back();
                             else {
                                 const int typed = ov_edit_commit();

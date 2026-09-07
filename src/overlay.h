@@ -346,8 +346,17 @@ static void ov_edit_begin(void) {
     g_ov_edit[0] = 0;
 }
 
+// Acepta digitos y un separador. El buffer llega a cuatro para que entre
+// "2.75" completo; el quinto byte es el terminador.
 static void ov_edit_digit(char c) {
-    if (!g_ov_editing || g_ov_editlen >= 3) return;
+    if (!g_ov_editing || g_ov_editlen >= 4) return;
+    if (c == ',') c = '.';
+    if (c == '.') {
+        // Un solo separador, y no como primer caracter.
+        if (g_ov_editlen == 0) return;
+        for (int i = 0; i < g_ov_editlen; ++i)
+            if (g_ov_edit[i] == '.') return;
+    }
     g_ov_edit[g_ov_editlen++] = c;
     g_ov_edit[g_ov_editlen] = 0;
 }
@@ -363,8 +372,21 @@ static int ov_edit_commit(void) {
     if (!g_ov_editing) return -1;
     g_ov_editing = false;
     if (g_ov_editlen == 0) return -1;
-    int v = 0;
-    for (int i = 0; i < g_ov_editlen; ++i) v = v * 10 + (g_ov_edit[i] - '0');
+    // Se lee como se escribe: "3" es 3.00 y "2.75" es 2.75. Antes se
+    // interpretaba como centesimas, asi que habia que teclear 275 para
+    // pedir 2.75 y cualquier entrada corta caia al piso: escribir 3 daba
+    // 2.00, que es el bug que se reporto.
+    int whole = 0, frac = 0, fdig = 0;
+    bool after = false;
+    for (int i = 0; i < g_ov_editlen; ++i) {
+        const char ch = g_ov_edit[i];
+        if (ch == '.') { after = true; continue; }
+        if (ch < '0' || ch > '9') continue;
+        if (!after) whole = whole * 10 + (ch - '0');
+        else if (fdig < 2) { frac = frac * 10 + (ch - '0'); ++fdig; }
+    }
+    while (fdig < 2) { frac *= 10; ++fdig; }   // "2.5" es 2.50, no 2.05
+    int v = whole * 100 + frac;
     // CUSTOM va de 2.00 a 6.00. El piso ya no es 1.00: AUTO se fue del panel y
     // los fraccionarios por debajo de 2.0 todavia no estan medidos. El techo es
     // el limite estructural del plugin, no una preferencia.
