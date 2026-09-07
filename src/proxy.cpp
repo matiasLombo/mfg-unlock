@@ -289,11 +289,34 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         //
         // So the transitions may well be the cheaper of the two. That is a
         // measurement, not a conclusion, and it has not been made yet.
-        if (g_force_generated <= 0) {
-            *(LONG *)(p + 32) = 0;             // DLSSGMode::eOff
-        } else {
-            *(LONG *)(p + 32) = 1;             // DLSSGMode::eOn
-            *(LONG *)(p + 36) = g_force_generated;
+        // El techo, no la cuenta de este frame.
+        //
+        // Escribir la cuenta por frame aca -- y alternar el modo entre eOff y
+        // eOn -- hacia 1307 llamadas a slDLSSGSetOptions en 45 segundos, una
+        // por frame. Y cada llamada que cambia la cuenta hace que el plugin
+        // libere sus recursos y arranque un enfriamiento de 100 ms:
+        //
+        //   0x1800497fd  movabs rax, 0x4059000000000000   ; = 100.0
+        //   0x180049807  mov    [rdi+0x4488], rax
+        //   0x18004b1b8  mientras [rdi+0x4488] > 0, devuelve "no interpola"
+        //
+        // Eso es lo que en GTA V aparece como "interpolation state changed from
+        // enabled to disabled (mode=eOn, numFramesToGenerate=2)" con nosotros
+        // pidiendo generacion, y los frames en vuelo de la vuelta son los tres
+        // "Out of order frame - will skip the present".
+        //
+        // El techo es constante mientras no cambie la seleccion, asi que la
+        // llamada se hace una vez y la variacion por frame la lleva el byte
+        // parcheado, que es para lo que existe. bound = byte + 1 <= techo + 1,
+        // que es la condicion que los crashes anteriores violaban.
+        {
+            const double per_frame = (double)g_dyn_target / 100.0 - 1.0;
+            LONG techo = (LONG)per_frame;
+            if ((double)techo < per_frame) ++techo;      // ceil
+            if (techo < 1) techo = 1;
+            if (techo > 5) techo = 5;
+            *(LONG *)(p + 32) = 1;             // DLSSGMode::eOn, siempre
+            *(LONG *)(p + 36) = techo;
         }
     } else if (false) {
         // eDynamic, with our own frame-rate target.
@@ -499,6 +522,35 @@ static void apply_override_now(void) {
         *(LONG *)(g_opt_copy + 36) = g_last_seen_generated;
     } else {
         force_into(g_opt_copy, &sm, &sc);
+    }
+    // Only when the call would actually say something different.
+    //
+    // Each slDLSSGSetOptions that changes the count makes the plugin release
+    // its resources and start a 100 ms cooldown, during which it refuses to
+    // interpolate no matter what we ask:
+    //
+    //   0x1800497fd  movabs rax, 0x4059000000000000    ; = 100.0
+    //   0x180049807  mov    [rdi+0x4488], rax
+    //   0x18004b1b8  ... while [rdi+0x4488] > 0, return "not interpolating"
+    //
+    // That is what GTA V logged as "interpolation state changed from enabled to
+    // disabled (mode=eOn, numFramesToGenerate=2)" while we were still asking
+    // for generation, and the frames in flight across the resume are the three
+    // "Out of order frame - will skip the present".
+    //
+    // Moving from 2.75x to 2.50x does not change what the API is told -- both
+    // ceilings are 2 -- so that call bought a 100 ms blackout for nothing.
+    {
+        static LONG last_mode = -1, last_count = -1;
+        static int have_last = 0;
+        const LONG m = *(LONG *)(g_opt_copy + 32);
+        const LONG c = *(LONG *)(g_opt_copy + 36);
+        if (have_last && m == last_mode && c == last_count) {
+            log_num("override: same options as last time, not re-sending; selection ",
+                    (unsigned)g_force_sel);
+            return;
+        }
+        last_mode = m; last_count = c; have_last = 1;
     }
     g_orig_setoptions(g_vp_copy, options_for_call(g_opt_copy));
     log_num("override applied now, selection ", (unsigned)g_force_sel);
