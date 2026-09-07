@@ -1490,6 +1490,7 @@ static volatile LONG g_smfl_calls = 0;
 static volatile LONG g_token_calls = 0;
 static volatile LONG g_frames_gated = 0;
 static bool g_novsync = false;        // mfg-novsync.txt: diagnostic
+static int  g_slow_frame_us = 0;      // mfg-slowframe.txt, en microsegundos
 static double g_present_block_us = 0.0;   // blocked inside Present, per window
 static double g_token_block_us = 0.0;     // blocked inside slGetNewFrameToken
 static volatile LONG g_rt_present_count = 0;
@@ -2502,6 +2503,25 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     // written to remove. The stride matches the block the original arithmetic
     // reserved per frame.
     if (g_pidx != nullptr) *g_pidx += 6;
+    // Make the frame cost something, from mfg-slowframe.txt (milliseconds).
+    //
+    // The bench renders 1280x720 of almost nothing, so it is refresh-bound in
+    // every configuration and the pacer divides that ceiling -- which is the
+    // entire "base pinned at refresh/(ceiling + 1)" result, and it does not
+    // happen in a real game. GTA V holds base 60/55/57 across 2.00x/2.50x/3.00x
+    // and 2.50x presents more than 2.00x.
+    //
+    // What has to be reproduced is not GPU load specifically: it is a base rate
+    // set by the application's own work rather than by the present ceiling. A
+    // spin does that, costs ten lines, and needs nothing from the sample --
+    // which is just as well, because -GpuLoad is not one of its options and
+    // 400, 8000 and 32000 all render 164.
+    if (g_slow_frame_us > 0 && g_qpc_freq > 0) {
+        LARGE_INTEGER a, b;
+        QueryPerformanceCounter(&a);
+        const long long want = (long long)g_slow_frame_us * g_qpc_freq / 1000000;
+        do { QueryPerformanceCounter(&b); } while (b.QuadPart - a.QuadPart < want);
+    }
     settings_watch();
     query_state();
     fractional_tick();
@@ -4782,6 +4802,20 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             g_peralt = flag_file(L"mfg-peralt.txt");
             g_blockalt = flag_file(L"mfg-blockalt.txt");
             g_no_waitable = flag_file(L"mfg-nowaitable.txt");
+            { wchar_t sp[MAX_PATH]; beside_dll(sp, L"mfg-slowframe.txt");
+              HANDLE sh = CreateFileW(sp, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+              if (sh != INVALID_HANDLE_VALUE) {
+                  char b3[16]; DWORD r5 = 0;
+                  if (ReadFile(sh, b3, sizeof(b3)-1, &r5, nullptr) && r5 > 0) {
+                      b3[r5] = 0; int v = 0;
+                      for (DWORD k = 0; k < r5 && b3[k] >= '0' && b3[k] <= '9'; ++k)
+                          v = v * 10 + (b3[k] - '0');
+                      if (v > 0 && v <= 100000) { g_slow_frame_us = v;
+                          log_num("bench: frame slowed by us ", (unsigned)v); }
+                  }
+                  CloseHandle(sh);
+              } }
             { wchar_t cp[MAX_PATH]; beside_dll(cp, L"mfg-clamplatency.txt");
               HANDLE ch = CreateFileW(cp, GENERIC_READ, FILE_SHARE_READ, nullptr,
                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
