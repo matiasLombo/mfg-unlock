@@ -1299,6 +1299,8 @@ static double g_last_dt = 0.0;        // and the most recent one, for the spread
 static double g_win_time = 0.0;       // elapsed in the current counting window
 static int    g_win_frames = 0;       // rendered frames in it
 static double g_rendered_fps = 0.0;   // frames / elapsed, unbiased
+static double g_rate_lo = 0.0;        // last cycle's rate in each state, kept
+static double g_rate_hi = 0.0;        // across the reset that clears the counters
 static int    g_lo_frames_seen = 0;   // rendered frames while the low count ran
 static int    g_hi_frames_seen = 0;   // and while the high one did
 static volatile LONG g_present_count = 0;   // presents seen at the swap chain
@@ -1323,6 +1325,13 @@ static double g_token_fps = 0.0;      // and the rate that follows from it
 static double g_base_fps = 0.0;       // that, divided by the multiplier in force
 static long long g_last_token_qpc = 0;
 
+static volatile LONG g_token_calls = 0;
+static volatile LONG g_frames_gated = 0;
+static volatile LONG g_rt_present_count = 0;
+// Gap histogram, in the token hook. Buckets in milliseconds:
+//   0: <0.5   1: 0.5-2   2: 2-4   3: 4-8   4: 8-16   5: >=16
+static int g_gap_hist[6] = {0,0,0,0,0,0};
+static int g_raw_calls = 0;
 static void note_rendered_frame(void) {
     LARGE_INTEGER t;
     QueryPerformanceCounter(&t);
@@ -1345,7 +1354,25 @@ static void note_rendered_frame(void) {
         // window is in the denominator and every frame in the numerator.
         if (dt > 0.0 && dt < 0.200) {
             g_win_time += dt;
-            if (dt > 0.002) ++g_win_frames;
+            ++g_raw_calls;
+            g_gap_hist[dt < 0.0005 ? 0 : dt < 0.002 ? 1 : dt < 0.004 ? 2
+                       : dt < 0.008 ? 3 : dt < 0.016 ? 4 : 5]++;
+            // Every call is a frame now, so there is nothing left to filter.
+            ++g_win_frames;
+            // A rendered frame is the transition from short gaps to a long one,
+            // not every long gap on its own.
+            //
+            // With generation off the counted multiplier must be exactly 1.00:
+            // each rendered frame is presented once and nothing is added. It
+            // read 0.963 -- 43.6 presents per 45 counted frames -- and the
+            // presents are the honest half, so the frame count was 3.7% high.
+            // A burst that happens to contain two gaps over the threshold was
+            // counted twice.
+            //
+            // Edge-detecting on g_last_dt does not fix this: dt differs on every
+            // call inside a burst, so the "changed" test fires constantly. The
+            // burst boundary is the long gap *after short ones*, which is what
+            // this tests.
             // A short window on purpose: with the API count alternating in
             // blocks, the rendered rate swings between the two multipliers, and
             // a window longer than a block averages the swing away. Three
@@ -1370,8 +1397,27 @@ static void note_rendered_frame(void) {
                     const LONG now = g_present_count;
                     const LONG dp = now - last_pres;
                     last_pres = now;
+                    static LONG last_rt = 0;
+                    const LONG rt_now = g_rt_present_count;
+                    const LONG rt_dp = rt_now - last_rt;
+                    last_rt = rt_now;
                     if (dp > 0 && !g_quiet) {
                         log_num("  presents this window ", (unsigned)dp);
+                        log_num("  runtime presents this window ",
+                                (unsigned)(rt_dp > 0 ? rt_dp : 0));
+                        log_num("  raw token calls ", (unsigned)g_raw_calls);
+                        log_num("  hook calls total ", (unsigned)g_token_calls);
+                        log_num("  frames past the gate ", (unsigned)g_frames_gated);
+                        {
+                            static const char *kG[6] = {
+                                "    gap <0.5ms ", "    gap 0.5-2ms ",
+                                "    gap 2-4ms ", "    gap 4-8ms ",
+                                "    gap 8-16ms ", "    gap >=16ms " };
+                            for (int i = 0; i < 6; ++i)
+                                if (g_gap_hist[i] > 0) log_num(kG[i], (unsigned)g_gap_hist[i]);
+                        }
+                        g_raw_calls = 0;
+                        for (int i = 0; i < 6; ++i) g_gap_hist[i] = 0;
                         if (g_pres_n > 0) {
                             log_num("  present ms avg x10 ",
                                     (unsigned)(g_pres_ms_sum / (double)g_pres_n * 10.0));
@@ -1584,13 +1630,10 @@ static void fractional_tick(void) {
         // block was about 1.1 s of wall time, and every block length in this
         // file's measurements was off by that factor. g_last_dt only changes
         // when a burst ends, so adding it once per change is once per frame.
-        {
-            static double last_seen_dt = -1.0;
-            if (g_last_dt != last_seen_dt) {
-                last_seen_dt = g_last_dt;
-                sa_clock += g_last_dt;
-            }
-        }
+        // Once per frame, because the caller is now gated on the frame index.
+        // The edge check that used to stand here was undoing the burst, and
+        // against a gated caller it would drop any frame whose dt repeated.
+        sa_clock += g_last_dt;
         // Read from mfg-blockms.txt when present, so the block length can be
         // swept without a rebuild. The unit is milliseconds of the cadence
         // clock, which advances once per frame-token call -- about seven times
@@ -1715,6 +1758,10 @@ static void fractional_tick(void) {
                 log_num("  high block fps x10 ",
                         (unsigned)(int)(g_hi_time > 0.0 ?
                             (double)g_hi_frames_seen / g_hi_time * 10.0 : 0.0));
+                // Snapshot first: the conversion below runs in this same call
+                // and needs these.
+                g_rate_lo = g_lo_time > 0.05 ? (double)g_lo_frames_seen / g_lo_time : 0.0;
+                g_rate_hi = g_hi_time > 0.05 ? (double)g_hi_frames_seen / g_hi_time : 0.0;
                 g_lo_frames_seen = 0;
                 g_hi_frames_seen = 0;
                 g_lo_time = 0.0;
@@ -1762,8 +1809,8 @@ static void fractional_tick(void) {
         if (t_frac < 0.0) t_frac = 0.0;
         if (t_frac > 1.0) t_frac = 1.0;
         {
-            const double r_lo = g_lo_time > 0.05 ? (double)g_lo_frames_seen / g_lo_time : 0.0;
-            const double r_hi = g_hi_time > 0.05 ? (double)g_hi_frames_seen / g_hi_time : 0.0;
+            const double r_lo = g_rate_lo;
+            const double r_hi = g_rate_hi;
             if (r_lo > 1.0 && r_hi > 1.0) {
                 const double a = t_frac / r_hi;
                 const double b = (1.0 - t_frac) / r_lo;
@@ -1836,8 +1883,15 @@ static void fractional_tick(void) {
         // Rendered frames and elapsed time, split by which count was in force.
         // Their ratio is a fact about the pipeline; the average of the counts we
         // chose is not.
-        if (api > lo) { ++g_hi_frames_seen; g_hi_time += g_last_dt; }
-        else          { ++g_lo_frames_seen; g_lo_time += g_last_dt; }
+        {
+            // Once per rendered frame, on the same edge the schedule clock uses.
+            // These ran once per token call -- about seven times a frame -- so
+            // the ratio they feed the correction loop was right only if the
+            // burst length is identical with generation on and off, which is
+            // exactly what turning generation on changes.
+            if (api > lo) { ++g_hi_frames_seen; g_hi_time += g_last_dt; }
+            else          { ++g_lo_frames_seen; g_lo_time += g_last_dt; }
+        }
         cyc_gen += (double)api;
         ++cyc_frames;
         set_count_now(api);
@@ -1964,6 +2018,34 @@ static void fractional_tick(void) {
 
 static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     const unsigned r = g_orig_frametoken(tok, idx);
+    // One rendered frame, exactly once.
+    //
+    // The game asks for the frame token about seven times per frame -- 305.7
+    // calls against 45 counted frames -- and everything below used to run on
+    // every one of those calls: the frame counter, the present index, the
+    // block clock, the override. Every attempt to regroup the burst was a
+    // timing threshold, and the gap histogram shows no threshold can work:
+    // 38.7 gaps land in 4-8 ms and 7.3 in 2-4 ms, and a frame boundary is not
+    // separable from a hiccup inside a burst. That is why the generation-off
+    // control read 0.96 instead of 1.00, and every sub-2x number was scaled by
+    // it.
+    //
+    // Streamline states the frame's identity: repeat calls for one frame carry
+    // the same index and hand back the same token. Comparing that is exact and
+    // needs no threshold.
+    {
+        static unsigned last_idx = 0;
+        static void *last_tok = nullptr;
+        static bool have = false;
+        const bool same = have && (idx != nullptr ? (*idx == last_idx)
+                                                  : (tok == last_tok));
+        if (idx != nullptr) last_idx = *idx;
+        last_tok = tok;
+        have = true;
+        ++g_token_calls;
+        if (same) return r;
+        ++g_frames_gated;
+    }
     note_rendered_frame();
     g_game_set_this_frame = 0;      // a new frame; the last one is settled
     // The present index advances here, with the frame, and not in
@@ -2636,6 +2718,14 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     // own scheduler cannot represent. An instrument that cannot fail measures
     // nothing.
     ++g_present_count;
+    // The runtime's own tally, so our hook can be checked against something we
+    // do not maintain. If these two agree, a shortfall of presents against
+    // rendered frames is the frame counter's fault and not the hook's.
+    {
+        DXGI_FRAME_STATISTICS a;
+        if (self != nullptr && SUCCEEDED(self->GetFrameStatistics(&a)))
+            g_rt_present_count = (LONG)a.PresentCount;
+    }
     // Queue latency: how long a present waits before the panel shows it.
     //
     // This is the half of "latency" the swap chain can answer. PresentCount is
