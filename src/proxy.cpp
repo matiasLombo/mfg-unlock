@@ -412,6 +412,12 @@ static double g_rfx_gpu = 0.0;     // sim start -> fin de render en GPU
 static double g_rfx_drv = 0.0;     // sim start -> fin de driver
 static double g_rfx_ft = 0.0;          // gpuFrameTimeUs, para validar contra la base
 static LONG g_rfx_n = 0;
+// Minimo y maximo ademas del promedio: si la cadencia fraccionaria alterna
+// entre comportarse como el entero de abajo y el de arriba, la latencia seria
+// dos poblaciones y no un valor intermedio. El promedio de la ventana eso lo
+// tapa, que es exactamente como este proyecto ya se equivoco una vez.
+static unsigned g_rfx_min = 0xFFFFFFFFu;
+static unsigned g_rfx_max = 0;
 static unsigned long long g_rfx_lastid = 0;
 static const void *g_cap_vp = nullptr;
 
@@ -710,6 +716,9 @@ static unsigned hk_slReflexGetState(void *state) {
             g_rfx_drv += (double)(drv - sim);
             g_rfx_ft += (double)ft;
             ++g_rfx_n;
+            const unsigned dv = (unsigned)(drv - sim);
+            if (dv < g_rfx_min) g_rfx_min = dv;
+            if (dv > g_rfx_max) g_rfx_max = dv;
         }
     }
     if (r == 0 && state != nullptr && !g_reflex_dumped && calls > 300) {
@@ -1999,9 +2008,14 @@ static void note_rendered_frame(void) {
                                         (unsigned)(g_rfx_drv / g_rfx_n));
                                 log_num("  reflex frame time us ",
                                         (unsigned)(g_rfx_ft / g_rfx_n));
+                                log_num("    driver latency min us ",
+                                        (unsigned)g_rfx_min);
+                                log_num("    driver latency max us ",
+                                        (unsigned)g_rfx_max);
                                 log_num("    frames reported ", (unsigned)g_rfx_n);
                                 g_rfx_gpu = 0.0; g_rfx_drv = 0.0;
                                 g_rfx_ft = 0.0; g_rfx_n = 0;
+                                g_rfx_min = 0xFFFFFFFFu; g_rfx_max = 0;
                             }
                             log_num("  game window in front (1 = yes) ",
                                     (unsigned)(g_game_hwnd != nullptr &&
