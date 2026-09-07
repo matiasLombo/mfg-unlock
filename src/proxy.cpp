@@ -2645,6 +2645,21 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     // plugin had none -- the patch was manufacturing the very failure it was
     // written to remove. The stride matches the block the original arithmetic
     // reserved per frame.
+    // Muerto en la configuracion por defecto, y conviene saberlo.
+    //
+    // g_pidx solo se asigna dentro de patch_monotonic_index, que vive en la
+    // rama sin wic de patch_subframe_count -- despues del return de la rama
+    // con wic, que es la que corre siempre. Con wic activo el puntero es nulo
+    // y esta linea no hace nada.
+    //
+    // Importa porque se "arreglo" en esta sesion para que avanzara una vez por
+    // frame en vez de 41, y ese arreglo se reporto como hallazgo. No cambio
+    // nada: la compuerta por indice de frame si era real, esta linea no.
+    //
+    // Y patch_monotonic_index esta apagado por una razon medida, escrita sobre
+    // su llamada: con el puesto, un 2.00x normal renderiza 30 y presenta 30
+    // -- cero frames generados -- con 538 "Out of order frame" en sl.log. No
+    // es el arreglo del desorden; lo empeora dos ordenes de magnitud.
     if (g_pidx != nullptr) *g_pidx += 6;
     // Make the frame cost something, from mfg-slowframe.txt (milliseconds).
     //
