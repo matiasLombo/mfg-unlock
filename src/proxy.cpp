@@ -2359,7 +2359,34 @@ static void dyn_apply(double base_fps) {
                                           : (double)g_refresh_hz;
     // El tramo se elige con la estimacion sin corregir, para no depender de la
     // correccion que se esta por aplicar.
-    const double raw = target / base_fps;
+    // Termino integral sobre presentaciones adeudadas. El objetivo se mide
+    // sobre promedios de ventana, y perseguir solo la tasa instantanea deja el
+    // sobrepaso del escalon dentro del promedio: 10 frames a 224 y 35 a 140 dan
+    // 158, que es justo el grupo de ventanas que sobraba. Si despues de un
+    // sobrepaso se entrega de menos, el promedio vuelve al objetivo.
+    static double debt = 0.0;          // presentaciones adeudadas
+    static LONG last_pc = 0;
+    static ULONGLONG last_t = 0;
+    const ULONGLONG now_ms = GetTickCount64();
+    const LONG pc = g_rt_present_count;
+    if (last_t != 0 && now_ms > last_t && pc >= last_pc) {
+        const double secs = (double)(now_ms - last_t) / 1000.0;
+        if (secs < 0.5) {              // un salto largo es un cambio de escena
+            debt += target * secs - (double)(pc - last_pc);
+            // Acotada a un tercio de segundo de objetivo: sin esto se enrolla
+            // durante un apagon y despues descarga todo junto.
+            const double lim = target * 0.33;
+            if (debt > lim) debt = lim;
+            if (debt < -lim) debt = -lim;
+        } else {
+            debt = 0.0;
+        }
+    }
+    last_pc = pc;
+    last_t = now_ms;
+    // La deuda se paga en medio segundo, no de golpe.
+    const double target_eff = target + debt * 2.0;
+    const double raw = (target_eff > 1.0 ? target_eff : 1.0) / base_fps;
     double want = raw * g_dyn_bias[dyn_bucket(raw)];
     // El techo es estructural, no una preferencia. Si el objetivo no entra, se
     // dice una vez en vez de saturar callado.
