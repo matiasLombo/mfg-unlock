@@ -966,7 +966,7 @@ static int patch_subframe_count(unsigned char *base) {
     // this file was taken through, and patching the count field instead of the
     // comparison removed about 525 out-of-order present skips. Refused with
     // mfg-nowic.txt.
-    g_wic_mode = flag_file(L"mfg-wic.txt");
+    g_wic_mode = !flag_file(L"mfg-nowic.txt");
     if (g_wic_mode) {
         // The comparison patches are exactly what this replaces; leaving
         // them in would put the bound back out of step with the field.
@@ -1612,7 +1612,22 @@ static void fractional_tick(void) {
         g_token_fps = 0.0;        // the previous mode's readings say nothing
         g_token_dt = 0.0;
     }
-    if (g_force_sel != kSelDynamic) return;
+    // An integer selection still has to keep the byte, because the patch
+    // replaced the plugin's own write with an immediate and nothing else fills
+    // it in. Left alone it holds whatever the last DYNAMIC frame put there --
+    // or the seed -- and a count that disagrees with the plugin stops
+    // presentation outright: 3.00x read 1.000 with the override armed and
+    // applied zero times, three runs out of three, rendering as if nothing were
+    // enabled.
+    //
+    // This is what makes the patch safe to arm without a fractional selection,
+    // which is the whole obstacle to shipping the dll on its own. Rows 2..N are
+    // fixed multipliers holding row-1 generated frames; row 1 is off.
+    if (g_force_sel != kSelDynamic) {
+        if (g_force_sel >= 1 && g_force_sel <= kSelMaxFixed)
+            set_count_now(g_force_sel >= 2 ? g_force_sel - 1 : 0);
+        return;
+    }
     if (g_wic_mode ? (g_wic == nullptr) : (g_count_imm == nullptr)) return;
     if (g_base_fps <= 1.0) return;
 
@@ -2180,6 +2195,25 @@ static void fractional_tick(void) {
     }
 }
 
+// Re-reading the selection while the game runs, so a target change can be
+// measured rather than deduced.
+//
+// The goal asks that a new target show up in the next window, and the only way
+// to see that was for a person to move the panel slider mid-session. The file
+// is the same one the panel writes, so re-reading it makes the bench able to
+// change the target during a run and time how long the counted ratio takes to
+// follow. Behind mfg-watch.txt: it is a file open per interval, which nothing
+// shipped should be doing.
+static bool g_watch_settings = false;
+static void settings_load(void);
+static void settings_watch(void) {
+    if (!g_watch_settings) return;
+    static int n = 0;
+    if (++n < 120) return;          // roughly twice a second at 240 fps
+    n = 0;
+    settings_load();
+}
+
 static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     const unsigned r = g_orig_frametoken(tok, idx);
     // One rendered frame, exactly once.
@@ -2220,6 +2254,7 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     // written to remove. The stride matches the block the original arithmetic
     // reserved per frame.
     if (g_pidx != nullptr) *g_pidx += 6;
+    settings_watch();
     query_state();
     fractional_tick();
     apply_override_now();
@@ -2337,8 +2372,19 @@ static void settings_load(void) {
         }
         i = j;
     }
-    log_num("settings: restored mode ", (unsigned)g_force_sel);
-    log_num("  target fps ", (unsigned)g_dyn_target);
+    // Only when something moved, so re-reading twice a second under
+    // mfg-watch.txt leaves one marked line per change instead of two per
+    // interval -- and that line is what the latency is counted from.
+    {
+        static LONG seen_sel = -1;
+        static int  seen_tgt = -1;
+        if (g_force_sel != seen_sel || g_dyn_target != seen_tgt) {
+            seen_sel = g_force_sel;
+            seen_tgt = g_dyn_target;
+            log_num("settings: restored mode ", (unsigned)g_force_sel);
+            log_num("  target fps ", (unsigned)g_dyn_target);
+        }
+    }
 }
 
 // Must run on the thread that presents -- the plugin's own log says so:
@@ -4253,8 +4299,23 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             // ratio is worse than making them opt in. The real fix is to defer
             // the patch until DYNAMIC is first selected, so the site is found
             // at map time but only rewritten once something maintains it.
-            g_frac_enabled = flag_file(L"mfg-frac.txt");
-            g_slowalt = flag_file(L"mfg-slowalt.txt");
+            // On unless refused, because the person who uses this has the dll
+            // and nothing else: picking DYNAMIC in the panel has to be enough.
+            //
+            // The first attempt at this broke every integer selection. The
+            // patch replaces the plugin's write of the count with an immediate,
+            // and nothing filled that byte in unless the fractional scheduler
+            // was running, so 3.00x read 1.000 with the override applied zero
+            // times. Arming it by default was not the mistake; leaving the byte
+            // without an owner was. fractional_tick now writes it for the fixed
+            // rows too, and with the patch armed the integers read 1.000, 2.001
+            // and 3.000 while 2.50x reads 2.501.
+            //
+            // Nothing generates by itself: the scheduler still returns before
+            // any cadence work unless the panel is on DYNAMIC.
+            g_watch_settings = flag_file(L"mfg-watch.txt");
+            g_frac_enabled = !flag_file(L"mfg-nofrac.txt");
+            g_slowalt = !flag_file(L"mfg-noslowalt.txt");
             g_quiet = flag_file(L"mfg-quiet.txt");
             g_nullalt = flag_file(L"mfg-nullalt.txt");
             {
