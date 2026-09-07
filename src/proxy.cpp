@@ -58,6 +58,28 @@ static bool g_slowalt = false;        // mfg-slowalt.txt
 static int  g_slowalt_len = 240;       // rendered frames per block
 static int  g_block_ms = 0;           // mfg-blockms.txt, 0 = default
 static bool g_peralt = false;         // mfg-peralt.txt: diffuse per frame
+// mfg-optsv3.txt: SOLO para el banco. GTA V llena DLSSGOptions con
+// structVersion 3 y el sample con 5, y eso se leyo de los logs de los dos.
+// En v3 no existe numFramesToGenerate, asi que la cuenta que force_into
+// escribe en p+36 la ignora el plugin: el sl.log del juego reporta
+// numFramesToGenerate=1 en las seis transiciones mientras el planificador
+// escribia 2. Con esto el sample manda v3 y el banco recorre el mismo camino.
+// Apagada por defecto; no cambia nada de lo que la dll hace en un juego.
+static bool g_optsv3 = false;
+// mfg-markergap.txt: SOLO para el banco. Contiene dos numeros, "cada" y
+// "cuanto", en segundos: cada N segundos deja de reenviar los marcadores de
+// Reflex/PCL durante M segundos. Es lo que GTA V hace solo -- su sl.log
+// muestra el id de frame de Reflex congelado en 13307 mientras el actual
+// llegaba a 23110, y DLSS-G se niega con
+// eDLSSGStatusFailReflexNotDetectedAtRuntime durante 72 s seguidos.
+// El sample nunca corta ese flujo, y por eso el banco no podia apagarse.
+// Apagada por defecto; en un juego la dll no hace nada de esto.
+typedef unsigned (*PFN_slSetMarker)(unsigned, void *);
+static PFN_slSetMarker g_orig_pclmarker = nullptr;
+static PFN_slSetMarker g_orig_reflexmarker = nullptr;
+static LONG g_markers_dropped = 0;
+static double g_marker_every = 0.0;
+static double g_marker_for = 0.0;
 static bool g_blockalt = false;       // mfg-blockalt.txt: blocks above 2.0x too
 static int  g_blocks = 0;             // mfg-blocks.txt, 0 = 32
 
@@ -447,6 +469,15 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
             said_ver = true;
             log_num("DLSSGOptions version the game fills in: ", (unsigned)g_opts_version);
         }
+        if (g_optsv3 && g_opts_version > 3) {
+            static bool said_v3 = false;
+            if (!said_v3) {
+                said_v3 = true;
+                log_num("bench: forcing DLSSGOptions structVersion down to 3 from ",
+                        (unsigned)g_opts_version);
+            }
+            *(unsigned long long *)(p + 24) = 3;
+        }
         const LONG want = g_force_generated;
         if (g_force_sel > 0) {
             // Written in place and put back straight after the call. The
@@ -595,12 +626,46 @@ static void apply_override_now(void) {
     log_num("override applied now, selection ", (unsigned)g_force_sel);
 }
 
+// Dentro de la ventana de corte no reenvia el marcador: el id de frame de
+// Reflex deja de avanzar y DLSS-G ve exactamente lo que ve en GTA V.
+static bool in_marker_gap(void) {
+    if (g_marker_every <= 0.0) return false;
+    static LARGE_INTEGER f = {}, s0 = {};
+    if (f.QuadPart == 0) { QueryPerformanceFrequency(&f); QueryPerformanceCounter(&s0); }
+    LARGE_INTEGER n; QueryPerformanceCounter(&n);
+    const double t = (double)(n.QuadPart - s0.QuadPart) / (double)f.QuadPart;
+    const double cycle = g_marker_every + g_marker_for;
+    return (t - (double)((long long)(t / cycle)) * cycle) >= g_marker_every;
+}
+
+static unsigned hk_slPCLSetMarker(unsigned marker, void *frame) {
+    if (in_marker_gap()) { ++g_markers_dropped; return 0; }
+    return g_orig_pclmarker ? g_orig_pclmarker(marker, frame) : 0;
+}
+
+static unsigned hk_slReflexSetMarker(unsigned marker, void *frame) {
+    if (in_marker_gap()) { ++g_markers_dropped; return 0; }
+    return g_orig_reflexmarker ? g_orig_reflexmarker(marker, frame) : 0;
+}
+
 static unsigned hk_slGetFeatureFunction(unsigned feature, const char *name, void *&fn) {
     const unsigned r = g_orig_getfeaturefn(feature, name, fn);
     if (r == 0 && name != nullptr && fn != nullptr &&
         strcmp(name, "slDLSSGGetState") == 0 && g_orig_getstate == nullptr) {
         g_orig_getstate = (PFN_slDLSSGGetState)fn;
         log_line("state: slDLSSGGetState captured");
+    }
+    if (r == 0 && name != nullptr && fn != nullptr && g_marker_every > 0.0) {
+        if (strcmp(name, "slPCLSetMarker") == 0 && fn != (void *)&hk_slPCLSetMarker) {
+            g_orig_pclmarker = (PFN_slSetMarker)fn;
+            fn = (void *)&hk_slPCLSetMarker;
+            log_line("bench: PCL markers wrapped (gap emulation armed)");
+        } else if (strcmp(name, "slReflexSetMarker") == 0 &&
+                   fn != (void *)&hk_slReflexSetMarker) {
+            g_orig_reflexmarker = (PFN_slSetMarker)fn;
+            fn = (void *)&hk_slReflexSetMarker;
+            log_line("bench: Reflex markers wrapped (gap emulation armed)");
+        }
     }
     if (r == 0 && name != nullptr && fn != nullptr &&
         strcmp(name, "slDLSSGSetOptions") == 0 &&
@@ -5017,6 +5082,33 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 }
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
+            g_optsv3 = flag_file(L"mfg-optsv3.txt");
+            { wchar_t mp[MAX_PATH]; beside_dll(mp, L"mfg-markergap.txt");
+              HANDLE mh = CreateFileW(mp, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+              if (mh != INVALID_HANDLE_VALUE) {
+                  char b4[32]; DWORD r6 = 0;
+                  if (ReadFile(mh, b4, sizeof(b4)-1, &r6, nullptr) && r6 > 0) {
+                      b4[r6] = 0;
+                      int v[2] = {0, 0}; int k = 0; DWORD i = 0;
+                      while (i < r6 && k < 2) {
+                          while (i < r6 && (b4[i] < '0' || b4[i] > '9')) ++i;
+                          if (i >= r6) break;
+                          int n2 = 0;
+                          while (i < r6 && b4[i] >= '0' && b4[i] <= '9')
+                              n2 = n2 * 10 + (b4[i++] - '0');
+                          v[k++] = n2;
+                      }
+                      if (v[0] > 0 && v[1] > 0) {
+                          g_marker_every = (double)v[0];
+                          g_marker_for = (double)v[1];
+                          log_num("bench: dropping Reflex/PCL markers every N s, N = ",
+                                  (unsigned)v[0]);
+                          log_num("  for this many seconds ", (unsigned)v[1]);
+                      }
+                  }
+                  CloseHandle(mh);
+              } }
             g_blockalt = flag_file(L"mfg-blockalt.txt");
             g_no_waitable = flag_file(L"mfg-nowaitable.txt");
             { wchar_t sp[MAX_PATH]; beside_dll(sp, L"mfg-slowframe.txt");
