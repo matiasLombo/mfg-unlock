@@ -708,6 +708,7 @@ static int patch_gate_frame_latency(unsigned char *base, unsigned char *text, si
 // plugin's own judgement, which is why it is worth saying plainly: frame
 // generation was not built to be switched per frame, and this is the piece
 // that assumed it would not be.
+static bool g_pin_latency = false;    // mfg-pinlatency.txt: diagnostic
 static int patch_pin_frame_latency(unsigned char *text, size_t len) {
     size_t found = 0, at = 0;
     for (size_t i = 0; i + 13 <= len; ++i) {
@@ -985,6 +986,26 @@ static int patch_subframe_count(unsigned char *base) {
         // path with nothing to present: 88 rendered against 81 presented at
         // 1.50x, losing the real frame rather than merely not adding one.
         patch_generation_flag(base, text, len);
+        // The frame latency, pinned, behind mfg-pinlatency.txt.
+        //
+        // The base rate is not the average of the cadence, it is
+        // refresh/(ceiling + 1): 2.25x, 2.50x and 2.75x all render at 55 = 165/3,
+        // the same base 3.00x pays, and so present 124/138/151 against 2.00x's
+        // 165. If the base followed the average instead, 2.25x would sit at
+        // 73.6 and present 166 -- the whole throughput loss is that pinning.
+        //
+        // throttleFlipQueue reconfigures SetMaximumFrameLatency whenever
+        // interpolation starts or stops, which is what sets the queue depth to
+        // the deepest count in the cadence. This was measured before and
+        // discarded because a 2.00x control then never started interpolation --
+        // but that control ran on the 7x-fast block clock, the -3.7% frame
+        // counter and the hook that miscounted presents, so it is not evidence
+        // any more. Behind a flag so the control can say so again if it was
+        // right the first time.
+        if (g_pin_latency) {
+            if (patch_pin_frame_latency(text, len))
+                log_line("  frame latency pinned (mfg-pinlatency.txt)");
+        }
         return 1;
     }
 
@@ -1095,15 +1116,29 @@ static int patch_subframe_count(unsigned char *base) {
     // written before the call, so counting it measures the plugin's intent and
     // not whether the reconfiguration happened. It is not evidence either way.
 
-    // patch_pin_frame_latency is deliberately NOT called. Pinning the latency
-    // does remove the churn -- 133 SetMaximumFrameLatency changes and 79
-    // dropped presents both go to zero -- but the control run gives it away:
-    // at a constant 2.00x, which needs no toggling at all, interpolation then
-    // never starts (1 state change becomes 0, and 0 hitches become 32). The
-    // reconfiguration is part of how generation is brought up, so a constant
-    // there means it is never brought up. Kept in the file because the site and
-    // the measurement are right; it is the conclusion drawn from them that was
-    // wrong.
+    // patch_pin_frame_latency is deliberately NOT called, and now for a reason
+    // that was measured on a working instrument.
+    //
+    // It was reopened because the base rate is not the average of the cadence,
+    // it is refresh/(ceiling + 1): 2.25x, 2.50x and 2.75x all render at 55 =
+    // 165/3, the base 3.00x pays, so they present 123/138/150 against 2.00x's
+    // 164. Were the base the average, 2.25x would sit at 73.6 and present 166.
+    // The whole throughput loss above 2.0x is that pinning, and
+    // SetMaximumFrameLatency reconfiguring on every start and stop of
+    // interpolation was the named suspect.
+    //
+    // Retested behind mfg-pinlatency.txt. It is worse than the note it replaces
+    // said: the patch applies -- the log prints "frame latency pinned" -- and
+    // the run then produces no measurement window at all, three times out of
+    // three, at 2.00x, 2.25x and 2.75x alike. Not "interpolation never starts";
+    // the sample stops. The unpinned arms of the same three pairs ran normally
+    // in between.
+    //
+    // So the base stays pinned to the ceiling count, and a fractional ratio
+    // above 2.0x costs the base of the integer above it while returning less
+    // than that integer's multiplier. On a 165 Hz display that is measured and
+    // it is a loss. Kept in the file because the site is right and the next
+    // idea will want it.
 
     // The validation, first: without it nothing below 2.0x is expressible.
     //
@@ -4368,6 +4403,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             // any cadence work unless the panel is on DYNAMIC.
             g_watch_settings = flag_file(L"mfg-watch.txt");
             g_novsync = flag_file(L"mfg-novsync.txt");
+            g_pin_latency = flag_file(L"mfg-pinlatency.txt");
             g_frac_enabled = !flag_file(L"mfg-nofrac.txt");
             g_slowalt = !flag_file(L"mfg-noslowalt.txt");
             g_quiet = flag_file(L"mfg-quiet.txt");
