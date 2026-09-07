@@ -534,6 +534,20 @@ static void apply_override_now(void) {
     // del entero, y la barra de "cero tirones" no la cumple ni la referencia:
     // la comparacion util es contra el entero, no contra cero.
 
+    // Y la guia de NVIDIA dice lo mismo, en ProgrammingGuideDLSS_G.md:
+    //
+    //   "the interpolated frame can be dropped if presents go out of sync
+    //    (interpolated frame is too close to the last real one)"
+    //
+    //   slDLSSGSetOptions "takes effect in the next Present() call", conviene
+    //   llamarla "primarily during user UI interactions rather than each
+    //   frame", y llamarla desde un hilo que no presenta vuelve la
+    //   temporizacion "non-deterministic".
+    //
+    // Llamarla 1307 veces por corrida desde el hilo del token violaba las dos
+    // cosas, y desincronizar las presentaciones es exactamente la condicion
+    // que hace que el interpolado se descarte. El descarte en si es de diseno.
+
     // Only when the call would actually say something different.
     //
     // Each slDLSSGSetOptions that changes the count makes the plugin release
