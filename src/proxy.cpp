@@ -689,7 +689,20 @@ static int patch_gate_frame_latency(unsigned char *base, unsigned char *text, si
 //
 // throttleFlipQueue reconfigures IDXGIDevice1::SetMaximumFrameLatency whenever
 // interpolation starts or stops, and a cadence that turns generation off for
-// some frames does that constantly. Measured on the sample at 1.50x:
+// some frames does that constantly.
+//
+// The churn is real and has now been counted rather than inferred: hooking the
+// DXGI method itself (IDXGISwapChain2 slot 31 -- IDXGIDevice1 does not exist on
+// D3D12) records 3915 calls in a 2.50x run, exactly one per rendered frame,
+// against 2 calls in either integer control.
+//
+// But it is not what pins the base rate, and it is not what gates generation.
+// Clamping the value to 2 from the DXGI side leaves 2.50x at base 55 and 137
+// presented, identical to unclamped, and leaves 3.00x reading 3.000 at 165 --
+// so the old reading that pinning it stops interpolation was wrong about the
+// cause as well as the effect.
+//
+// Measured on the sample at 1.50x, from the era of the broken instruments:
 //
 //   66  SetMaximumFrameLatency changed from 1 to 2
 //   67  SetMaximumFrameLatency changed from 2 to 1
@@ -1367,6 +1380,8 @@ static double g_token_fps = 0.0;      // and the rate that follows from it
 static double g_base_fps = 0.0;       // that, divided by the multiplier in force
 static long long g_last_token_qpc = 0;
 
+static int g_clamp_latency = 0;        // mfg-clamplatency.txt, 0 = off
+static volatile LONG g_smfl_calls = 0;
 static volatile LONG g_token_calls = 0;
 static volatile LONG g_frames_gated = 0;
 static bool g_novsync = false;        // mfg-novsync.txt: diagnostic
@@ -1500,6 +1515,9 @@ static void note_rendered_frame(void) {
                         log_num("  our hook count this window ",
                                 (unsigned)(rt_dp > 0 ? rt_dp : 0));
                         log_num("  raw token calls ", (unsigned)g_raw_calls);
+                        if (g_clamp_latency > 0)
+                            log_num("  SetMaximumFrameLatency calls so far ",
+                                    (unsigned)g_smfl_calls);
                         log_num("  hook calls total ", (unsigned)g_token_calls);
                         log_num("  frames past the gate ", (unsigned)g_frames_gated);
                         {
@@ -3160,6 +3178,56 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     return g_orig_dxgi_present(self, interval, flags);
 }
 
+// IDXGIDevice1::SetMaximumFrameLatency, clamped from the DXGI side.
+//
+// The throughput law says the producer runs at refresh/(ceiling + 1), and the
+// frame latency is the only thing measured to track the count (0 -> 1, 1 -> 2,
+// 2 -> 3). Patching the plugin's own register load to pin it kills the run
+// outright -- no measurement window at all, three of three. Hooking the DXGI
+// method instead leaves every instruction in the plugin running and changes
+// only the number that reaches the runtime, which is a much smaller thing to
+// be wrong about.
+//
+// Slot 12: IUnknown 0-2, IDXGIObject 3-6, IDXGIDevice 7-11, then
+// SetMaximumFrameLatency. 12 * 8 = 0x60, matching the `call qword ptr [rax+0x60]`
+// the pin patch was written against.
+typedef HRESULT (STDMETHODCALLTYPE *PFN_SMFL)(IUnknown *, UINT);
+static PFN_SMFL g_orig_smfl = nullptr;
+static HRESULT STDMETHODCALLTYPE hk_smfl(IUnknown *self, UINT n) {
+    InterlockedIncrement(&g_smfl_calls);
+    if (g_clamp_latency > 0 && (int)n > g_clamp_latency) n = (UINT)g_clamp_latency;
+    return g_orig_smfl(self, n);
+}
+static void hook_frame_latency(void *sc) {
+    if (g_clamp_latency <= 0 || g_orig_smfl != nullptr || sc == nullptr) return;
+    // IDXGISwapChain2, not IDXGIDevice1. The first attempt asked the swap chain
+    // for IDXGIDevice1 and got nothing: that interface is a D3D11 device
+    // concept, and this is D3D12. On D3D12 SetMaximumFrameLatency lives on the
+    // swap chain itself.
+    //
+    // Slot 31: IUnknown 0-2, IDXGIObject 3-6, IDXGIDeviceSubObject 7,
+    // IDXGISwapChain 8-17, IDXGISwapChain1 18-28, then SetSourceSize 29,
+    // GetSourceSize 30, SetMaximumFrameLatency 31.
+    IUnknown *chain = reinterpret_cast<IUnknown *>(sc);
+    IUnknown *sc2 = nullptr;
+    // {a8be2ac4-199f-4946-b331-79599fb98de7} IDXGISwapChain2
+    GUID iid = { 0xa8be2ac4, 0x199f, 0x4946,
+                 { 0xb3, 0x31, 0x79, 0x59, 0x9f, 0xb9, 0x8d, 0xe7 } };
+    if (FAILED(chain->QueryInterface(iid, reinterpret_cast<void **>(&sc2))) || sc2 == nullptr) {
+        log_line("  clamp: no IDXGISwapChain2 either -- frame latency is not reachable here");
+        return;
+    }
+    void **vt = *reinterpret_cast<void ***>(sc2);
+    DWORD prot = 0;
+    if (VirtualProtect(&vt[31], sizeof(void *), PAGE_READWRITE, &prot)) {
+        g_orig_smfl = reinterpret_cast<PFN_SMFL>(vt[31]);
+        vt[31] = reinterpret_cast<void *>(&hk_smfl);
+        VirtualProtect(&vt[31], sizeof(void *), prot, &prot);
+        log_num("  frame latency clamped to ", (unsigned)g_clamp_latency);
+    }
+    sc2->Release();
+}
+
 static void hook_swapchain_present(void *sc) {
     if (sc == nullptr || g_orig_dxgi_present != nullptr) return;
     void **vt = *reinterpret_cast<void ***>(sc);
@@ -3177,6 +3245,7 @@ static void hook_swapchain_present(void *sc) {
     if (!VirtualProtect(&vt[8], sizeof(void *), PAGE_READWRITE, &prot)) return;
     g_orig_dxgi_present = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
     g_swapchain = reinterpret_cast<IDXGISwapChain *>(sc);
+    hook_frame_latency(sc);
     vt[8] = reinterpret_cast<void *>(&hk_dxgi_present);
     VirtualProtect(&vt[8], sizeof(void *), prot, &prot);
     log_line("recorder: present slot swapped (vt[8], not detoured)");
@@ -4476,6 +4545,33 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
             g_blockalt = flag_file(L"mfg-blockalt.txt");
+            { wchar_t cp[MAX_PATH]; beside_dll(cp, L"mfg-clamplatency.txt");
+              HANDLE ch = CreateFileW(cp, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+              if (ch != INVALID_HANDLE_VALUE) {
+                  char c2[16]; DWORD r4 = 0;
+                  if (ReadFile(ch, c2, sizeof(c2) - 1, &r4, nullptr) && r4 > 0) {
+                      c2[r4] = 0;
+                      if (c2[0] >= '1' && c2[0] <= '9') g_clamp_latency = c2[0] - '0';
+                  }
+                  CloseHandle(ch);
+              } }
+            // Queue parallelism mode, from mfg-queue.txt. patch_queue_mode has
+            // been in the file with no way to reach it -- g_queue_mode was left
+            // at -1 -- and it is the one knob that touches the pacing subsystem
+            // the throughput law lives in, so it gets a flag before anything is
+            // disassembled.
+            { wchar_t qp[MAX_PATH]; beside_dll(qp, L"mfg-queue.txt");
+              HANDLE qh = CreateFileW(qp, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+              if (qh != INVALID_HANDLE_VALUE) {
+                  char q2[16]; DWORD r3 = 0;
+                  if (ReadFile(qh, q2, sizeof(q2) - 1, &r3, nullptr) && r3 > 0) {
+                      q2[r3] = 0;
+                      if (q2[0] >= '0' && q2[0] <= '3') g_queue_mode = q2[0] - '0';
+                  }
+                  CloseHandle(qh);
+              } }
             { wchar_t bp[MAX_PATH]; beside_dll(bp, L"mfg-blocks.txt");
               HANDLE bh = CreateFileW(bp, GENERIC_READ, FILE_SHARE_READ, nullptr,
                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
