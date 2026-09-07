@@ -752,21 +752,30 @@ static bool g_pace_follow = false;    // mfg-pacefollow.txt
 // same trade patch_work_item_count already makes, so the count the pacer waits
 // on becomes a byte this file writes per frame.
 //
-// AND THE WHOLE PREMISE WAS A BENCH ARTIFACT. Measured in GTA V, standing
+// THE PREMISE WAS HALF WRONG, AND THE CORRECTION MATTERS. Measured in GTA V, standing
 // still and switching selection without moving the camera:
 //
 //   2.00x  28 windows  base 60  ratio 2.01  presented 121
 //   2.50x  20 windows  base 55  ratio 2.48  presented 137
 //   3.00x  17 windows  base 57  ratio 2.61  presented 145
 //
-// 2.50x presents MORE than 2.00x and the base barely moves -- 60, 55, 57 --
-// instead of dropping to refresh/(ceiling + 1). There is no pinning in a real
-// game. The sample renders 1280x720 of nothing, so it is refresh-bound in every
-// configuration and the pacer divides that ceiling; a GPU-bound game is not.
+// 2.50x presents MORE than 2.00x -- but the pinning is still there. 55 is
+// 165/3 exactly, so the pacer is binding at 2.50x in the game too; the game's
+// GPU-bound 60 only binds at 2.00x, where the pacer would have allowed 82.
 //
-// So the law below, and every throughput number this file records, describes
-// the one environment where the problem exists. The seven patches that failed
-// to move the base failed because there was nothing to move.
+// What decides whether the pinning costs anything is whether the integer below
+// already fills the display:
+//
+//   bench, no slow frame:  2.00x presents 165 = the refresh. No headroom, so
+//                          losing base to the ceiling cannot be paid back and
+//                          every fractional value loses.
+//   GTA V:                 2.00x presents 121 of 165. Headroom, so trading
+//                          base 60 -> 55 for ratio 2.0 -> 2.5 nets +17.
+//
+// So: fractional wins when the integer below does not saturate the display and
+// loses when it does. The seven patches that failed to move the base were not
+// chasing a phantom -- the base really is pinned -- they were chasing something
+// whose cost is conditional, in the one setup where the condition was worst.
 //
 // IT DOES NOT MOVE THE BASE. The patch applies, the integer controls stay exact
 // (1.000, 2.001, 3.000) so it is safe, and 2.50x reads base 55 and 138
