@@ -2286,6 +2286,10 @@ static void dyn_control(double base_fps, double presented_fps) {
                            ? g_dyn_asked_sum / (double)g_dyn_asked_n : 0.0;
     g_dyn_asked_sum = 0.0;
     g_dyn_asked_n = 0;
+    // Se probo exigir dos ventanas estables seguidas antes de aprender, por si
+    // la ventana posterior a un escalon ensuciaba la ganancia: la mediana quedo
+    // en 143 igual y el resultado en 64% contra 66%, o sea nada. El sesgo
+    // residual de +2% no viene de ahi y sigue sin explicacion.
     if (!stable) return;
     if (asked_avg < 2.0) return;
     const double delivered = presented_fps / base_fps;
