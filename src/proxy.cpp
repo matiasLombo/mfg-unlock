@@ -2384,7 +2384,10 @@ static void dyn_apply(double base_fps) {
     }
     last_pc = pc;
     last_t = now_ms;
-    // La deuda se paga en medio segundo, no de golpe.
+    // La deuda se paga en medio segundo. Se probo en 0.8 -- factor 1.2 -- para
+    // achicar el subdisparo que quedaba, y salio peor: 79% contra 87%, con las
+    // ventanas altas de vuelta en 150-179. Pagar mas lento deja que el
+    // sobrepaso del escalon entre otra vez en el promedio de la ventana.
     const double target_eff = target + debt * 2.0;
     const double raw = (target_eff > 1.0 ? target_eff : 1.0) / base_fps;
     double want = raw * g_dyn_bias[dyn_bucket(raw)];
