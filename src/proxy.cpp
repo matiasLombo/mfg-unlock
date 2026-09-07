@@ -763,6 +763,12 @@ static bool g_pace_follow = false;    // mfg-pacefollow.txt
 // intervals per rendered frame and it is not this computation. Kept behind
 // mfg-pacefollow.txt, off by default, because the site and the reasoning are
 // right and the next idea will start here.
+//
+// And it is not presents being issued and then dropped: sl.log records zero
+// "will skip the present" in every configuration, so the plugin issues exactly
+// `ratio` presents per rendered frame. 2.25x, 2.50x, 2.75x and 3.00x all render
+// at 55 while presenting 124, 138, 151 and 165 -- the producer is fixed
+// regardless of how many presents actually leave.
 static volatile unsigned char *g_pace_count = nullptr;
 static int patch_pacer_count(unsigned char *text, size_t len) {
     static const unsigned char sig[18] = {
