@@ -403,6 +403,20 @@ static HWND g_game_hwnd = nullptr;
 typedef unsigned (*PFN_slReflexGetState)(void *);
 static PFN_slReflexGetState g_orig_reflexstate = nullptr;
 static bool g_reflex_dumped = false;
+// Sacado del volcado: GUID en +8 y version 2 en +24 de la ReflexState que
+// el sample entrego ya armada. Hace falta porque GTA V llama a
+// slReflexGetState apenas un punado de veces -- al abrir su menu, se ve --
+// y no una vez por frame como el sample, asi que colgarse de sus llamadas
+// no da ningun dato. Consultamos nosotros.
+static const unsigned char kReflexStateGuid[16] = {
+    0x85, 0x59, 0xbb, 0xf0,
+    0xf9, 0xda,
+    0x28, 0x47,
+    0xb2, 0xfd, 0xae, 0x80, 0xa2, 0xbd, 0x79, 0x89
+};
+// 48 de cabecera mas 64 informes de 152 son 9776; se pide de mas y se
+// pone en cero, que es como se pidio DLSSGState y nunca fallo.
+static unsigned char g_reflex_buf[16384];
 // Offsets confirmados con el volcado y con dos chequeos internos: el
 // gpuActiveRenderTimeUs que escribe NVIDIA coincide con gpuRenderEnd-Start
 // (3802 vs 3883 us) y su gpuFrameTimeUs de 16854 us es exactamente la base de
@@ -694,6 +708,44 @@ static unsigned hk_slReflexSetMarker(unsigned marker, void *frame) {
     return g_orig_reflexmarker ? g_orig_reflexmarker(marker, frame) : 0;
 }
 
+// El informe 63 es el mas reciente. Offsets confirmados con el volcado y
+// con dos chequeos internos del propio NVIDIA.
+static void reflex_take(const void *state) {
+    const unsigned char *q = (const unsigned char *)state + 9648;
+    const unsigned long long id  = *(const unsigned long long *)(q + 0);
+    const unsigned long long sim = *(const unsigned long long *)(q + 16);
+    const unsigned long long drv = *(const unsigned long long *)(q + 72);
+    const unsigned long long gpu = *(const unsigned long long *)(q + 104);
+    const unsigned ft = *(const unsigned *)(q + 116);
+    // Un informe por frame: consultas seguidas devuelven el mismo.
+    if (id == 0 || id == g_rfx_lastid || sim == 0 || gpu <= sim || drv <= sim)
+        return;
+    g_rfx_lastid = id;
+    g_rfx_gpu += (double)(gpu - sim);
+    g_rfx_drv += (double)(drv - sim);
+    g_rfx_ft  += (double)ft;
+    ++g_rfx_n;
+    const unsigned dv = (unsigned)(drv - sim);
+    if (dv < g_rfx_min) g_rfx_min = dv;
+    if (dv > g_rfx_max) g_rfx_max = dv;
+}
+
+// Se llama una vez por frame desde el hilo de present, que es donde ya
+// corre el resto de la medicion.
+static void reflex_poll(void) {
+    if (g_orig_reflexstate == nullptr) return;
+    for (int i = 0; i < 64; ++i) g_reflex_buf[i] = 0;
+    for (int i = 0; i < 16; ++i) g_reflex_buf[8 + i] = kReflexStateGuid[i];
+    *(unsigned long long *)(g_reflex_buf + 24) = 2;      // structVersion 2
+    const unsigned r = g_orig_reflexstate(g_reflex_buf);
+    if (r != 0) {
+        static bool said = false;
+        if (!said) { said = true; log_num("reflex: query refused, code ", r); }
+        return;
+    }
+    reflex_take(g_reflex_buf);
+}
+
 static unsigned hk_slReflexGetState(void *state) {
     const unsigned r = g_orig_reflexstate ? g_orig_reflexstate(state) : 1;
     // El layout salio del volcado, no de suponer: GUID en +8, version 2 en +24,
@@ -702,25 +754,7 @@ static unsigned hk_slReflexGetState(void *state) {
     // 72 + 152*i. El [63] es el mas reciente: 72 + 152*63 = 9648.
     static int calls = 0;
     ++calls;
-    if (r == 0 && state != nullptr) {
-        const unsigned char *q = (const unsigned char *)state + 9648;
-        const unsigned long long id = *(const unsigned long long *)(q + 0);
-        const unsigned long long sim = *(const unsigned long long *)(q + 16);
-        const unsigned long long drv = *(const unsigned long long *)(q + 72);
-        const unsigned long long gpu = *(const unsigned long long *)(q + 104);
-        const unsigned ft = *(const unsigned *)(q + 116);
-        // Un informe por frame: llamadas seguidas devuelven el mismo.
-        if (id != 0 && id != g_rfx_lastid && sim != 0 && gpu > sim && drv > sim) {
-            g_rfx_lastid = id;
-            g_rfx_gpu += (double)(gpu - sim);
-            g_rfx_drv += (double)(drv - sim);
-            g_rfx_ft += (double)ft;
-            ++g_rfx_n;
-            const unsigned dv = (unsigned)(drv - sim);
-            if (dv < g_rfx_min) g_rfx_min = dv;
-            if (dv > g_rfx_max) g_rfx_max = dv;
-        }
-    }
+    if (r == 0 && state != nullptr) reflex_take(state);
     if (r == 0 && state != nullptr && !g_reflex_dumped && calls > 300) {
         g_reflex_dumped = true;
         log_num("reflex: latencyReportAvailable ",
@@ -2887,6 +2921,7 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     }
     note_rendered_frame();
     g_game_set_this_frame = 0;      // a new frame; the last one is settled
+    reflex_poll();
     // The present index advances here, with the frame, and not in
     // set_count_now: that only runs in fractional mode, so the counter feeding
     // *every* present sat at zero whenever the cadence was constant. A control
