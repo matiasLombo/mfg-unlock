@@ -41,6 +41,22 @@ volatile LONG g_force_sel = 0;
 volatile LONG g_force_generated = 0;
 volatile LONG g_last_seen_generated = 0;
 volatile LONG g_dyn_target = 0;
+// DYNAMIC: el objetivo esta en fps presentados, no en ratio. Cero significa
+// el refresh del monitor. El controlador escribe g_dyn_target -- el ratio --
+// y de ahi para abajo todo es el planificador fraccionario que ya andaba.
+volatile LONG g_dyn_fps = 0;
+static LONG g_refresh_hz = 0;
+// Sonda de una sola vez: cuantos frames pasan entre escribir un ratio nuevo y
+// que las presentaciones lo reflejen. El objetivo pedia medir esto y no
+// suponerlo, y es el unico candidato que queda para el sobrepaso -- todo el
+// error residual esta del lado alto, justo despues de que la base sube.
+static LONG g_probe_left = 0;
+static LONG g_probe_pc0 = 0;
+static unsigned char g_probe[16];
+static LONG g_probe_i = 0;
+static bool g_probe_done = false;
+static void dyn_control(double base_fps, double presented_fps);  // definida mas abajo
+static void dyn_apply(double base_fps);                          // definida mas abajo
 bool g_dynamic_known = false;
 bool g_ov_enabled = true;
 static void log_line(const char *text);
@@ -290,7 +306,7 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     const LONG sel = g_force_sel;
     if (sel == 1) {
         *(LONG *)(p + 32) = 0;                 // DLSSGMode::eOff
-    } else if (sel == kSelDynamic) {
+    } else if (sel == kSelDynamic || sel == kSelDynFuture) {
         // Ours, not the plugin's: eOn with the count dynamic_tick chose. The
         // struct rebuild to version 5 and the eDynamic write below are gone
         // with it, so nothing here depends on the plugin being 2.11.1.
@@ -1859,6 +1875,7 @@ static int    g_pres_bucket[6] = { 0, 0, 0, 0, 0, 0 };
 static double g_lo_time = 0.0;
 static double g_hi_time = 0.0;
 static double g_token_fps = 0.0;      // and the rate that follows from it
+static double g_token_dt_fast = 0.0;  // la misma senal, para el controlador
 static double g_base_fps = 0.0;       // that, divided by the multiplier in force
 static long long g_last_token_qpc = 0;
 
@@ -1868,6 +1885,14 @@ static volatile LONG g_token_calls = 0;
 static volatile LONG g_frames_gated = 0;
 static bool g_novsync = false;        // mfg-novsync.txt: diagnostic
 static int  g_slow_frame_us = 0;      // mfg-slowframe.txt, en microsegundos
+// Con tres numeros en mfg-slowframe.txt la carga alterna entre el primero y
+// el segundo cada N milisegundos, y la base del banco se mueve de verdad
+// durante la corrida. Sin esto no hay forma de probar un controlador: una
+// escena de carga constante no distingue a uno que ajusta de uno que no
+// hace nada. Escalon y no rampa a proposito -- el que aguanta un escalon
+// aguanta una rampa, y en los datos se ve donde empieza.
+static int  g_slow_frame_us2 = 0;
+static int  g_slow_step_ms = 0;
 static int  g_jitter_pct = 0;         // mfg-jitter.txt, porcentaje
 static double g_present_block_us = 0.0;   // blocked inside Present, per window
 static double g_token_block_us = 0.0;     // blocked inside slGetNewFrameToken
@@ -2017,6 +2042,12 @@ static void note_rendered_frame(void) {
                         // separan y despues no se sabe cual creer.
                         if (win_elapsed > 0.0)
                             g_hud_fps_x10 = (LONG)(dp * 10.0 / win_elapsed + 0.5);
+                        // El controlador de DYNAMIC come de aca por la misma
+                        // razon: la base y lo presentado ya estan medidos con
+                        // el instrumento honesto, y una segunda cuenta propia
+                        // seria un numero mas que puede discrepar.
+                        if (win_elapsed > 0.0)
+                            dyn_control(g_rendered_fps, dp / win_elapsed);
                         g_present_block_us = 0.0;
                         if (g_clamp_latency > 0)
                             log_num("  SetMaximumFrameLatency calls so far ",
@@ -2108,6 +2139,31 @@ static void note_rendered_frame(void) {
             // off the game.
             g_last_dt = dt;
             g_token_dt = g_token_dt <= 0.0 ? dt : g_token_dt * 0.94 + dt * 0.06;
+            // Una segunda estimacion, cuatro veces mas rapida, solo para el
+            // controlador. La de arriba tiene constante de ~16 frames -- 275 ms
+            // a base 58 -- y ese retardo es exactamente el sobrepaso medido
+            // despues de cada escalon: 11 ventanas entre 150 y 178 con objetivo
+            // 140, todas del lado alto. No se toca la original porque la
+            // comparten el metering y dynamic_want.
+            if (g_token_dt_fast <= 0.0) {
+                g_token_dt_fast = dt;
+            } else {
+                // Deteccion de escalon. Suavizar es correcto para el ruido y
+                // equivocado para un cambio real: con constante de 4 frames el
+                // sobrepaso dura ~4 de los 45 de una ventana, y 4 frames a 220
+                // contra 41 a 140 promedian 147 -- justo afuera del +-5%. Dos
+                // frames seguidos lejos del estimado y cerca entre si no son
+                // ruido, son otra carga, y ahi conviene saltar de una.
+                static double prev_dt = 0.0;
+                const double lo = g_token_dt_fast * 0.75;
+                const double hi = g_token_dt_fast * 1.33;
+                const bool lejos = dt < lo || dt > hi;
+                const bool igual = prev_dt > 0.0 &&
+                                   dt > prev_dt * 0.88 && dt < prev_dt * 1.12;
+                if (lejos && igual) g_token_dt_fast = dt;
+                else g_token_dt_fast = g_token_dt_fast * 0.75 + dt * 0.25;
+                prev_dt = dt;
+            }
             g_token_fps = g_token_dt > 0.0 ? 1.0 / g_token_dt : 0.0;
             // Divided by the multiplier in force, because the interval turned
             // out to track the *presented* rate and not the rendered one. The
@@ -2121,6 +2177,30 @@ static void note_rendered_frame(void) {
             // shows it was the wrong correction -- the reading was assumed to
             // be the rendered rate once already.
             g_base_fps = g_token_fps;
+            dyn_apply(g_token_dt_fast > 0.0 ? 1.0 / g_token_dt_fast : g_base_fps);
+            if (g_probe_left > 0) {
+                const LONG pc = g_rt_present_count;
+                LONG d = pc - g_probe_pc0;
+                if (d < 0) d = 0;
+                if (d > 255) d = 255;
+                g_probe[g_probe_i++] = (unsigned char)d;
+                g_probe_pc0 = pc;
+                if (--g_probe_left == 0) {
+                    g_probe_done = true;
+                    char line[96];
+                    int k = 0;
+                    const char *pre = "probe: presents per frame after the write:";
+                    while (pre[k] != 0) { line[k] = pre[k]; ++k; }
+                    for (int q = 0; q < 16; ++q) {
+                        line[k++] = ' ';
+                        const int v = g_probe[q];
+                        if (v >= 10) line[k++] = (char)('0' + (v / 10) % 10);
+                        line[k++] = (char)('0' + v % 10);
+                    }
+                    line[k] = 0;
+                    log_line(line);
+                }
+            }
         }
     }
     g_last_token_qpc = t.QuadPart;
@@ -2154,9 +2234,149 @@ static LONG dynamic_want(void) {
 // Superseded by fractional_tick, which does the same job without rounding to
 // a whole multiplier. Kept only so the integer path is one edit away if the
 // immediate patch ever fails to apply.
+// CUSTOM y DYNAMIC usan el mismo planificador: la unica diferencia es quien
+// escribe el ratio. En CUSTOM lo escribe la persona; en DYNAMIC, el
+// controlador. Un helper en vez de repetir la comparacion en cada sitio,
+// que es como se cuelan las ramas olvidadas.
+static inline bool sel_is_frac(void) {
+    return g_force_sel == kSelDynamic || g_force_sel == kSelDynFuture;
+}
+
+// Corre una vez por ventana de medicion, con la base y lo presentado ya
+// medidos por el instrumento honesto. No corre por frame a proposito: cada
+// cambio de ratio es una escritura de opciones, y escribir de mas ya causo
+// apagones en este proyecto.
+// El sesgo de entrega, aprendido despacio y solo en ventanas estables. Es lo
+// unico que se realimenta: realimentar tambien la base oscilo -- 18% de
+// ventanas en banda contra 40% sin realimentar nada.
+// Una ganancia por tramo de ratio, no una sola. El sesgo de entrega depende
+// del punto de operacion y esta medido: pidiendo 3.75 el planificador entrega
+// 3.78 (sesgo 0.995) y pidiendo 2.33 entrega 2.47 (sesgo 0.941, un +6%). Un
+// escalar unico converge al promedio, 0.977, que deja +3% arriba y -2.5% abajo
+// -- justo la forma del residuo que quedaba.
+static double g_dyn_bias[6] = { 1.0, 1.0, 1.0, 1.0, 1.0, 1.0 };
+
+static inline int dyn_bucket(double ratio) {
+    int b = (int)ratio;
+    if (b < 2) b = 2;
+    if (b > 5) b = 5;
+    return b;
+}
+// El ratio pedido, promediado sobre la ventana. La ganancia compara pedido
+// contra entregado, y con el adelanto corriendo por frame el pedido se mueve
+// unas tres veces por ventana: tomar el valor del final contra el promedio
+// entregado hacia que la ganancia se paseara hasta 1.07 -- un exceso fijo de
+// +5 a +10% en los tramos estables. Bloquear el aprendizaje en esas ventanas
+// tampoco sirve: casi ninguna califica, la ganancia se queda en 1.0 y el
+// exceso de entrega real de ~4% queda sin corregir, con la mediana en 145.
+// Promediar el pedido es lo unico que compara los dos numeros sobre el mismo
+// periodo.
+static double g_dyn_asked_sum = 0.0;
+static LONG g_dyn_asked_n = 0;
+
+static void dyn_control(double base_fps, double presented_fps) {
+    if (g_force_sel != kSelDynFuture) return;
+    if (base_fps <= 1.0 || presented_fps <= 1.0) return;
+    static double last_base = 0.0;
+    const bool stable = last_base > 1.0 &&
+                        (base_fps > last_base ? base_fps - last_base
+                                              : last_base - base_fps) < 4.0;
+    last_base = base_fps;
+    const double asked_avg = g_dyn_asked_n > 0
+                           ? g_dyn_asked_sum / (double)g_dyn_asked_n : 0.0;
+    g_dyn_asked_sum = 0.0;
+    g_dyn_asked_n = 0;
+    if (!stable) return;
+    if (asked_avg < 2.0) return;
+    const double delivered = presented_fps / base_fps;
+    if (delivered <= 0.5) return;
+    // Se registran los dos para poder ver si el sesgo depende del punto de
+    // operacion: un solo escalar no puede corregir a ratio 2.4 y a 3.8 a la vez
+    // si el planificador se desvia distinto en cada uno.
+    log_num("dynbias: asked x100 ", (unsigned)(asked_avg * 100.0 + 0.5));
+    log_num("  delivered x100 ", (unsigned)(delivered * 100.0 + 0.5));
+    log_num("  at base ", (unsigned)(base_fps + 0.5));
+    const double inst = asked_avg / delivered;
+    const int bk = dyn_bucket(asked_avg);
+    g_dyn_bias[bk] += (inst - g_dyn_bias[bk]) * 0.25;
+    if (g_dyn_bias[bk] < 0.80) g_dyn_bias[bk] = 0.80;
+    if (g_dyn_bias[bk] > 1.25) g_dyn_bias[bk] = 1.25;
+}
+
+// El adelanto, por frame. Corre sobre g_base_fps, que se actualiza en cada
+// frame, y no sobre la ventana de 45: reaccionar una ventana tarde dejaba
+// ocho ventanas en 170-199 fps despues de cada escalon de base, que era el
+// techo de la version anterior. La banda muerta es lo que evita que correr
+// por frame se convierta en una escritura de opciones por frame.
+static void dyn_apply(double base_fps) {
+    if (g_force_sel != kSelDynFuture) return;
+    if (base_fps <= 1.0) return;
+    if (g_refresh_hz <= 0) {
+        DEVMODEW dm; dm.dmSize = sizeof(dm); dm.dmDriverExtra = 0;
+        if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm))
+            g_refresh_hz = (LONG)dm.dmDisplayFrequency;
+        if (g_refresh_hz <= 0) g_refresh_hz = 60;
+        log_num("dynamic: refresh is ", (unsigned)g_refresh_hz);
+    }
+    const double target = (g_dyn_fps > 0) ? (double)g_dyn_fps
+                                          : (double)g_refresh_hz;
+    // El tramo se elige con la estimacion sin corregir, para no depender de la
+    // correccion que se esta por aplicar.
+    const double raw = target / base_fps;
+    double want = raw * g_dyn_bias[dyn_bucket(raw)];
+    // El techo es estructural, no una preferencia. Si el objetivo no entra, se
+    // dice una vez en vez de saturar callado.
+    if (want > 6.0) {
+        static bool said_hi = false;
+        if (!said_hi) {
+            said_hi = true;
+            log_num("dynamic: target needs more than 6x at this base, fps ",
+                    (unsigned)target);
+            log_num("  base is ", (unsigned)(base_fps + 0.5));
+        }
+        want = 6.0;
+    }
+    if (want < 2.0) want = 2.0;
+    // Se acumula todos los frames, se cambie o no el ratio: la ganancia necesita
+    // el promedio de lo pedido durante la ventana, no el ultimo valor.
+    g_dyn_asked_sum += (double)g_dyn_target / 100.0;
+    ++g_dyn_asked_n;
+    LONG next = (LONG)(want * 100.0 + 0.5);
+    const LONG cur = g_dyn_target;
+    // No se compensa el retardo de escritura, y esta probado. Entre escribir un
+    // ratio y que las presentaciones lo reflejen pasan 9 o 10 frames -- medido
+    // con la sonda: "0 6 3 5 4 7 2 4 4 4 3 3 3 3 3 3" tras bajar desde 6.00 --
+    // asi que parecia razonable pedir de mas durante un escalon para llegar
+    // antes. Con un 20% extra el resultado cae de 72% a 61% de ventanas en
+    // banda y aparece subdisparo, una ventana en 104 fps contra 140. El
+    // retardo es el piso de reaccion y adelantarse cuesta mas de lo que ahorra.
+    const LONG diff = next > cur ? next - cur : cur - next;
+    // Banda muerta de 0.10, y no menos. A base 59 son 5.9 fps -- el 4.2% del
+    // objetivo -- asi que parecia el piso de precision del controlador y se
+    // probo bajarla a 0.03 con un minimo de tiempo entre escrituras. Salio
+    // PEOR: 51% de ventanas en banda contra 63%, la mediana se corrio de 140 a
+    // 138 y las escrituras pasaron de 110 a 196. Cada escritura de opciones
+    // cuesta mas de lo que la zona muerta desvia, que es algo que este proyecto
+    // ya sabia y aca se volvio a comprobar.
+    if (diff < 10) return;
+    g_dyn_target = next;
+    // Solo la primera bajada grande de ratio, que es el caso del sobrepaso.
+    if (!g_probe_done && g_probe_left == 0 && cur - next > 80) {
+        g_probe_left = 16;
+        g_probe_i = 0;
+        g_probe_pc0 = g_rt_present_count;
+        log_num("probe: ratio dropped from x100 ", (unsigned)cur);
+        log_num("  to x100 ", (unsigned)next);
+    }
+    g_dyn_said = 0;
+    g_opt_pending = 1;
+    log_num("dynamic: ratio now x100 ", (unsigned)next);
+    log_num("  from base ", (unsigned)(base_fps + 0.5));
+}
+
 static void dynamic_tick(void) {
     if (g_count_imm != nullptr) return;
-    if (g_force_sel != kSelDynamic) return;
+    if (!sel_is_frac()) return;
     const LONG want = dynamic_want();
     static LONG last_want = -1;
     static int steady = 0;
@@ -2215,7 +2435,7 @@ static void fractional_tick(void) {
     // This is what makes the patch safe to arm without a fractional selection,
     // which is the whole obstacle to shipping the dll on its own. Rows 2..N are
     // fixed multipliers holding row-1 generated frames; row 1 is off.
-    if (g_force_sel != kSelDynamic) {
+    if (!sel_is_frac()) {
         if (g_force_sel >= 1 && g_force_sel <= kSelMaxFixed)
             set_count_now(g_force_sel >= 2 ? g_force_sel - 1 : 0);
         else if (g_force_sel == 0)
@@ -2960,6 +3180,13 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     // 400, 8000 and 32000 all render 164.
     if (g_slow_frame_us > 0 && g_qpc_freq > 0) {
         int us = g_slow_frame_us;
+        if (g_slow_frame_us2 > 0 && g_slow_step_ms > 0) {
+            static ULONGLONG t0 = 0;
+            if (t0 == 0) t0 = GetTickCount64();
+            const ULONGLONG el = GetTickCount64() - t0;
+            if (((el / (ULONGLONG)g_slow_step_ms) & 1ull) != 0ull)
+                us = g_slow_frame_us2;
+        }
         // Jitter, from mfg-jitter.txt as a percentage.
         //
         // 57 archived bench runs -- 21 of them at 2.50x -- record zero
@@ -3019,7 +3246,7 @@ static void settings_save(void) {
     HANDLE h = CreateFileW(p, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
-    char buf[96];
+    char buf[160];   // cuatro lineas ahora: mode, target, dynfps, hud
     int k = 0;
     const char *l1 = "mode ";
     for (int i = 0; l1[i] != 0; ++i) buf[k++] = l1[i];
@@ -3046,6 +3273,17 @@ static void settings_save(void) {
         }
     }
     buf[k++] = '\r'; buf[k++] = '\n';
+    {
+        const char *l4 = "dynfps ";
+        for (int i = 0; l4[i] != 0; ++i) buf[k++] = l4[i];
+        int v = (int)g_dyn_fps, n = 0, d[5];
+        if (v <= 0) buf[k++] = '0';
+        else {
+            while (v > 0 && n < 5) { d[n++] = v % 10; v /= 10; }
+            while (n > 0) buf[k++] = (char)('0' + d[--n]);
+        }
+        buf[k++] = '\r'; buf[k++] = '\n';
+    }
     {
         // El HUD se guarda como el resto: si alguien lo deja prendido,
         // sigue prendido la proxima vez que abre el juego.
@@ -3077,12 +3315,23 @@ static void settings_load(void) {
     for (DWORD i = 0; i < n; ++i) {
         const bool is_mode = (i + 5 < n) && buf[i] == 'm' && buf[i+1] == 'o' &&
                              buf[i+2] == 'd' && buf[i+3] == 'e';
+        const bool is_dfps = (i + 7 < n) && buf[i] == 'd' && buf[i+1] == 'y' &&
+                             buf[i+2] == 'n' && buf[i+3] == 'f' &&
+                             buf[i+4] == 'p' && buf[i+5] == 's' && buf[i+6] == ' ';
         const bool is_hud  = (i + 4 < n) && buf[i] == 'h' &&
                              buf[i+1] == 'u' && buf[i+2] == 'd' &&
                              buf[i+3] == ' ';
         const bool is_tgt  = (i + 7 < n) && buf[i] == 't' && buf[i+1] == 'a' &&
                              buf[i+2] == 'r' && buf[i+3] == 'g' && buf[i+4] == 'e' &&
                              buf[i+5] == 't';
+        if (is_dfps) {
+            int v = 0; size_t j = i + 7;
+            while (j < n && buf[j] >= '0' && buf[j] <= '9')
+                v = v * 10 + (buf[j++] - '0');
+            if (v >= 0 && v <= 1000) g_dyn_fps = v;
+            i = j;
+            continue;
+        }
         if (is_hud) {
             g_hud_on = buf[i+4] == '1';
             i += 4;
@@ -3105,7 +3354,8 @@ static void settings_load(void) {
                 // and the controller cannot measure a base rate without it
                 // running. It waited for itself. One generated frame is the
                 // seed; the controller moves off it on the first measurement.
-                if (v == kSelDynamic) g_force_generated = 1;
+                if (v == kSelDynamic || v == kSelDynFuture)
+                    g_force_generated = 1;
             }
         } else if (is_tgt && v >= 0 && v <= kMaxCustom) {
             // Un ajuste guardado por una version anterior puede traer 150. Se
@@ -4198,7 +4448,7 @@ static DWORD WINAPI recorder(LPVOID) {
                     g_settings_dirty = 1;
                 }
                 const bool row_ok =
-                    (g_ov_hot == kSelDynFuture) ? false
+                    (g_ov_hot == kSelDynFuture) ? true
                   : (g_ov_hot == kSelDynamic) ? true
                   : (g_ov_hot < 2 || g_frames_max == 0 ||
                      (LONG)(g_ov_hot - 1) <= g_frames_max);
@@ -5331,17 +5581,32 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             g_no_waitable = flag_file(L"mfg-nowaitable.txt");
             { wchar_t sp[MAX_PATH]; beside_dll(sp, L"mfg-slowframe.txt");
               HANDLE sh = CreateFileW(sp, GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
               if (sh != INVALID_HANDLE_VALUE) {
-                  char b3[16]; DWORD r5 = 0;
-                  if (ReadFile(sh, b3, sizeof(b3)-1, &r5, nullptr) && r5 > 0) {
-                      b3[r5] = 0; int v = 0;
-                      for (DWORD k = 0; k < r5 && b3[k] >= '0' && b3[k] <= '9'; ++k)
-                          v = v * 10 + (b3[k] - '0');
-                      if (v > 0 && v <= 100000) { g_slow_frame_us = v;
-                          log_num("bench: frame slowed by us ", (unsigned)v); }
-                  }
-                  CloseHandle(sh);
+                char b3[48]; DWORD r5 = 0;
+                if (ReadFile(sh, b3, sizeof(b3)-1, &r5, nullptr) && r5 > 0) {
+                    b3[r5] = 0;
+                    int v[3] = { 0, 0, 0 }; int k = 0; DWORD q = 0;
+                    while (q < r5 && k < 3) {
+                            while (q < r5 && (b3[q] < '0' || b3[q] > '9')) ++q;
+                        if (q >= r5) break;
+                        int n2 = 0;
+                            while (q < r5 && b3[q] >= '0' && b3[q] <= '9')
+                                n2 = n2 * 10 + (b3[q++] - '0');
+                        v[k++] = n2;
+                    }
+                    if (v[0] > 0 && v[0] <= 100000) {
+                        g_slow_frame_us = v[0];
+                        log_num("bench: frame slowed by us ", (unsigned)v[0]);
+                    }
+                    if (k >= 3 && v[1] > 0 && v[1] <= 100000 && v[2] > 0) {
+                        g_slow_frame_us2 = v[1];
+                        g_slow_step_ms = v[2];
+                        log_num("bench: base steps to us ", (unsigned)v[1]);
+                        log_num("  every ms ", (unsigned)v[2]);
+                    }
+                }
+                CloseHandle(sh);
               } }
             { wchar_t jp[MAX_PATH]; beside_dll(jp, L"mfg-jitter.txt");
               HANDLE jh = CreateFileW(jp, GENERIC_READ, FILE_SHARE_READ, nullptr,

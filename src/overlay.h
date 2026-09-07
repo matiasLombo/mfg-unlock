@@ -251,7 +251,7 @@ static void ov_frame(float x, float y, float w, float h,
 // ---- layout, shared by the drawing and the hit test ---------------------
 
 static bool ov_target_shown(void) {
-    return g_force_sel == kSelDynamic;
+    return g_force_sel == kSelDynamic || g_force_sel == kSelDynFuture;
 }
 
 static int ov_panel_h(void) {
@@ -462,7 +462,7 @@ static void ov_build_panel(void) {
             // frame count over its maximum outright, and only 2.11.1 and newer
             // soften that into a clamp. Offering 6X where it will be refused
             // would stop frame generation with nothing to explain it.
-            const bool avail = (i == kSelDynFuture) ? false
+            const bool avail = (i == kSelDynFuture) ? true
                              : (i == kSelDynamic) ? true
                              : (i < 2 || g_frames_max == 0 ||
                                 (LONG)(i - 1) <= g_frames_max);
