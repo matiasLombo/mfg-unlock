@@ -52,6 +52,8 @@ static void log_num(const char *label, unsigned long long v);
 
 static wchar_t g_log[MAX_PATH];
 static bool g_frac_enabled = false;   // mfg-frac.txt
+static bool g_quiet = false;          // mfg-quiet.txt: no per-window logging
+static bool g_nullalt = false;        // mfg-nullalt.txt: alternate between equals
 static bool g_slowalt = false;        // mfg-slowalt.txt
 static int  g_slowalt_len = 240;       // rendered frames per block
 static int  g_block_ms = 0;           // mfg-blockms.txt, 0 = default
@@ -1304,6 +1306,10 @@ static long long g_pres_qpc = 0;            // when the last present went out
 static volatile LONG g_last_change_pres = 0; // present index at the last count change
 static int g_hitch_near = 0;                 // hitches within 4 presents of one
 static int g_hitch_far = 0;                  // and the rest
+static int g_all_n = 0, g_all_bad = 0;       // every present, for the summary
+static double g_all_ms = 0.0;
+static int g_near_n = 0, g_near_bad = 0;     // presents within 8 of a change
+static int g_far_n = 0, g_far_bad = 0;       // and the rest
 static double g_pres_ms_sum = 0.0;
 static double g_pres_ms_max = 0.0;
 static int    g_pres_n = 0;
@@ -1347,6 +1353,12 @@ static void note_rendered_frame(void) {
                 g_rendered_fps = (double)g_win_frames / g_win_time;
                 g_win_frames = 0;
                 g_win_time = 0.0;
+                // Silenced by mfg-quiet.txt. log_line opens, seeks, writes and
+                // closes the file for every line, on the render thread, and the
+                // alternating arm emits more lines than the integer one -- so
+                // part of the 10% throughput gap could be this rather than the
+                // cadence. Running both arms silent settles which.
+                if (!g_quiet)
                 log_num("measured: rendered fps ", (unsigned)(int)(g_rendered_fps + 0.5));
                 {
                     // Frames that left the swap chain over frames the game
@@ -1356,13 +1368,22 @@ static void note_rendered_frame(void) {
                     const LONG now = g_present_count;
                     const LONG dp = now - last_pres;
                     last_pres = now;
-                    if (dp > 0) {
+                    if (dp > 0 && !g_quiet) {
                         log_num("  presents this window ", (unsigned)dp);
                         if (g_pres_n > 0) {
                             log_num("  present ms avg x10 ",
                                     (unsigned)(g_pres_ms_sum / (double)g_pres_n * 10.0));
                             log_num("  present ms max x10 ", (unsigned)(g_pres_ms_max * 10.0));
                             log_num("  hitches over 33ms ", (unsigned)g_pres_hitch);
+                            if (g_near_n + g_far_n > 0) {
+                                log_num("    off-refresh near a change x1000 ",
+                                        (unsigned)(g_near_n ? (unsigned long long)g_near_bad * 1000ULL / (unsigned)g_near_n : 0));
+                                log_num("      of presents ", (unsigned)g_near_n);
+                                log_num("    off-refresh away x1000 ",
+                                        (unsigned)(g_far_n ? (unsigned long long)g_far_bad * 1000ULL / (unsigned)g_far_n : 0));
+                                log_num("      of presents ", (unsigned)g_far_n);
+                                g_near_n = 0; g_near_bad = 0; g_far_n = 0; g_far_bad = 0;
+                            }
                             if (g_hitch_near + g_hitch_far > 0) {
                                 log_num("    at a count change ", (unsigned)g_hitch_near);
                                 log_num("    away from one ", (unsigned)g_hitch_far);
@@ -1558,7 +1579,29 @@ static void fractional_tick(void) {
         // swept without a rebuild. The unit is milliseconds of the cadence
         // clock, which advances once per frame-token call -- about seven times
         // per rendered frame -- so 750 here is ~125 ms of wall clock, not 750.
-        const double kBlockSecs = g_block_ms > 0 ? (double)g_block_ms / 1000.0 : 0.75;
+        // Eight seconds, measured. The cost of this whole approach is the
+        // count changing, and it scales with how often that happens -- nothing
+        // else. Presented fps against block length, 2.50x, same scene:
+        //
+        //   0.5 s   66 changes  42.7% off-refresh  141.0 fps
+        //   0.75 s  47          37.0%              148.4
+        //   4 s      8          10.5%              158.0
+        //   8 s      4           3.3%              163.1
+        //   12 s     3           0.3%              165.3
+        //
+        // The null control settles what causes it: run the same scheduler, the
+        // same clock and the same slDLSSGSetOptions replay at every boundary
+        // but with both values equal, and the cost vanishes entirely (0.0-0.3%,
+        // 165.3 fps). So it is neither the API calls nor our own logging --
+        // silencing that changed nothing -- it is the count taking a different
+        // value.
+        //
+        // 8 s rather than 12: the ratio still averages correctly (2.48 asked
+        // 2.50, over 47 windows) and the presented rate holds 167 fps with two
+        // dips in 47 windows, at the block boundaries. Longer blocks buy the
+        // last 2 fps and make the average slower to settle, which would matter
+        // if the target ever moved.
+        const double kBlockSecs = g_block_ms > 0 ? (double)g_block_ms / 1000.0 : 8.0;
         const int kBlocks = 8;
         const double cycle_secs = kBlockSecs * (double)kBlocks;
         if (sa_clock >= cycle_secs) sa_clock -= cycle_secs;
@@ -1659,7 +1702,14 @@ static void fractional_tick(void) {
         int hi_blocks = (int)((frac + sa_bias) * (double)kBlocks + 0.5);
         if (hi_blocks < 0) hi_blocks = 0;
         if (hi_blocks > kBlocks) hi_blocks = kBlocks;
-        const LONG want = (sa_pos_block < hi_blocks) ? lo + 1 : lo;
+        // A null control: with mfg-nullalt.txt the scheduler runs exactly as it
+        // does for a fractional ratio -- same blocks, same clock, same
+        // slDLSSGSetOptions replay every boundary -- but both values are the
+        // same, so nothing about the generated count changes. If the cost
+        // survives that, it is the machinery of alternating; if it vanishes,
+        // it is the count itself changing. Nothing else separates the two.
+        const LONG want = g_nullalt ? lo + 1
+                        : ((sa_pos_block < hi_blocks) ? lo + 1 : lo);
         sa_pos = (sa_pos + 1) % (kBlocks * g_slowalt_len);
         // Zero is kept as zero here, not clamped to one. Below 2.0x the API
         // cannot express the ratio at all -- its smallest generating value is
@@ -2501,6 +2551,32 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
                 const int b = ms < 4.0 ? 0 : ms < 8.0 ? 1 : ms < 12.0 ? 2
                             : ms < 20.0 ? 3 : ms < 33.0 ? 4 : 5;
                 ++g_pres_bucket[b];
+                // Where the throughput actually goes, conditioned on distance
+                // from a block boundary.
+                //
+                // The cost is not the six intervals over 33 ms; counting those
+                // is a thousand times less sensitive than the intervals
+                // themselves, which is how a ten percent throughput loss was
+                // read as "no measurable cost". At 2.50x, 7.7 percent of
+                // presents arrive under 4 ms after the previous one -- inside a
+                // 6.06 ms refresh, so overwritten -- and 29.7 percent arrive
+                // late, against 1.0 and 2.1 for an integer count. That is
+                // burst-and-wait, thousands of intervals, and it costs 149.7
+                // presented fps against 166.7.
+                //
+                // If the count change causes it, the bad intervals cluster in
+                // the presents just after one. If they are spread evenly, the
+                // cost is in running a varying count at all and there is
+                // nothing at the boundary to fix.
+                {
+                    ++g_all_n;
+                    if (b == 0 || b >= 2) ++g_all_bad;
+                    g_all_ms += ms;
+                    const LONG since = g_present_count - g_last_change_pres;
+                    const bool bad = (b == 0 || b >= 2);
+                    if (since < 8) { ++g_near_n; if (bad) ++g_near_bad; }
+                    else           { ++g_far_n;  if (bad) ++g_far_bad; }
+                }
                 if (ms > 33.0) {
                     ++g_pres_hitch;
                     // How many presents ago the count last changed. Zero means
@@ -2620,6 +2696,16 @@ static int __stdcall hk_present2(void *queue, const void *info) {
     return g_orig_present2(queue, info);
 }
 
+// One line per run, cheap enough to leave on in quiet mode.
+static void log_pacing_summary() {
+    if (g_all_n < 200) return;
+    log_num("SUMMARY presents ", (unsigned)g_all_n);
+    log_num("  present ms avg x100 ", (unsigned)(int)(g_all_ms / (double)g_all_n * 100.0));
+    log_num("  off-refresh x1000 ",
+            (unsigned)((unsigned long long)g_all_bad * 1000ULL / (unsigned)g_all_n));
+    g_all_n = 0; g_all_bad = 0; g_all_ms = 0.0;
+}
+
 static void write_samples() {
     const LONG n = g_nsamples > kMaxSamples ? kMaxSamples : g_nsamples;
     if (n <= g_written || g_samples == nullptr || g_frames[0] == 0) return;
@@ -2667,6 +2753,7 @@ static void write_samples() {
 static DWORD WINAPI recorder(LPVOID) {
     bool was_down = false;
     int ticks = 0;
+    int pacing_ticks = 0;
     for (;;) {
         // Faster while the panel is up: this thread owns the panel window, so
         // the pointer only moves as often as it comes round.
@@ -2913,6 +3000,8 @@ static DWORD WINAPI recorder(LPVOID) {
         }
         was_down = down;
         if (++ticks >= 20) { ticks = 0; if (g_recording) write_samples(); }
+        // Every ~10 s from the polling thread, never from the render thread.
+        if (++pacing_ticks >= 200) { pacing_ticks = 0; log_pacing_summary(); }
     }
     return 0;
 }
@@ -3723,6 +3812,8 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             g_debug = flag_file(L"mfg-debug.txt");
             g_frac_enabled = flag_file(L"mfg-frac.txt");
             g_slowalt = flag_file(L"mfg-slowalt.txt");
+            g_quiet = flag_file(L"mfg-quiet.txt");
+            g_nullalt = flag_file(L"mfg-nullalt.txt");
             {
                 // A one-line integer beside the dll; the sweep needs to move
                 // this without a rebuild.
