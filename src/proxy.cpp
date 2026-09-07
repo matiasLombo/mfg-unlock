@@ -1821,8 +1821,26 @@ static void fractional_tick(void) {
         //
         // Stretches of 200 ms at the low count read the same as changing every
         // frame. The pinning does not depend on settling time, so no
-        // arrangement of the same two counts moves it, and the only lever left
-        // is the pacer's own throttle arithmetic.
+        // arrangement of the same two counts moves it.
+        //
+        // What it is, stated as a law that fits the data rather than as a
+        // suspicion: the producer is throttled to refresh/(ceiling + 1)
+        // rendered frames per second even on the frames that generate fewer, so
+        //
+        //     presented = refresh * ratio / (ceiling + 1)
+        //
+        // That holds to within 1 fps on 2.00, 2.25, 2.50, 2.75, 3.00, 1.50,
+        // 1.75 and 1.90, and it breaks at exactly the two points where the
+        // mechanism does not apply -- 1.10x and 1.25x, whose low state is count
+        // 0, where the real frame presents down the ordinary path with no pacer
+        // in it. The loss is display slots left empty: at 2.25x, 2.25 of every
+        // 3 are used and the missing 41 fps are the other quarter.
+        //
+        // So the fix has an exact target: make the throttle follow the count
+        // that frame actually generates instead of the cadence ceiling. Then a
+        // ratio at or above 2.0 saturates the display the way both neighbouring
+        // integers already do. It lives in the pacer inside sl.dlss_g.dll, and
+        // it is not attempted here.
         const int kBlocks = g_blocks > 0 ? g_blocks : 32;
         const double cycle_secs = kBlockSecs * (double)kBlocks;
         bool cycle_wrapped = false;
