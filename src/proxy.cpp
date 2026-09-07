@@ -726,8 +726,14 @@ static unsigned hk_slReflexSetMarker(unsigned marker, void *frame) {
 
 // El informe 63 es el mas reciente. Offsets confirmados con el volcado y
 // con dos chequeos internos del propio NVIDIA.
-static void reflex_take(const void *state) {
-    const unsigned char *q = (const unsigned char *)state + 9648;
+// Cuantos informes hacia atras se leen por consulta, y cada cuantos frames se
+// consulta. El producto tiene que cubrir los frames entre consultas.
+static const int kReflexBack = 6;
+static const int kReflexEvery = 4;
+
+// atras=0 es el informe 63, el mas reciente; atras=1 el 62, y asi.
+static void reflex_take(const void *state, int atras) {
+    const unsigned char *q = (const unsigned char *)state + 72 + 152 * (63 - atras);
     const unsigned long long id  = *(const unsigned long long *)(q + 0);
     const unsigned long long sim = *(const unsigned long long *)(q + 16);
     const unsigned long long drv = *(const unsigned long long *)(q + 72);
@@ -750,6 +756,15 @@ static void reflex_take(const void *state) {
 // corre el resto de la medicion.
 static void reflex_poll(void) {
     if (g_orig_reflexstate == nullptr) return;
+    // Una de cada kReflexEvery. La consulta llena 9776 bytes -- 64 informes de
+    // 152 -- y se consumia una vez por ventana de 45 frames para el log y dos
+    // veces por segundo para el HUD: llamarla por frame era unas treinta veces
+    // mas de lo necesario, en el hilo de render.
+    {
+        static int n = 0;
+        if (++n < kReflexEvery) return;
+        n = 0;
+    }
     for (int i = 0; i < 64; ++i) g_reflex_buf[i] = 0;
     for (int i = 0; i < 16; ++i) g_reflex_buf[8 + i] = kReflexStateGuid[i];
     *(unsigned long long *)(g_reflex_buf + 24) = 2;      // structVersion 2
@@ -759,7 +774,13 @@ static void reflex_poll(void) {
         if (!said) { said = true; log_num("reflex: query refused, code ", r); }
         return;
     }
-    reflex_take(g_reflex_buf);
+    // Se leen los ultimos informes, no solo el 63. El anillo tiene 64 y la
+    // consulta se hace cada pocos frames, asi que leer hacia atras recupera los
+    // frames que pasaron entre una consulta y la siguiente: mismas muestras con
+    // una fraccion de las llamadas. reflex_take deduplica por frameID, asi que
+    // releer uno ya visto no cuenta dos veces.
+    for (int k = kReflexBack - 1; k >= 0; --k)
+        reflex_take(g_reflex_buf, k);
 }
 
 static unsigned hk_slReflexGetState(void *state) {
@@ -770,7 +791,7 @@ static unsigned hk_slReflexGetState(void *state) {
     // 72 + 152*i. El [63] es el mas reciente: 72 + 152*63 = 9648.
     static int calls = 0;
     ++calls;
-    if (r == 0 && state != nullptr) reflex_take(state);
+    if (r == 0 && state != nullptr) reflex_take(state, 0);
     if (r == 0 && state != nullptr && !g_reflex_dumped && calls > 300) {
         g_reflex_dumped = true;
         log_num("reflex: latencyReportAvailable ",
