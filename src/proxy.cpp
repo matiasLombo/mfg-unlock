@@ -389,6 +389,10 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
 // not changed since the frame before. The capture itself is still page-bounded
 // every time it runs; what is skipped is running it when there is nothing new.
 static LONG g_cap_mode = -1, g_cap_cnt = -1;
+// Para clasificar los apagones sin pedirle al usuario que juegue distinto:
+// si la ventana no tiene el foco, o el juego dejo de estar en primer plano,
+// el apagon es del menu/pausa/alt-tab y no un defecto nuestro.
+static HWND g_game_hwnd = nullptr;
 static const void *g_cap_vp = nullptr;
 
 // A version 5 DLSSGOptions built from an older one, in memory of ours.
@@ -1907,6 +1911,15 @@ static void note_rendered_frame(void) {
                                     (unsigned)(g_pres_ms_sum / (double)g_pres_n * 10.0));
                             log_num("  present ms max x10 ", (unsigned)(g_pres_ms_max * 10.0));
                             log_num("  hitches over 33ms ", (unsigned)g_pres_hitch);
+                            // Dos datos que separan "el juego estaba en el
+                            // menu" de "se apago solo mientras jugabas".
+                            log_num("  game window in front (1 = yes) ",
+                                    (unsigned)(g_game_hwnd != nullptr &&
+                                               GetForegroundWindow() == g_game_hwnd
+                                               ? 1 : 0));
+                            log_num("  the game itself last asked for mode ",
+                                    (unsigned)g_cap_mode);
+                            log_num("    with count ", (unsigned)g_cap_cnt);
                             if (g_near_n + g_far_n > 0) {
                                 log_num("    off-refresh near a change x1000 ",
                                         (unsigned)(g_near_n ? (unsigned long long)g_near_bad * 1000ULL / (unsigned)g_near_n : 0));
@@ -3776,6 +3789,7 @@ static HRESULT STDMETHODCALLTYPE hk_csc(IDXGIFactory *self, IUnknown *dev,
 
 static HRESULT STDMETHODCALLTYPE hk_cscfh(void *self, IUnknown *dev, HWND hwnd,
         const void *d1, const void *fs, void *restrict_to, IDXGISwapChain **out) {
+    if (g_game_hwnd == nullptr) g_game_hwnd = hwnd;
     // DXGI_SWAP_CHAIN_DESC1 keeps Flags as the last UINT of the struct, after
     // Width, Height, Format, Stereo, SampleDesc(2), BufferUsage, BufferCount,
     // Scaling, SwapEffect, AlphaMode -- offset 0x2C.
