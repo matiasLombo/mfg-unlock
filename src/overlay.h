@@ -107,8 +107,19 @@ static const int kHotSlider = 100, kHotValue = 101;
 // them touch that, because it is downstream of every one of them.
 //
 // Offering 1.5x would be offering 30 fps, so it is not offered.
-static const int kStops[] = { 100, 125, 150, 175, 200, 250, 300,
-                              350, 400, 450, 500, 600 };
+// Quarter steps through the range that works, coarser above it.
+//
+// The old list jumped 2.00 to 2.50 to 3.00, so the whole point of this -- the
+// values between the integers -- was three positions on a slider. 2.10x and
+// 2.90x both measured within 1% of target, so the resolution is real and the
+// panel was hiding it.
+//
+// Below 2.00 is still offered because it is what a 40 fps base wants, but it is
+// the range where the cadence has to switch generation off and on, and that is
+// the part still not measured properly.
+static const int kStops[] = { 100, 125, 150, 175,
+                              200, 225, 250, 275, 300, 325, 350, 375, 400,
+                              450, 500, 550, 600 };
 static const int kNStops = (int)(sizeof(kStops) / sizeof(kStops[0]));
 
 static float g_ov_mx = 0.0f, g_ov_my = 0.0f;
@@ -464,7 +475,15 @@ static void ov_build_panel(void) {
             const float tx = x0 + (x1 - x0) * ((float)si / (float)(kNStops - 1));
             ov_rect(tx, sy + 9.0f, 1.0f, 3.0f, 0.24f, 0.28f, 0.30f, 1.0f);
         }
-        static const int kLabelled[] = { 0, 4, 6, 8, kNStops - 1 };
+        // 1.00, 2.00, 3.00, 4.00 and the top, found by value rather than by
+        // index, so the list can change length without the labels lying.
+        static const int kLabelValues[] = { 100, 200, 300, 400, 600 };
+        int kLabelled[5];
+        for (int li = 0; li < 5; ++li) {
+            kLabelled[li] = kNStops - 1;
+            for (int sj = 0; sj < kNStops; ++sj)
+                if (kStops[sj] == kLabelValues[li]) { kLabelled[li] = sj; break; }
+        }
         const float lpx = 1.5f;
         for (int i = 0; i < 5; ++i) {
             const int si = kLabelled[i];
@@ -479,6 +498,7 @@ static void ov_build_panel(void) {
                 lb[k++] = (char)('0' + (v / 100) % 10);
                 lb[k++] = '.';
                 lb[k++] = (char)('0' + (v / 10) % 10);
+                if (v % 10 != 0) lb[k++] = (char)('0' + v % 10);
                 lb[k] = 0;
             }
             int n = 0;

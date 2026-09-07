@@ -1306,6 +1306,8 @@ static long long g_pres_qpc = 0;            // when the last present went out
 static volatile LONG g_last_change_pres = 0; // present index at the last count change
 static int g_hitch_near = 0;                 // hitches within 4 presents of one
 static int g_hitch_far = 0;                  // and the rest
+static double g_lat_sum = 0.0;               // queued presents, summed
+static int g_lat_n = 0, g_lat_max = 0;
 static int g_all_n = 0, g_all_bad = 0;       // every present, for the summary
 static double g_all_ms = 0.0;
 static int g_near_n = 0, g_near_bad = 0;     // presents within 8 of a change
@@ -1574,7 +1576,21 @@ static void fractional_tick(void) {
         // while the arithmetic assumed they were equal, which is most of why
         // 1.50x delivered 1.81-1.90.
         static double sa_clock = 0.0;
-        sa_clock += g_last_dt;
+        // Advanced once per rendered frame, not once per token call.
+        //
+        // fractional_tick runs per slGetNewFrameToken call and the sample makes
+        // about seven of those per rendered frame, so summing g_last_dt here
+        // ran the schedule clock roughly seven times too fast: a nominal 8 s
+        // block was about 1.1 s of wall time, and every block length in this
+        // file's measurements was off by that factor. g_last_dt only changes
+        // when a burst ends, so adding it once per change is once per frame.
+        {
+            static double last_seen_dt = -1.0;
+            if (g_last_dt != last_seen_dt) {
+                last_seen_dt = g_last_dt;
+                sa_clock += g_last_dt;
+            }
+        }
         // Read from mfg-blockms.txt when present, so the block length can be
         // swept without a rebuild. The unit is milliseconds of the cadence
         // clock, which advances once per frame-token call -- about seven times
@@ -1602,9 +1618,16 @@ static void fractional_tick(void) {
         // last 2 fps and make the average slower to settle, which would matter
         // if the target ever moved.
         const double kBlockSecs = g_block_ms > 0 ? (double)g_block_ms / 1000.0 : 8.0;
-        const int kBlocks = 8;
+        // Thirty-two blocks, not eight. The split is quantised to 1/kBlocks of
+        // the cycle, and below 2.0x the rate weighting pushes the useful range
+        // to one end: 1.90x wants 94% of the time generating, which eight
+        // blocks can only render as 8/8 -- a flat 2.00x, 5% high. Thirty-two
+        // brings every point inside 1%. The block *length* is unchanged, so the
+        // count changes no more often than before; only the cycle is longer.
+        const int kBlocks = 32;
         const double cycle_secs = kBlockSecs * (double)kBlocks;
-        if (sa_clock >= cycle_secs) sa_clock -= cycle_secs;
+        bool cycle_wrapped = false;
+        if (sa_clock >= cycle_secs) { sa_clock -= cycle_secs; cycle_wrapped = true; }
         const int sa_pos_block = (int)(sa_clock / kBlockSecs);
         static int sa_pos = 0;
 
@@ -1628,6 +1651,10 @@ static void fractional_tick(void) {
             // Weighted by time, for the same reason the blocks are: presented
             // frames per second over rendered frames per second is what the
             // player experiences.
+            // Frame-weighted, which is what the delivered ratio is. This is
+            // still the figure the audit called circular -- it decrees what each
+            // frame presented -- and it is used ONLY to nudge the split, never
+            // reported as a result. The reported number is the counted one.
             const double pres = (double)g_lo_frames_seen * (double)(lo + 1)
                               + (double)g_hi_frames_seen * (double)(lo + 2);
             const double ren = (double)(g_lo_frames_seen + g_hi_frames_seen);
@@ -1693,21 +1720,99 @@ static void fractional_tick(void) {
                 g_lo_time = 0.0;
                 g_hi_time = 0.0;
             }
+            // Full gain, no dead band. Both were tried on the theory that the
+            // loop was hunting -- 26 count changes at 1.25x where the pattern
+            // calls for 4 -- and both made the whole range worse: 1.50x fell
+            // from 1.48 to 1.36 and every point settled about 9% low. The
+            // changes are the loop tracking a base rate that really does move,
+            // not noise, and damping it just leaves the error uncorrected.
             sa_bias += (want - produced) * 0.35;
             if (sa_bias < -1.0) sa_bias = -1.0;
             if (sa_bias > 1.0) sa_bias = 1.0;
             cyc_gen = 0.0;
             cyc_frames = 0;
         }
-        int hi_blocks = (int)((frac + sa_bias) * (double)kBlocks + 0.5);
-        if (hi_blocks < 0) hi_blocks = 0;
-        if (hi_blocks > kBlocks) hi_blocks = kBlocks;
+        // Blocks split by frames, not by time.
+        //
+        // `frac` is the fraction of *rendered frames* that must take the high
+        // count, because the delivered ratio is the frame-weighted mean of
+        // (count + 1). Handing that straight to a time-based schedule is only
+        // correct when both states render at the same rate, and below 2.0x they
+        // do not: the low count there is zero, generation is off, and the app
+        // renders nearly twice as fast (167 fps against 89.8 measured). So an
+        // equal-time split gives the low state far more frames than intended
+        // and the ratio lands low -- 1.10x delivered 1.00, 1.50x delivered 1.27.
+        //
+        // Converting frame fraction to time fraction:
+        //
+        //   t_hi / (t_hi + t_lo) = (frac / r_hi) / (frac / r_hi + (1-frac) / r_lo)
+        //
+        // where r is each state's measured rendered rate. Above 2.0x both rates
+        // are close and this is nearly a no-op, which is why it was not needed
+        // there; below 2.0x it is the whole correction.
+        // The correction is NOT added here. sa_bias is computed from the error
+        // in frames -- want minus produced, both frame-weighted -- and adding it
+        // to `frac` sends it through the frame-to-time conversion below, so it
+        // gets applied twice. At 1.10x, where the two rates differ most, a bias
+        // of 0.35 turned a requested 10 percent of frames into 59 percent of the
+        // time: 19 blocks of 32 measured, against the 5 the ratio calls for. The
+        // delivered ratio came out 0.98, with windows as low as 0.88 -- fewer
+        // presents than rendered frames, which is loss, not a low multiplier.
+        double t_frac = frac;
+        if (t_frac < 0.0) t_frac = 0.0;
+        if (t_frac > 1.0) t_frac = 1.0;
+        {
+            const double r_lo = g_lo_time > 0.05 ? (double)g_lo_frames_seen / g_lo_time : 0.0;
+            const double r_hi = g_hi_time > 0.05 ? (double)g_hi_frames_seen / g_hi_time : 0.0;
+            if (r_lo > 1.0 && r_hi > 1.0) {
+                const double a = t_frac / r_hi;
+                const double b = (1.0 - t_frac) / r_lo;
+                if (a + b > 0.0) t_frac = a / (a + b);
+            }
+        }
+        // Latched once per cycle, not recomputed every frame.
+        //
+        // This runs per frame-token call, so hi_blocks was being recalculated
+        // thousands of times inside a single cycle, and every recalculation
+        // could move the boundary the schedule was already walking past. A
+        // contiguous run of high blocks should change the count twice per
+        // cycle; it was changing 46 to 86 times, and the ratio came out low
+        // because blocks kept being reclassified underneath the cursor.
+        //
+        // It also invalidated every comparison built on top of it: two attempts
+        // to improve this range -- spreading the blocks, damping the loop --
+        // were judged against a schedule that was not holding still, and the
+        // same configuration measured 1.48 once and 1.34 three times running.
+        t_frac += sa_bias;
+        if (t_frac < 0.0) t_frac = 0.0;
+        if (t_frac > 1.0) t_frac = 1.0;
+        static int hi_blocks = -1;
+        if (cycle_wrapped || hi_blocks < 0) {
+            hi_blocks = (int)(t_frac * (double)kBlocks + 0.5);
+            if (hi_blocks < 0) hi_blocks = 0;
+            if (hi_blocks > kBlocks) hi_blocks = kBlocks;
+        }
         // A null control: with mfg-nullalt.txt the scheduler runs exactly as it
         // does for a fractional ratio -- same blocks, same clock, same
         // slDLSSGSetOptions replay every boundary -- but both values are the
         // same, so nothing about the generated count changes. If the cost
         // survives that, it is the machinery of alternating; if it vanishes,
         // it is the count itself changing. Nothing else separates the two.
+        // High blocks contiguous, and the reason is measured rather than
+        // aesthetic.
+        //
+        // Spreading them evenly (Bresenham) is the obvious way to make the
+        // fraction look like a fraction rather than two long stretches, and it
+        // is worse on every count. Measured against the contiguous run, same
+        // block length, same everything:
+        //
+        //   1.25x  contiguous 1.16, 26 changes, 5% off-refresh
+        //          spread     1.05, 321 changes, 36% off-refresh
+        //   1.50x  contiguous 1.48, 5% off-refresh
+        //          spread     1.39, 199 changes, 43% off-refresh
+        //
+        // Each count change costs, so multiplying the changes by ten multiplies
+        // the cost. The evenness is not worth what it takes.
         const LONG want = g_nullalt ? lo + 1
                         : ((sa_pos_block < hi_blocks) ? lo + 1 : lo);
         sa_pos = (sa_pos + 1) % (kBlocks * g_slowalt_len);
@@ -2531,6 +2636,40 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     // own scheduler cannot represent. An instrument that cannot fail measures
     // nothing.
     ++g_present_count;
+    // Queue latency: how long a present waits before the panel shows it.
+    //
+    // This is the half of "latency" the swap chain can answer. PresentCount is
+    // how many presents the runtime took and PresentRefreshCount which refresh
+    // the last one was scanned at, so their gap is how many frames are waiting.
+    // What this cannot answer is input to photon -- that needs the sample to
+    // timestamp input, which it does not, and PresentMon, which is starved on
+    // this machine.
+    //
+    // The comparison that matters: a fractional ratio spends whole blocks at
+    // each integer count, and generated frames queue differently from real
+    // ones. If the alternation adds queue depth, it shows up here.
+    if (self != nullptr) {
+        DXGI_FRAME_STATISTICS fs;
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        if (SUCCEEDED(self->GetFrameStatistics(&fs)) && g_qpc_freq > 0) {
+            // Age of the last scan-out at the moment this present is made.
+            //
+            // PresentCount and PresentRefreshCount are unrelated running totals
+            // -- one counts presents, the other refreshes -- so subtracting them
+            // is meaningless and read 0.00 on every configuration, which is how
+            // a broken metric announces itself. SyncQPCTime is a real clock: the
+            // instant the panel last scanned out. How far behind it we are when
+            // handing over a frame is the queue this can see.
+            const double age = (double)(now.QuadPart - fs.SyncQPCTime.QuadPart)
+                             / (double)g_qpc_freq * 1000.0;
+            if (age >= 0.0 && age < 200.0) {
+                g_lat_sum += age;
+                ++g_lat_n;
+                if ((int)age > g_lat_max) g_lat_max = (int)age;
+            }
+        }
+    }
     // Present pacing, from the same hook. The multiplier says how many frames
     // reach the screen; this says whether they arrive evenly, which is the half
     // of the question a player actually feels. Histogram rather than a mean:
@@ -2701,6 +2840,14 @@ static void log_pacing_summary() {
     if (g_all_n < 200) return;
     log_num("SUMMARY presents ", (unsigned)g_all_n);
     log_num("  present ms avg x100 ", (unsigned)(int)(g_all_ms / (double)g_all_n * 100.0));
+    if (g_lat_n > 0) {
+        log_num("  present-to-scanout ms x100 ",
+                (unsigned)(int)(g_lat_sum / (double)g_lat_n * 100.0));
+        log_num("  worst ms ", (unsigned)g_lat_max);
+        g_lat_sum = 0.0;
+        g_lat_n = 0;
+        g_lat_max = 0;
+    }
     log_num("  off-refresh x1000 ",
             (unsigned)((unsigned long long)g_all_bad * 1000ULL / (unsigned)g_all_n));
     g_all_n = 0; g_all_bad = 0; g_all_ms = 0.0;
