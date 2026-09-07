@@ -2636,8 +2636,25 @@ static void fractional_tick(void) {
         // blocks read whole integers per window whatever the request is: at
         // 1.1 s, 1.50x reads 1.00 with an IQR of 1.00.
         //
-        // Only the block path uses this now, and the block path only runs below
-        // 2.0x, where per-frame diffusion destroys presents.
+        // OJO: el comentario que estaba aca decia que el camino de bloques solo
+        // corre debajo de 2.0x. Es falso desde e34e680 -- "Bloques en todo el
+        // rango", unas lineas mas abajo -- porque g_peralt esta apagado por
+        // defecto y con el la difusion por frame nunca se elige. Los bloques
+        // corren en TODO el rango.
+        //
+        // Eso deja esta constante sirviendo a dos regimenes con requisitos
+        // opuestos. Los 16 ms se eligieron por lo de abajo de 2.0x: ahi el
+        // estado bajo apaga la generacion, entrar y salir cuesta una
+        // presentacion, y el ciclo entero tiene que entrar en una ventana de
+        // medicion. Arriba de 2.0x el comentario de mas abajo dice que difundir
+        // por frame es gratis, y la tabla de esta misma funcion dice que
+        // bloques largos entregan mas fps con muchisimos menos cambios de
+        // cuenta. Cada cambio de cuenta hace que el plugin libere y reserve del
+        // orden de 750 MB, medido en GTA V.
+        //
+        // No se cambia sin medir: la misma tabla dice que los bloques largos
+        // hacen la cadencia mas a saltos, y eso no esta medido con el
+        // instrumento honesto.
         const double kBlockSecs = g_block_ms > 0 ? (double)g_block_ms / 1000.0 : 0.016;
         // Thirty-two blocks, not eight. The split is quantised to 1/kBlocks of
         // the cycle, and below 2.0x the rate weighting pushes the useful range
