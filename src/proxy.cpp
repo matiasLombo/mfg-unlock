@@ -80,6 +80,8 @@ static PFN_slSetMarker g_orig_reflexmarker = nullptr;
 static LONG g_markers_dropped = 0;
 static double g_marker_every = 0.0;
 static double g_marker_for = 0.0;
+static double g_marker_long_every = 0.0;
+static double g_marker_long_for = 0.0;
 static bool g_blockalt = false;       // mfg-blockalt.txt: blocks above 2.0x too
 static int  g_blocks = 0;             // mfg-blocks.txt, 0 = 32
 
@@ -628,12 +630,26 @@ static void apply_override_now(void) {
 
 // Dentro de la ventana de corte no reenvia el marcador: el id de frame de
 // Reflex deja de avanzar y DLSS-G ve exactamente lo que ve en GTA V.
+// Con dos numeros son segundos, como antes. Con cuatro son milisegundos:
+// encendido, apagado, cada cuanto el apagon largo, y cuanto dura.
+//
+// Los cuatro existen porque la ventana de medicion son 45 frames -- unos 790 ms
+// a base 57 -- y una rafaga encendida MAS LARGA que eso deja ventanas enteras
+// generando, que leen 2.25. Con la rafaga mas corta que la ventana ninguna
+// ventana llega a estar entera encendida: las que caen dentro del apagon leen
+// 1.0 y las parciales llegan hasta 2.0, sin ninguna en 3.0. El apagon largo
+// aparte da la racha de decenas de segundos.
 static bool in_marker_gap(void) {
     if (g_marker_every <= 0.0) return false;
     static LARGE_INTEGER f = {}, s0 = {};
     if (f.QuadPart == 0) { QueryPerformanceFrequency(&f); QueryPerformanceCounter(&s0); }
     LARGE_INTEGER n; QueryPerformanceCounter(&n);
     const double t = (double)(n.QuadPart - s0.QuadPart) / (double)f.QuadPart;
+    if (g_marker_long_every > 0.0) {
+        const double u = t - (double)((long long)(t / g_marker_long_every)) *
+                             g_marker_long_every;
+        if (u < g_marker_long_for) return true;
+    }
     const double cycle = g_marker_every + g_marker_for;
     return (t - (double)((long long)(t / cycle)) * cycle) >= g_marker_every;
 }
@@ -5090,8 +5106,8 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                   char b4[32]; DWORD r6 = 0;
                   if (ReadFile(mh, b4, sizeof(b4)-1, &r6, nullptr) && r6 > 0) {
                       b4[r6] = 0;
-                      int v[2] = {0, 0}; int k = 0; DWORD i = 0;
-                      while (i < r6 && k < 2) {
+                      int v[4] = {0, 0, 0, 0}; int k = 0; DWORD i = 0;
+                      while (i < r6 && k < 4) {
                           while (i < r6 && (b4[i] < '0' || b4[i] > '9')) ++i;
                           if (i >= r6) break;
                           int n2 = 0;
@@ -5099,7 +5115,16 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                               n2 = n2 * 10 + (b4[i++] - '0');
                           v[k++] = n2;
                       }
-                      if (v[0] > 0 && v[1] > 0) {
+                      if (v[0] > 0 && v[1] > 0 && k >= 4) {
+                          g_marker_every = (double)v[0] / 1000.0;
+                          g_marker_for = (double)v[1] / 1000.0;
+                          g_marker_long_every = (double)v[2] / 1000.0;
+                          g_marker_long_for = (double)v[3] / 1000.0;
+                          log_num("bench: marker bursts, ms on ", (unsigned)v[0]);
+                          log_num("  ms off ", (unsigned)v[1]);
+                          log_num("  long blackout every ms ", (unsigned)v[2]);
+                          log_num("  lasting ms ", (unsigned)v[3]);
+                      } else if (v[0] > 0 && v[1] > 0) {
                           g_marker_every = (double)v[0];
                           g_marker_for = (double)v[1];
                           log_num("bench: dropping Reflex/PCL markers every N s, N = ",
