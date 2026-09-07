@@ -1474,6 +1474,8 @@ static volatile LONG g_smfl_calls = 0;
 static volatile LONG g_token_calls = 0;
 static volatile LONG g_frames_gated = 0;
 static bool g_novsync = false;        // mfg-novsync.txt: diagnostic
+static double g_present_block_us = 0.0;   // blocked inside Present, per window
+static double g_token_block_us = 0.0;     // blocked inside slGetNewFrameToken
 static volatile LONG g_rt_present_count = 0;
 // The swap chain, kept so the runtime's own present counter can be sampled
 // from anywhere -- specifically from the frame-token hook, once per rendered
@@ -1532,6 +1534,7 @@ static void note_rendered_frame(void) {
             // quarters of a second is short enough to show the steps and long
             // enough that frames/elapsed is still steady.
             if (g_win_frames >= 45 && g_win_time > 0.0) {
+                const double win_elapsed = g_win_time;
                 g_rendered_fps = (double)g_win_frames / g_win_time;
                 g_win_frames = 0;
                 g_win_time = 0.0;
@@ -1604,6 +1607,17 @@ static void note_rendered_frame(void) {
                         log_num("  our hook count this window ",
                                 (unsigned)(rt_dp > 0 ? rt_dp : 0));
                         log_num("  raw token calls ", (unsigned)g_raw_calls);
+                        // Against the window's own elapsed time, so the ratio
+                        // says what fraction of the producer's life is spent
+                        // waiting inside Present.
+                        log_num("  blocked in the token call, ms ",
+                                (unsigned)(g_token_block_us / 1000.0));
+                        g_token_block_us = 0.0;
+                        log_num("  blocked in Present, ms ",
+                                (unsigned)(g_present_block_us / 1000.0));
+                        log_num("  window elapsed, ms ",
+                                (unsigned)(win_elapsed * 1000.0));
+                        g_present_block_us = 0.0;
                         if (g_clamp_latency > 0)
                             log_num("  SetMaximumFrameLatency calls so far ",
                                     (unsigned)g_smfl_calls);
@@ -2421,7 +2435,19 @@ static void settings_watch(void) {
 }
 
 static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
-    const unsigned r = g_orig_frametoken(tok, idx);
+    // Time inside the original frame-token call, same method as the Present
+    // measurement. Present accounts for 2% of the producer's time and Reflex
+    // is ruled out, so the ~74 ms per frame is somewhere else; this is the
+    // other place the producer passes through us.
+    unsigned r;
+    {
+        LARGE_INTEGER a, b;
+        QueryPerformanceCounter(&a);
+        r = g_orig_frametoken(tok, idx);
+        QueryPerformanceCounter(&b);
+        if (g_qpc_freq > 0)
+            g_token_block_us += (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)g_qpc_freq;
+    }
     // One rendered frame, exactly once.
     //
     // The game asks for the frame token about seven times per frame -- 305.7
@@ -3264,7 +3290,21 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
         }
         interval = 0;
     }
-    return g_orig_dxgi_present(self, interval, flags);
+    // How long the producer is blocked inside Present, per window.
+    //
+    // One number that separates the two remaining candidates for the throttle.
+    // If the app spends essentially the whole window inside this call, the gate
+    // is presentation. If it comes back quickly, whatever holds the producer is
+    // upstream of here and Present is not it.
+    {
+        LARGE_INTEGER a, b;
+        QueryPerformanceCounter(&a);
+        const HRESULT hr = g_orig_dxgi_present(self, interval, flags);
+        QueryPerformanceCounter(&b);
+        if (g_qpc_freq > 0)
+            g_present_block_us += (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)g_qpc_freq;
+        return hr;
+    }
 }
 
 // IDXGIDevice1::SetMaximumFrameLatency, clamped from the DXGI side.
@@ -3335,9 +3375,47 @@ static void hook_swapchain_present(void *sc) {
     g_orig_dxgi_present = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
     g_swapchain = reinterpret_cast<IDXGISwapChain *>(sc);
     hook_frame_latency(sc);
+    // What the swap chain was created with, and whether the app takes the
+    // waitable handle.
+    //
+    // 98% of the producer's time is spent outside both of our hooks -- 2% in
+    // Present, 0% in the frame-token call -- so whatever holds it is in the
+    // application's own loop. A swap chain created with
+    // DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT (0x800) is waited on
+    // with WaitForSingleObject before the frame starts, which is exactly the
+    // shape of a gate that never touches us.
+    {
+        DXGI_SWAP_CHAIN_DESC sd;
+        if (SUCCEEDED(g_swapchain->GetDesc(&sd))) {
+            log_num("  swap chain flags ", (unsigned)sd.Flags);
+            log_num("  buffers ", (unsigned)sd.BufferCount);
+            if (sd.Flags & 0x800)
+                log_line("  swap chain is FRAME_LATENCY_WAITABLE -- the app waits on a handle");
+            else
+                log_line("  swap chain is NOT waitable");
+        }
+    }
     vt[8] = reinterpret_cast<void *>(&hk_dxgi_present);
     VirtualProtect(&vt[8], sizeof(void *), prot, &prot);
     log_line("recorder: present slot swapped (vt[8], not detoured)");
+}
+
+// Strip FRAME_LATENCY_WAITABLE_OBJECT at creation, behind mfg-nowaitable.txt.
+//
+// The producer spends 98% of its time outside both hooks -- 2% in Present, 0%
+// in the frame-token call -- and the swap chain turns out to be created with
+// flag 0x800 and 3 buffers. An app with a waitable swap chain blocks on that
+// handle before starting a frame, which is a gate that never passes through
+// us. Taking the flag away is the measurement that says whether it is the one
+// holding the base at limit/(ceiling + 1).
+//
+// Diagnostic only. An app that asks for the waitable handle on a chain created
+// without the flag gets a failure, so this can break the target outright --
+// which is itself an answer, and the integer controls will say so.
+static bool g_no_waitable = false;
+static UINT strip_waitable(UINT flags) {
+    if (!g_no_waitable) return flags;
+    return flags & ~0x800u;
 }
 
 typedef HRESULT(STDMETHODCALLTYPE *PFN_CSC)(IDXGIFactory *, IUnknown *,
@@ -3349,6 +3427,10 @@ static PFN_CSCFH g_orig_cscfh = nullptr;
 
 static HRESULT STDMETHODCALLTYPE hk_csc(IDXGIFactory *self, IUnknown *dev,
         DXGI_SWAP_CHAIN_DESC *desc, IDXGISwapChain **out) {
+    if (g_no_waitable && desc != nullptr && (desc->Flags & 0x800u)) {
+        desc->Flags = strip_waitable(desc->Flags);
+        log_line("  waitable flag stripped at creation (mfg-nowaitable.txt)");
+    }
     HRESULT hr = g_orig_csc(self, dev, desc, out);
     if (SUCCEEDED(hr) && out != nullptr) hook_swapchain_present(*out);
     return hr;
@@ -3356,6 +3438,24 @@ static HRESULT STDMETHODCALLTYPE hk_csc(IDXGIFactory *self, IUnknown *dev,
 
 static HRESULT STDMETHODCALLTYPE hk_cscfh(void *self, IUnknown *dev, HWND hwnd,
         const void *d1, const void *fs, void *restrict_to, IDXGISwapChain **out) {
+    // DXGI_SWAP_CHAIN_DESC1 keeps Flags as the last UINT of the struct, after
+    // Width, Height, Format, Stereo, SampleDesc(2), BufferUsage, BufferCount,
+    // Scaling, SwapEffect, AlphaMode -- offset 0x2C.
+    // DXGI_SWAP_CHAIN_DESC1 is not declared in this translation unit, and it
+    // does not need to be: Flags is the trailing UINT at offset 0x2C, after
+    // Width, Height, Format, Stereo, SampleDesc(2), BufferUsage, BufferCount,
+    // Scaling, SwapEffect and AlphaMode.
+    unsigned char copy[0x30];
+    if (g_no_waitable && d1 != nullptr) {
+        for (int i = 0; i < 0x30; ++i)
+            copy[i] = reinterpret_cast<const unsigned char *>(d1)[i];
+        UINT *pf = reinterpret_cast<UINT *>(copy + 0x2C);
+        if (*pf & 0x800u) {
+            *pf = strip_waitable(*pf);
+            log_line("  waitable flag stripped at creation (mfg-nowaitable.txt)");
+            d1 = copy;
+        }
+    }
     HRESULT hr = g_orig_cscfh(self, dev, hwnd, d1, fs, restrict_to, out);
     if (SUCCEEDED(hr) && out != nullptr) hook_swapchain_present(*out);
     return hr;
@@ -4635,6 +4735,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
             g_blockalt = flag_file(L"mfg-blockalt.txt");
+            g_no_waitable = flag_file(L"mfg-nowaitable.txt");
             { wchar_t cp[MAX_PATH]; beside_dll(cp, L"mfg-clamplatency.txt");
               HANDLE ch = CreateFileW(cp, GENERIC_READ, FILE_SHARE_READ, nullptr,
                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
