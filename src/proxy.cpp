@@ -309,14 +309,28 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         // llamada se hace una vez y la variacion por frame la lleva el byte
         // parcheado, que es para lo que existe. bound = byte + 1 <= techo + 1,
         // que es la condicion que los crashes anteriores violaban.
-        {
-            const double per_frame = (double)g_dyn_target / 100.0 - 1.0;
-            LONG techo = (LONG)per_frame;
-            if ((double)techo < per_frame) ++techo;      // ceil
-            if (techo < 1) techo = 1;
-            if (techo > 5) techo = 5;
-            *(LONG *)(p + 32) = 1;             // DLSSGMode::eOn, siempre
-            *(LONG *)(p + 36) = techo;
+        // REVERTIDO. Mandarle el techo constante rompe 2.25x en el juego.
+        //
+        // La idea era buena y el motivo sigue en pie -- 1307 llamadas por
+        // corrida, contra la guia de NVIDIA que dice llamarla en interacciones
+        // de UI y no por frame -- pero viola el invariante que este archivo ya
+        // documentaba: la cuenta de la API decide la generacion Y dimensiona la
+        // reserva, y un bound menor que (cuenta + 1) detiene la presentacion.
+        //
+        // Con techo 2 a 2.25x, los frames cuyo byte vale 1 hacen que el plugin
+        // espere tres presentaciones y reciba dos. Medido jugando: 2.25x pedido
+        // entrego 1.56 con la base subida a 96, o sea la generacion apagada
+        // buena parte del tiempo. El banco no lo vio porque a 2.50x y 2.75x dio
+        // 2.503 y 2.750 -- el defecto aparece cuando la fraccion es baja y el
+        // byte pasa mucho tiempo por debajo del techo.
+        //
+        // Para bajar las llamadas hay que sincronizarlas con el byte, no
+        // desacoplarlas de el.
+        if (g_force_generated <= 0) {
+            *(LONG *)(p + 32) = 0;             // DLSSGMode::eOff
+        } else {
+            *(LONG *)(p + 32) = 1;             // DLSSGMode::eOn
+            *(LONG *)(p + 36) = g_force_generated;
         }
     } else if (false) {
         // eDynamic, with our own frame-rate target.
