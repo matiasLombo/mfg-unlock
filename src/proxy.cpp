@@ -962,6 +962,10 @@ static int patch_subframe_count(unsigned char *base) {
     }
     if (text == nullptr) return 0;
 
+    // The work-item count, by default. It is the site every measurement in
+    // this file was taken through, and patching the count field instead of the
+    // comparison removed about 525 out-of-order present skips. Refused with
+    // mfg-nowic.txt.
     g_wic_mode = flag_file(L"mfg-wic.txt");
     if (g_wic_mode) {
         // The comparison patches are exactly what this replaces; leaving
@@ -4218,6 +4222,37 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             while (g_frames[j] != 0 && j < MAX_PATH - 1) { pb[j] = g_frames[j]; ++j; }
             while (j > 0 && pb[j - 1] != 0x5C) --j;
             g_debug = flag_file(L"mfg-debug.txt");
+            // On unless refused, because the person who uses this has the dll
+            // and nothing else. Everything measured tonight was measured with
+            // mfg-frac.txt, mfg-slowalt.txt and mfg-wic.txt beside the dll --
+            // three files that the shipped copy does not come with, so picking
+            // DYNAMIC in the panel did nothing on its own.
+            //
+            // Nothing here starts generating by itself: the scheduler returns
+            // immediately unless the panel is on DYNAMIC (see the guard on
+            // g_force_sel), and the patch only makes its site writable. The
+            // value that changes behaviour is written by the scheduler.
+            //
+            // The old names still work as opt-outs under mfg-nofrac.txt and
+            // mfg-noslowalt.txt.
+            // Opt-in, and the attempt to default it on is recorded here so it
+            // is not tried again the same way.
+            //
+            // The person who uses this has the dll and nothing else, so picking
+            // DYNAMIC in the panel ought to be enough, and everything measured
+            // in this file was measured with mfg-frac.txt beside the dll. But
+            // patch_subframe_count replaces the comparison against the count
+            // field with one against an immediate byte, and only the fractional
+            // scheduler keeps that byte equal to the API count. On an integer
+            // selection the scheduler never runs, the byte goes stale, and a
+            // bound below (API count + 1) stops presentation outright: 3.00x
+            // read 1.000 with the override armed and applied zero times, three
+            // runs out of three, rendering 165 as if nothing were enabled.
+            //
+            // Breaking 3x and 4x for someone who never asked for a fractional
+            // ratio is worse than making them opt in. The real fix is to defer
+            // the patch until DYNAMIC is first selected, so the site is found
+            // at map time but only rewritten once something maintains it.
             g_frac_enabled = flag_file(L"mfg-frac.txt");
             g_slowalt = flag_file(L"mfg-slowalt.txt");
             g_quiet = flag_file(L"mfg-quiet.txt");
