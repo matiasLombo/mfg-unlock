@@ -2430,7 +2430,24 @@ static void fractional_tick(void) {
         // mfg-peralt.txt forces diffusion below 2.0x as well, which is how
         // the destructive case stays reproducible rather than becoming a
         // number in a comment.
-        const bool diffuse = (lo > 0 || g_peralt) && !g_nullalt && !g_blockalt;
+        // Bloques en todo el rango, no difusion por frame.
+        //
+        // La difusion cambia la cuenta casi cada frame, y cada cambio dispara
+        // una llamada a slDLSSGSetOptions -- 8985 en una sesion de GTA V --
+        // que hace que el plugin libere recursos y arranque 100 ms de
+        // enfriamiento (0x1800497fd escribe 100.0 en [ctx+0x4488]). Con una
+        // llamada por frame el enfriamiento no termina nunca: 290 de 389
+        // ventanas a 2.25x quedaron con la generacion apagada, ratio 1.34
+        // contra 2.25 pedido. La guia de NVIDIA lo dice sin rodeos: llamarla
+        // en interacciones de UI, no por frame.
+        //
+        // Los bloques cambian la cuenta dos veces por ciclo: con 32 bloques de
+        // 16 ms son unas 4 veces por segundo en vez de cien, y la cuenta de la
+        // API sigue siendo la del byte, que es el invariante que rompio el
+        // intento de mandar el techo constante.
+        //
+        // mfg-peralt.txt sigue eligiendo la difusion, para poder comparar.
+        const bool diffuse = g_peralt && !g_nullalt && !g_blockalt;
         LONG want;
         if (diffuse) {
             static double acc = 0.0;
