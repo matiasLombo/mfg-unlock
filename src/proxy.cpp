@@ -4954,10 +4954,15 @@ static int patch_metering_off(unsigned char *base) {
     log_num("    metering field at ctx+", field);
 
     // Now the store that clears it. 2.11.1 and 2.12.129 write an immediate zero;
-    // 2.13.0 writes a zeroed register instead, and that form is deliberately not
-    // patched here -- in 2.13.0 the same byte also gates a second branch that has
-    // not been analysed, and the pacer patch already forces the flag to 0 on its
-    // own. Better to report the gap than to change a path we have not read.
+// 2.13.0 writes a zeroed register instead. Both forms are handled: the
+// immediate loop below returns if it hits, and the register loop after it
+// redirects the displacement. Verified statically with tools/verify_sites.py --
+// 2.12.0 has exactly one immediate store at field 0x44f8 and no register one,
+// 2.13.0 exactly one register store at 0x44f0 and no immediate.
+//
+// This comment used to say the 2.13.0 form was deliberately left unpatched,
+// which the code right below it contradicted. A comment that lies about its
+// own code is worse than none.
     int hits = 0;
     for (size_t i = 0; i + 13 <= len; ++i) {
         if (text[i] != 0xC6 || text[i + 1] != 0x83) continue;    // mov byte [rbx+imm32], imm8
