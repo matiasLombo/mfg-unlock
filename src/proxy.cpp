@@ -57,6 +57,7 @@ static bool g_nullalt = false;        // mfg-nullalt.txt: alternate between equa
 static bool g_slowalt = false;        // mfg-slowalt.txt
 static int  g_slowalt_len = 240;       // rendered frames per block
 static int  g_block_ms = 0;           // mfg-blockms.txt, 0 = default
+static bool g_peralt = false;         // mfg-peralt.txt: diffuse per frame
 
 // True when a file of this name sits beside the dll. The switches are files
 // because the person installing this has the dll and nothing else, and the
@@ -1660,7 +1661,22 @@ static void fractional_tick(void) {
         // dips in 47 windows, at the block boundaries. Longer blocks buy the
         // last 2 fps and make the average slower to settle, which would matter
         // if the target ever moved.
-        const double kBlockSecs = g_block_ms > 0 ? (double)g_block_ms / 1000.0 : 8.0;
+        // 1.1 s, and the old 8.0 here was never 8 seconds. The clock this
+        // reads advanced once per frame-token call, seven of those per frame,
+        // so the block that called itself 8 s lasted about 1.1 s of wall time
+        // -- and 1.1 s is the length that measured 163 fps presented with 3.3%
+        // of presents off-refresh. Gating the token hook on the frame index
+        // made the clock honest, which would have stretched the same setting
+        // to a 256 s cycle: whole minutes parked on one integer count. The
+        // number changes so the behaviour does not.
+        // 16 ms, so a whole cycle of 32 blocks lands at 0.512 s and a window
+        // of 45 frames sees both states instead of sitting inside one. Longer
+        // blocks read whole integers per window whatever the request is: at
+        // 1.1 s, 1.50x reads 1.00 with an IQR of 1.00.
+        //
+        // Only the block path uses this now, and the block path only runs below
+        // 2.0x, where per-frame diffusion destroys presents.
+        const double kBlockSecs = g_block_ms > 0 ? (double)g_block_ms / 1000.0 : 0.016;
         // Thirty-two blocks, not eight. The split is quantised to 1/kBlocks of
         // the cycle, and below 2.0x the rate weighting pushes the useful range
         // to one end: 1.90x wants 94% of the time generating, which eight
@@ -1833,8 +1849,33 @@ static void fractional_tick(void) {
         t_frac += sa_bias;
         if (t_frac < 0.0) t_frac = 0.0;
         if (t_frac > 1.0) t_frac = 1.0;
+        // A new request is not churn, so it does not wait for the wrap.
+        //
+        // The latch below exists because this runs per frame and a boundary
+        // that moves under the walking cursor reclassifies blocks the schedule
+        // has already passed. But it was also swallowing the one recalculation
+        // that is not churn: the user picking a different multiplier. A cycle
+        // is 32 blocks of 1.1 s, so a change made in the panel could sit unused
+        // for half a minute -- which is exactly what "the multiplier takes a
+        // while to apply" looks like from inside the game.
+        //
+        // Restarting the cycle as well, rather than only the split: entering a
+        // new schedule two thirds of the way through a cycle would spend the
+        // remainder walking blocks laid out for the previous request.
         static int hi_blocks = -1;
-        if (cycle_wrapped || hi_blocks < 0) {
+        bool request_changed = false;
+        {
+            static double last_req = -1.0;
+            if (frac != last_req) {
+                last_req = frac;
+                request_changed = hi_blocks >= 0;
+            }
+        }
+        if (request_changed) {
+            sa_clock = 0.0;
+            sa_bias = 0.0;   // the old correction was for the old request
+        }
+        if (cycle_wrapped || request_changed || hi_blocks < 0) {
             hi_blocks = (int)(t_frac * (double)kBlocks + 0.5);
             if (hi_blocks < 0) hi_blocks = 0;
             if (hi_blocks > kBlocks) hi_blocks = kBlocks;
@@ -1860,8 +1901,68 @@ static void fractional_tick(void) {
         //
         // Each count change costs, so multiplying the changes by ten multiplies
         // the cost. The evenness is not worth what it takes.
-        const LONG want = g_nullalt ? lo + 1
-                        : ((sa_pos_block < hi_blocks) ? lo + 1 : lo);
+        //
+        // Both of those numbers were taken against a schedule that was not
+        // holding still -- hi_blocks was being recomputed thousands of times
+        // per cycle -- with a rendered-frame counter 3.7% high and a block
+        // clock running 7x fast, so every block length was mislabelled by that
+        // factor. They are not evidence any more.
+        //
+        // And contiguous blocks cannot satisfy the criterion at all. The
+        // delivered ratio over N frames is 1 + mean(api), so a window only
+        // reads 2.75 if the count varies inside that window. With blocks of
+        // 1.1 s a window of 0.5 s always sits inside one block and can only
+        // ever read a whole integer. Measured in GTA V: 2.75 asked, 3.00 read
+        // flat across every window, because 24 of the 32 blocks are high and
+        // contiguous -- 26 s of 3x before the first 2x block.
+        //
+        // mfg-peralt.txt selects error diffusion on the frame instead. Note
+        // what it removes: mean(api) is a per-frame average, so scheduling per
+        // frame needs no weighting between the two states' render rates. That
+        // weighting is what the whole sub-2.0x failure came down to, and here
+        // the question does not arise.
+        //
+        // This is not the per-frame scheme the note above rejects. That one
+        // held a decision back and let the held value fight the demand; the
+        // accumulator could not settle the difference without going negative,
+        // and 1.5x came out as 2.0x. Nothing is held here: each frame takes
+        // the whole part of the accumulator and leaves the remainder.
+        // Which scheduler, decided by whether the low state generates.
+        //
+        // Above 2.0x the two states are lo and lo+1 with both generating, and
+        // diffusing per frame is free: 2.75x reads 2.76 with an inter-quartile
+        // range of 0.02, and the rendered rate is 55 either way -- the same 55
+        // that whole-second blocks give while delivering 3.00 instead of 2.75.
+        //
+        // Below 2.0x the low state is count 0, generation off, and entering and
+        // leaving it costs a present. Held, it is harmless: whole blocks at
+        // count 0 read a clean 1.00. Toggled every frame it loses half of them
+        // -- 1.50x measured 0.51. Blocks of 16 ms survive it because they are
+        // contiguous: 16 high blocks in a row is 256 ms of settled state, and
+        // the whole cycle still fits in 0.512 s, just inside the window the
+        // ratio has to hold over. That reads 1.49 with an IQR of 0.07.
+        //
+        // It is not free there. The rendered rate falls from 134 to 83, which
+        // whole-second blocks do not cost. The toggling itself is the price and
+        // no arrangement of the same two states avoids it.
+        // mfg-peralt.txt forces diffusion below 2.0x as well, which is how
+        // the destructive case stays reproducible rather than becoming a
+        // number in a comment.
+        const bool diffuse = (lo > 0 || g_peralt) && !g_nullalt;
+        LONG want;
+        if (diffuse) {
+            static double acc = 0.0;
+            static double last_pf = -1.0;
+            if (per_frame != last_pf) { last_pf = per_frame; acc = 0.0; }
+            acc += per_frame;
+            want = (LONG)acc;               // whole part
+            acc -= (double)want;            // remainder carries to the next
+            if (want < 0) want = 0;
+            if (want > lo + 1) want = lo + 1;
+        } else {
+            want = g_nullalt ? lo + 1
+                 : ((sa_pos_block < hi_blocks) ? lo + 1 : lo);
+        }
         sa_pos = (sa_pos + 1) % (kBlocks * g_slowalt_len);
         // Zero is kept as zero here, not clamped to one. Below 2.0x the API
         // cannot express the ratio at all -- its smallest generating value is
@@ -4078,8 +4179,11 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                     CloseHandle(bh);
                 }
             }
+            g_peralt = flag_file(L"mfg-peralt.txt");
             if (g_frac_enabled)
                 log_line("fractional multiplier ON (experimental: can stall the game)");
+            if (g_peralt)
+                log_line("slowalt: per-frame error diffusion (mfg-peralt.txt)");
             if (g_debug) log_line("debug: F9 recorder armed (hooks Present)");
             g_ov_enabled = !flag_file(L"mfg-nopanel.txt");
             settings_load();
