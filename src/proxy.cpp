@@ -5533,7 +5533,41 @@ static void log_wide(const char *label, const UNICODE_STRING *s) {
     log_line(buf);
 }
 
+// Sacar los sitios de un modulo que se descarga.
+//
+// Con un puntero unico esto no hacia falta: la siguiente copia parcheada lo
+// pisaba. Con una lista, un modulo descargado deja punteros colgados y la
+// escritura por frame se convierte en una violacion de acceso. Los juegos SI
+// descargan sl.dlss_g -- se vio en los logs de Cyberpunk -- asi que sin esto la
+// lista es mas peligrosa que el puntero que reemplazo.
+static void sitio_drop(volatile unsigned char **lista, int *n,
+                       const unsigned char *base, size_t largo) {
+    int w = 0;
+    for (int i = 0; i < *n; ++i) {
+        const unsigned char *q = (const unsigned char *)lista[i];
+        const bool dentro = q >= base && q < base + largo;
+        if (!dentro) lista[w++] = lista[i];
+    }
+    for (int i = w; i < *n; ++i) lista[i] = nullptr;
+    *n = w;
+}
+
 static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
+    if (reason == 2 && d != nullptr) {                       // 2 = UNLOADED
+        const unsigned char *b = (const unsigned char *)d->DllBase;
+        const size_t largo = (size_t)d->SizeOfImage;
+        const int antes = g_wic_n + g_imm_n + g_imm2_n + g_imm3_n;
+        sitio_drop(g_wic_sitios,  &g_wic_n,  b, largo);
+        sitio_drop(g_imm_sitios,  &g_imm_n,  b, largo);
+        sitio_drop(g_imm2_sitios, &g_imm2_n, b, largo);
+        sitio_drop(g_imm3_sitios, &g_imm3_n, b, largo);
+        const int ahora = g_wic_n + g_imm_n + g_imm2_n + g_imm3_n;
+        if (ahora != antes) {
+            log_line("modulo descargado: se retiran sus sitios parcheados");
+            log_num("  sitios que quedan ", (unsigned)ahora);
+        }
+        return;
+    }
     if (reason != 1 || d == nullptr) return;                 // 1 = LDR_DLL_NOTIFICATION_REASON_LOADED
 
     // Load order matters for reading the Streamline log afterwards: the plugin
