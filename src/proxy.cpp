@@ -452,7 +452,9 @@ static unsigned char g_reflex_buf[16384];
 // 72 + 152*63 = 9648.
 static double g_rfx_gpu = 0.0;     // sim start -> fin de render en GPU
 static double g_rfx_drv = 0.0;     // sim start -> fin de driver
+static long long g_qpc_freq = 1;   // set in DllMain
 static double g_rfx_ft = 0.0;          // gpuFrameTimeUs, para validar contra la base
+static double g_rfx_base = 0.0;        // base en fps, del contador de frames de Reflex
 static LONG g_rfx_n = 0;
 // Minimo y maximo ademas del promedio: si la cadencia fraccionaria alterna
 // entre comportarse como el entero de abajo y el de arriba, la latencia seria
@@ -754,6 +756,53 @@ static void reflex_take(const void *state, int atras) {
     // Un informe por frame: consultas seguidas devuelven el mismo.
     if (id == 0 || id == g_rfx_lastid || sim == 0 || gpu <= sim || drv <= sim)
         return;
+    // La base, del contador de frames del propio Reflex.
+    //
+    // La base se estimaba contando llamadas a slGetNewFrameToken. Eso depende
+    // de como llame el juego, y los juegos no llaman igual: GTA V lo llama una
+    // vez por frame y sale bien, Cyberpunk unas dieciseis y la base leyo
+    // mediana 1789 fps con el monitor en 165. El deduplicador por indice que
+    // habia para eso nunca sirvio -- en GTA V "frames past the gate" y "hook
+    // calls total" son el mismo numero, 141064, o sea que jamas descarto una
+    // llamada. Andaba por suerte del juego, no por el filtro.
+    //
+    // Este id lo lleva el driver y avanza exactamente una vez por frame
+    // renderizado, lo llame el juego como lo llame. Y se usa la DIFERENCIA de
+    // ids sobre el tiempo, no una cuenta propia, asi que perder muestras entre
+    // consultas no sesga nada: si entre dos lecturas pasaron treinta frames, la
+    // diferencia dice treinta.
+    //
+    // El limite de 1000 no es cosmetico: es lo que separa un numero fisico de
+    // uno imposible. Si el layout del informe estuviera mal en alguna version
+    // de Streamline, esto lo deja afuera en vez de alimentar al controlador con
+    // basura, que es exactamente lo que paso.
+    {
+        // Sobre el MAXIMO id visto, no sobre el ultimo leido.
+        //
+        // reflex_poll lee seis informes hacia atras y el 63 es el mas nuevo, asi
+        // que dentro de una misma consulta los ids llegan en orden DESCENDENTE.
+        // Tomando el ultimo, la referencia se reiniciaba en cada consulta y la
+        // diferencia se media sobre una secuencia desordenada: dio 75 fps en un
+        // escenario con techo de 58.8, o sea un numero imposible. El maximo es
+        // monotono y no le importa en que orden lleguen.
+        static unsigned long long id_hi = 0, id_ref = 0;
+        static LONGLONG t_ref = 0;
+        if (id > id_hi) id_hi = id;
+        LARGE_INTEGER tn;
+        QueryPerformanceCounter(&tn);
+        if (id_ref == 0 || id_hi < id_ref || t_ref == 0) {
+            id_ref = id_hi;
+            t_ref = tn.QuadPart;
+        } else if (g_qpc_freq > 0) {
+            const double secs = (double)(tn.QuadPart - t_ref) / (double)g_qpc_freq;
+            if (secs >= 0.25) {
+                const double fps = (double)(id_hi - id_ref) / secs;
+                if (fps > 1.0 && fps < 1000.0) g_rfx_base = fps;
+                id_ref = id_hi;
+                t_ref = tn.QuadPart;
+            }
+        }
+    }
     g_rfx_lastid = id;
     g_rfx_gpu += (double)(gpu - sim);
     g_rfx_drv += (double)(drv - sim);
@@ -899,7 +948,6 @@ static void apply_override_now(void);
 
 static void query_state(void);
 
-static long long g_qpc_freq = 1;   // set in DllMain
 
 // ---- the sub-frame count, made writable ---------------------------------
 
@@ -1999,6 +2047,13 @@ static void note_rendered_frame(void) {
                 // cadence. Running both arms silent settles which.
                 if (!g_quiet)
                 log_num("measured: rendered fps ", (unsigned)(int)(g_rendered_fps + 0.5));
+                // Las dos bases, lado a lado, una vez por ventana. La de
+                // Reflex es el contador del driver; la de arriba cuenta
+                // llamadas al token y depende de como llame el juego. En el
+                // banco y en GTA V tienen que coincidir; donde se separen,
+                // la que miente es la del token.
+                if (!g_quiet)
+                log_num("  base por Reflex ", (unsigned)(int)(g_rfx_base + 0.5));
                 {
                     // Frames that left the swap chain over frames the game
                     // rendered, both counted over the same window of 45
@@ -2243,7 +2298,13 @@ static void note_rendered_frame(void) {
             // shows it was the wrong correction -- the reading was assumed to
             // be the rendered rate once already.
             g_base_fps = g_token_fps;
-            dyn_apply(g_ctrl_fps > 0.0 ? g_ctrl_fps : g_base_fps);
+            // Reflex primero: su contador es del driver y no depende de cuantas
+            // veces llame el juego al token. El camino viejo queda de reserva
+            // para cuando no haya informe -- sin Reflex, o con el marcador
+            // congelado como en el menu de GTA V.
+            const double base_para_dyn = g_rfx_base > 1.0 ? g_rfx_base
+                                       : (g_ctrl_fps > 0.0 ? g_ctrl_fps : g_base_fps);
+            dyn_apply(base_para_dyn);
             if (g_probe_left > 0) {
                 const LONG pc = g_rt_present_count;
                 LONG d = pc - g_probe_pc0;
@@ -2466,66 +2527,6 @@ static void dyn_apply(double base_fps) {
     // cuesta mas de lo que la zona muerta desvia, que es algo que este proyecto
     // ya sabia y aca se volvio a comprobar.
     if (diff < 10) return;
-
-    // El techo de cadencia -- ceil(ratio - 1) -- es lo que decide la cuenta que
-    // se le pide a la API, y cambiar esa cuenta rapido es la condicion de crash
-    // ya medida: por frame y en bloques de ocho frames crashean, treinta frames
-    // entre cambios corre limpio. Un ratio que se mueve DENTRO de una banda no
-    // cuesta nada; lo que cuesta es cruzar un entero.
-    //
-    // Sin esto, en Cyberpunk el controlador escribio 763 ratios y cruzo enteros
-    // 295 veces en 71 segundos -- intervalo mediano de 32 ms y minimo de 0 --
-    // y el juego se cayo. La base que estaba persiguiendo era falsa (mediana
-    // 1789 fps con el refresco en 165), pero el controlador no tiene por que
-    // saberlo: aunque la base fuera buena, nada justifica cruzar un entero dos
-    // veces en el mismo milisegundo.
-    //
-    // Dos frenos, y hacen falta los dos:
-    //   - histeresis: hay que pasar el entero por 0.15 para que cuente, asi un
-    //     ratio que tiembla alrededor de 3.00 no alterna la cuenta;
-    //   - piso de tiempo: 500 ms entre cruces. Es reloj de pared a proposito,
-    //     no frames, porque el contador de frames es justamente el que puede
-    //     estar mintiendo -- y un freno que depende del instrumento roto no
-    //     frena nada.
-    //
-    // Cuando el freno actua no se descarta la correccion: se recorta el ratio
-    // al borde de la banda actual. El controlador sigue siguiendo el objetivo
-    // lo mejor que puede sin tocar la cuenta, que es exactamente lo que se
-    // quiere mientras la base no sea confiable.
-    {
-        static ULONGLONG last_ceil_ms = 0;
-        auto ceil_of = [](LONG x100) -> int {
-            const int gen = (x100 - 100 + 99) / 100;   // ceil(ratio - 1)
-            return gen < 0 ? 0 : gen;
-        };
-        const int cur_ceil = ceil_of(cur);
-        const int next_ceil = ceil_of(next);
-        if (next_ceil != cur_ceil) {
-            const bool muy_pronto =
-                last_ceil_ms != 0 && now_ms - last_ceil_ms < 500;
-            // Cuanto paso del entero. Subiendo, el borde es cur_ceil*100+100;
-            // bajando, el borde es la base de la banda actual.
-            const LONG borde = next_ceil > cur_ceil
-                             ? (LONG)cur_ceil * 100 + 100
-                             : (LONG)next_ceil * 100 + 100;
-            const LONG pasado = next > borde ? next - borde : borde - next;
-            if (muy_pronto || pasado < 15) {
-                // Recortar al borde de la banda, sin cruzarlo.
-                next = next_ceil > cur_ceil ? borde - 1 : borde + 1;
-                if (next > cur ? next - cur : cur - next) {
-                    static ULONGLONG dicho = 0;
-                    if (now_ms - dicho > 2000) {
-                        dicho = now_ms;
-                        log_num("dynamic: cruce de entero frenado, ratio x100 ",
-                                (unsigned)next);
-                    }
-                }
-                if ((next > cur ? next - cur : cur - next) < 10) return;
-            } else {
-                last_ceil_ms = now_ms;
-            }
-        }
-    }
     g_dyn_target = next;
     // Solo la primera bajada grande de ratio, que es el caso del sobrepaso.
     if (!g_probe_done && g_probe_left == 0 && cur - next > 80) {
