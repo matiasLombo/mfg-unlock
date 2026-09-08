@@ -1720,11 +1720,25 @@ static int patch_generation_flag(unsigned char *base, unsigned char *text, size_
         if (text[i] != 0x49 || text[i + 1] != 0x8B || text[i + 2] != 0xCE) continue;  // mov rcx,r14
         if (text[i + 3] != 0xE8) continue;                                            // call rel32
         if (text[i + 8] != 0x41 || text[i + 9] != 0x88 || text[i + 10] != 0x86) continue;
-        // mov byte ptr [r14+0x45XX], al -- the low byte of the displacement is
-        // the one thing that moves between versions (0x45da in 2.13, 0x45e2 in
-        // 2.12), so it is the one byte not matched on. The pair still resolves
-        // to a single site in both.
-        if (text[i + 12] != 0x45 || text[i + 13] != 0x00 || text[i + 14] != 0x00) continue;
+        // mov byte ptr [r14+0xNNNN], al -- NINGUNO de los dos bytes bajos del
+        // desplazamiento se fija. El comentario original decia que el bajo es
+        // "lo unico que se mueve entre versiones" (0x45da en 2.13, 0x45e2 en
+        // 2.12) y sin embargo fijaba el alto en 0x45. En el build OTA 134656 --
+        // el que carga Halo -- el desplazamiento salio de esa pagina y la firma
+        // devolvia 0 sitios.
+        //
+        // Escaneo de todos los plugins de la maquina, contando sitios con la
+        // firma vieja y con esta:
+        //
+        //     GTA V 625792      1   1
+        //     Cyberpunk 578176  0   0
+        //     NGX 134273        1   1
+        //     NGX 134656        0   1   <-- el que importa para Halo
+        //     los demas         0   0
+        //
+        // Relajar no produce mas de un sitio en ningun build, asi que la guarda
+        // de unicidad de abajo sigue siendo la que protege.
+        if (text[i + 13] != 0x00 || text[i + 14] != 0x00) continue;
         ++found;
         at = i;
     }
