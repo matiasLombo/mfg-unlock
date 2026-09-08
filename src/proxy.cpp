@@ -87,6 +87,26 @@ static bool g_sub2 = false;           // mfg-sub2.txt
 // "eLoadDownloadedPlugins flag not passed to preferences", y esa bandera la pasa
 // la aplicacion en slInit, no un archivo de configuracion.
 static bool g_twocopies = false;      // mfg-twocopies.txt
+// mfg-ceilfirst.txt: A1. Mientras la interpolacion todavia no arranco,
+// declararle al plugin el TECHO del ciclo (lo+1) en vez de la cuenta de este
+// frame. La reserva del plugin se hace al encender: si en ese momento ve el
+// maximo que vamos a usar, la alternancia posterior queda siempre por debajo.
+//
+// MEDIDO Y SIN EFECTO. Cyberpunk con -benchmark y la ventana al frente, 226
+// ventanas de juego cada una: con A1 entrega 3.48x (p10 3.00, p90 4.33), sin A1
+// 3.49x (p10 3.02, p90 4.31), pidiendo 3.50 las dos. Son la misma corrida.
+//
+// Se queda porque documenta una palanca probada, no porque sirva. Ojo con dos
+// cosas si se retoma: declaro techo 3 y no 4, o sea que capturo el techo antes
+// de que el objetivo se asentara; y el 3.50 sale entero SIN la palanca, asi que
+// no habia techo que levantar -- lo que tapaba el resultado era la ventana sin
+// foco (ver dlssg-needs-window-focus en las memorias).
+static bool g_ceilfirst = false;      // mfg-ceilfirst.txt
+static volatile LONG g_ciclo_techo = 0;   // lo+1 del ciclo en curso
+// Encendida o no. No hay consulta directa que sirva: slDLSSGGetState avisa que
+// hay que sincronizarla con el hilo de present. Se deduce de que lo presentado
+// supere a la base de Reflex, que es la medida honesta que ya tenemos.
+static volatile LONG g_interp_on = 0;
 static volatile LONG g_twocopies_pending = 0;
 // mfg-optsv3.txt: SOLO para el banco. GTA V llena DLSSGOptions con
 // structVersion 3 y el sample con 5, y eso se leyo de los logs de los dos.
@@ -395,7 +415,20 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
             *(LONG *)(p + 32) = 0;             // DLSSGMode::eOff
         } else {
             *(LONG *)(p + 32) = 1;             // DLSSGMode::eOn
-            *(LONG *)(p + 36) = g_force_generated;
+            LONG escribir = g_force_generated;
+            if (g_ceilfirst) {
+                const LONG techo = g_ciclo_techo;
+                if (!g_interp_on && techo > escribir && techo <= 5) {
+                    escribir = techo;
+                    static bool dicho = false;
+                    if (!dicho) {
+                        dicho = true;
+                        log_num("A1: declarando el techo del ciclo mientras apagado ",
+                                (unsigned)techo);
+                    }
+                }
+            }
+            *(LONG *)(p + 36) = escribir;
         }
     } else if (false) {
         // eDynamic, with our own frame-rate target.
@@ -2223,6 +2256,11 @@ static void note_rendered_frame(void) {
                         // seria un numero mas que puede discrepar.
                         if (win_elapsed > 0.0)
                             dyn_control(g_rendered_fps, dp / win_elapsed);
+                        // A1 necesita saber si la interpolacion arranco. La
+                        // base honesta es la de Reflex; si lo presentado la
+                        // supera con holgura, esta generando.
+                        if (win_elapsed > 0.0 && g_rfx_base > 1.0)
+                            g_interp_on = (dp / win_elapsed) > g_rfx_base * 1.3 ? 1 : 0;
                         g_present_block_us = 0.0;
                         if (g_clamp_latency > 0)
                             log_num("  SetMaximumFrameLatency calls so far ",
@@ -2263,9 +2301,26 @@ static void note_rendered_frame(void) {
                                 g_rfx_ft = 0.0; g_rfx_n = 0;
                                 g_rfx_min = 0xFFFFFFFFu; g_rfx_max = 0;
                             }
-                            log_num("  game window in front (1 = yes) ",
+                            // NO CONFIABLE en Cyberpunk. Dio 0 en 1406 de 1413
+                            // ventanas con el juego al frente y Streamline sin
+                            // una sola queja de foco en toda la corrida. Se
+                            // probaron dos arreglos y los dos fallaron: seguir
+                            // la ventana vigente en vez de la primera (el juego
+                            // crea un solo swapchain, asi que no cambia nada) y
+                            // comparar contra GetAncestor(GA_ROOT) por si el
+                            // swapchain colgaba de una hija. El HWND esta
+                            // capturado, no es nulo.
+                            //
+                            // No se toca mas. Para saber si el foco apago la
+                            // generacion, la autoridad es la queja del plugin en
+                            // sl.log ("DLSS-G disabled: window not focused"), que
+                            // es la que de verdad la apaga. Este numero se deja
+                            // porque en GTA V si sigue al foco, pero NO se puede
+                            // descartar una ventana de Cyberpunk por el.
+                            log_num("  game window in front (1 = yes, NO CONFIABLE en cp2077) ",
                                     (unsigned)(g_game_hwnd != nullptr &&
-                                               GetForegroundWindow() == g_game_hwnd
+                                               GetForegroundWindow() ==
+                                                   GetAncestor(g_game_hwnd, GA_ROOT)
                                                ? 1 : 0));
                             log_num("  the game itself last asked for mode ",
                                     (unsigned)g_cap_mode);
@@ -2720,6 +2775,7 @@ static void fractional_tick(void) {
     // has no such conflict: the count of high frames is what carries the
     // fraction, and it is exact over each period.
     const LONG lo = (LONG)per_frame;
+    g_ciclo_techo = lo + 1;   // A1: el maximo que este ciclo va a pedir
     const double frac = per_frame - (double)lo;
 
     static int pos = 0;
@@ -4541,7 +4597,15 @@ static HRESULT STDMETHODCALLTYPE hk_csc(IDXGIFactory *self, IUnknown *dev,
 
 static HRESULT STDMETHODCALLTYPE hk_cscfh(void *self, IUnknown *dev, HWND hwnd,
         const void *d1, const void *fs, void *restrict_to, IDXGISwapChain **out) {
-    if (g_game_hwnd == nullptr) g_game_hwnd = hwnd;
+    // La ultima gana, no la primera. Cyberpunk recrea la ventana al cambiar de
+    // modo de video, y engancharse a la primera dejaba un HWND viejo: el
+    // indicador de foco daba 0 con el juego al frente y descarto 196 ventanas
+    // buenas de una medicion. Solo se usa para loguear, asi que no cambia
+    // ningun comportamiento.
+    if (g_game_hwnd != hwnd) {
+        g_game_hwnd = hwnd;
+        log_line("swapchain con ventana nueva");
+    }
     // DXGI_SWAP_CHAIN_DESC1 keeps Flags as the last UINT of the struct, after
     // Width, Height, Format, Stereo, SampleDesc(2), BufferUsage, BufferCount,
     // Scaling, SwapEffect, AlphaMode -- offset 0x2C.
@@ -5919,6 +5983,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             g_frac_enabled = !flag_file(L"mfg-nofrac.txt");
             g_sub2 = flag_file(L"mfg-sub2.txt");
             g_twocopies = flag_file(L"mfg-twocopies.txt");
+            g_ceilfirst = flag_file(L"mfg-ceilfirst.txt");
             g_slowalt = !flag_file(L"mfg-noslowalt.txt");
             g_quiet = flag_file(L"mfg-quiet.txt");
             g_nullalt = flag_file(L"mfg-nullalt.txt");
