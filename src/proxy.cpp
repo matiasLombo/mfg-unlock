@@ -74,7 +74,20 @@ static bool g_frac_enabled = false;   // mfg-frac.txt
 // no da un multiplicador mas alto, crashea el juego. Le paso a Halo Campaign
 // Evolved, que carga un sl.dlss_g de 447960 bytes en vez del de 625792 que
 // sabemos parchear: 'sites: 0' y aun asi pedimos cuenta 5. Tres crashes.
-static bool g_wic_ok = false;
+// Arranca en true y solo puede caer: si CUALQUIER copia mapeada falla una de
+// las dos piezas, el freno se arma. En Halo hay dos copias -- la de
+// Engine\Plugins, donde no engancha nada, y la OTA 134656, donde el contador
+// SI engancha -- y una sola bandera pisada por la ultima copia dejaba el freno
+// desactivado justo en el juego que lo necesitaba.
+//
+// Y hacen falta las dos, no solo el contador. En la copia OTA de Halo el
+// contador engancho y la bandera de generacion no ('generation flag site not
+// unique, sites: 0'). Sin esa bandera, una cuenta de cero hace que el bucle no
+// produzca nada mientras el plugin cree que esta generando, y el frame se
+// presenta por un camino sin nada que presentar. El dump del crash de Halo cae
+// justo dentro de esa copia: 0xC0000005 en 190_E658703.dll +0x3F2E9.
+static bool g_wic_ok = true;
+static bool g_vio_alguna_copia = false;
 static bool g_quiet = false;          // mfg-quiet.txt: no per-window logging
 static bool g_nullalt = false;        // mfg-nullalt.txt: alternate between equals
 static bool g_slowalt = false;        // mfg-slowalt.txt
@@ -1788,10 +1801,11 @@ static int patch_subframe_count(unsigned char *base) {
         // The comparison patches are exactly what this replaces; leaving
         // them in would put the bound back out of step with the field.
         const int wic_sitios = patch_work_item_count(text, len);
-        g_wic_ok = (wic_sitios > 0);
-        log_line(g_wic_ok
-                 ? "  PARCHE DE CUENTA: engancho -- fraccionario disponible"
-                 : "  PARCHE DE CUENTA: NO engancho -- nos limitamos a espejar al juego");
+        g_vio_alguna_copia = true;
+        if (wic_sitios == 0) g_wic_ok = false;
+        log_line(wic_sitios > 0
+                 ? "  PARCHE DE CUENTA: engancho en esta copia"
+                 : "  PARCHE DE CUENTA: NO engancho en esta copia");
         if (wic_sitios == 0) {
             // Nothing downstream reports this on its own: set_count_now would
             // simply do nothing, the run would execute at the fixed API ceiling,
@@ -1806,7 +1820,15 @@ static int patch_subframe_count(unsigned char *base) {
         // believes it is generating, and the frame is then presented down a
         // path with nothing to present: 88 rendered against 81 presented at
         // 1.50x, losing the real frame rather than merely not adding one.
-        patch_generation_flag(base, text, len);
+        {
+            // NO entra en el freno. Se probo exigirla y en Cyberpunk falla en
+            // las DOS copias -- y ese juego viene entregando 165.5 fps y 4.5x
+            // todo el dia, asi que su ausencia no es peligrosa por si sola.
+            // Exigirla armaba el freno ahi y la corrida se quedaba sin ventanas.
+            const int gf = patch_generation_flag(base, text, len);
+            if (gf == 0)
+                log_line("  bandera de generacion: no engancho (no frena nada)");
+        }
         // The frame latency, pinned, behind mfg-pinlatency.txt.
         //
         // The base rate is not the average of the cadence, it is
