@@ -68,6 +68,13 @@ static void log_num(const char *label, unsigned long long v);
 
 static wchar_t g_log[MAX_PATH];
 static bool g_frac_enabled = false;   // mfg-frac.txt
+// Engancho el parche del byte de la cuenta de sub-frames? Es lo que permite que
+// la cuenta varie por frame. Cuando NO engancha, la unica palanca que queda es
+// la cuenta de la API, y esa dimensiona la reserva del plugin: pedir de mas ahi
+// no da un multiplicador mas alto, crashea el juego. Le paso a Halo Campaign
+// Evolved, que carga un sl.dlss_g de 447960 bytes en vez del de 625792 que
+// sabemos parchear: 'sites: 0' y aun asi pedimos cuenta 5. Tres crashes.
+static bool g_wic_ok = false;
 static bool g_quiet = false;          // mfg-quiet.txt: no per-window logging
 static bool g_nullalt = false;        // mfg-nullalt.txt: alternate between equals
 static bool g_slowalt = false;        // mfg-slowalt.txt
@@ -298,6 +305,68 @@ static unsigned char *g_restore_p = nullptr;
 static LONG g_restore_cnt = 0, g_restore_mode = 0;
 static bool g_restore_pending = false;
 static PFN_slGetFeatureFunction g_orig_getfeaturefn = nullptr;
+// slInit: por aca pasa la aplicacion sus preferencias, y ahi vive la bandera
+// que decide si Streamline puede cargar plugins descargados por OTA.
+//
+//   eAllowOTA            = 1 << 3
+//   eLoadDownloadedPlugins = 1 << 6
+//
+// Cyberpunk las pasa y por eso carga el plugin de la cache; Halo no, y se queda
+// con el suyo de 447960 bytes, que no tiene el sitio del contador. La cache de
+// esta maquina tiene tres builds que SI lo tienen (133888, 134273, 134656).
+//
+// El offset de `flags` sale de sl_core_types.h: BaseStructure son 32 bytes
+// (next 8 + GUID 16 + structVersion 8) y despues showConsole, logLevel,
+// pathsToPlugins, numPathsToPlugins, pathToLogsAndData y tres callbacks dan 88.
+// Se verifica antes de escribir: mfg-ota.txt no modifica nada hasta que el
+// volcado confirme que ahi hay una mascara con sentido.
+typedef unsigned (*PFN_slInit)(void *, unsigned long long);
+static PFN_slInit g_orig_slinit = nullptr;
+static bool g_ota = false;              // mfg-ota.txt
+static const int kPrefFlags = 88;
+
+// Engancha SOLO slInit, para poder correrlo temprano.
+//
+// El armado general vive en el hilo del panel y llega tarde: en el sample del
+// banco slInit ya se llamo cuando ese hilo despierta, asi que el volcado nunca
+// aparecio. En Cyberpunk si llega porque ahi el interposer carga mas tarde.
+//
+// Corre en DllMain solo si existe mfg-ota.txt. Inicializar MinHook bajo el
+// bloqueo del cargador es un riesgo conocido, asi que se paga unicamente
+// cuando alguien pidio el forzado; sin la bandera, nada de esto pasa y los
+// juegos que ya andan no cambian.
+static void arm_slinit_temprano(void);
+
+static unsigned hk_slInit(void *pref, unsigned long long sdk) {
+    if (pref != nullptr) {
+        unsigned char *p = (unsigned char *)pref;
+        log_num("slInit: structVersion ", (unsigned)*(unsigned long long *)(p + 24));
+        const unsigned long long f = *(unsigned long long *)(p + kPrefFlags);
+        log_num("  banderas en +88 ", (unsigned)f);
+        log_num("    eAllowOTA (bit 3) ", (unsigned)((f >> 3) & 1));
+        log_num("    eLoadDownloadedPlugins (bit 6) ", (unsigned)((f >> 6) & 1));
+        // Volcado crudo para poder ubicar el campo si el offset no fuera 88.
+        for (int fila = 0; fila < 9; ++fila) {
+            char buf[64];
+            const unsigned long long v = *(unsigned long long *)(p + fila * 8);
+            wsprintfA(buf, "    +%d = %08X%08X", fila * 8,
+                      (unsigned)(v >> 32), (unsigned)v);
+            log_line(buf);
+        }
+        if (g_ota) {
+            DWORD viejo = 0;
+            if (VirtualProtect(p + kPrefFlags, 8, PAGE_READWRITE, &viejo)) {
+                *(unsigned long long *)(p + kPrefFlags) = f | (1ull << 3) | (1ull << 6);
+                VirtualProtect(p + kPrefFlags, 8, viejo, &viejo);
+                log_num("  OTA forzado, banderas ahora ",
+                        (unsigned)*(unsigned long long *)(p + kPrefFlags));
+            } else {
+                log_line("  ! no se pudo escribir las banderas");
+            }
+        }
+    }
+    return g_orig_slinit(pref, sdk);
+}
 
 // Enough of the last call to make it again ourselves. The header says
 // slDLSSGSetOptions is not thread safe, so the thread the game used is
@@ -426,6 +495,22 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
                         log_num("A1: declarando el techo del ciclo mientras apagado ",
                                 (unsigned)techo);
                     }
+                }
+            }
+            // Freno de seguridad. Sin el parche del contador no podemos repartir
+            // la cuenta por frame, asi que pedir por la API mas de lo que el
+            // juego pidio no compra nada y arriesga la reserva. Se espeja.
+            if (!g_wic_ok) {
+                const LONG suyo = g_last_seen_generated;
+                const LONG tope = (suyo >= 1 && suyo <= 5) ? suyo : 1;
+                if (escribir > tope) {
+                    static LONG dicho = -1;
+                    if (dicho != tope) {
+                        dicho = tope;
+                        log_num("freno: sin parche, la cuenta se limita a la del juego ",
+                                (unsigned)tope);
+                    }
+                    escribir = tope;
                 }
             }
             *(LONG *)(p + 36) = escribir;
@@ -1677,7 +1762,12 @@ static int patch_subframe_count(unsigned char *base) {
     if (g_wic_mode) {
         // The comparison patches are exactly what this replaces; leaving
         // them in would put the bound back out of step with the field.
-        if (patch_work_item_count(text, len) == 0) {
+        const int wic_sitios = patch_work_item_count(text, len);
+        g_wic_ok = (wic_sitios > 0);
+        log_line(g_wic_ok
+                 ? "  PARCHE DE CUENTA: engancho -- fraccionario disponible"
+                 : "  PARCHE DE CUENTA: NO engancho -- nos limitamos a espejar al juego");
+        if (wic_sitios == 0) {
             // Nothing downstream reports this on its own: set_count_now would
             // simply do nothing, the run would execute at the fixed API ceiling,
             // and the only outward sign would be the absence of the "fractional:"
@@ -2602,6 +2692,7 @@ static void dyn_apply(double base_fps) {
     // 158, que es justo el grupo de ventanas que sobraba. Si despues de un
     // sobrepaso se entrega de menos, el promedio vuelve al objetivo.
     static double debt = 0.0;          // presentaciones adeudadas
+    static bool salida_saturada = false;   // el ratio quedo pegado al techo
     static LONG last_pc = 0;
     static LONGLONG last_qpc = 0;
     // QPC y no GetTickCount64. Esta funcion corre por frame -- cada 4.7 ms a
@@ -2620,7 +2711,22 @@ static void dyn_apply(double base_fps) {
     if (last_qpc != 0 && now_q > last_qpc && g_qpc_freq > 0 && pc >= last_pc) {
         const double secs = (double)(now_q - last_qpc) / (double)g_qpc_freq;
         if (secs < 0.5) {              // un salto largo es un cambio de escena
-            debt += target * secs - (double)(pc - last_pc);
+            double inc = target * secs - (double)(pc - last_pc);
+            // Anti-windup. Si el ratio ya esta pegado al techo de 6x, pedir mas
+            // no puede traer mas presentaciones, asi que la deuda deja de
+            // crecer. Sin esto se enrolla contra un objetivo inalcanzable y el
+            // lazo se realimenta: satura la deuda, pide 6x, el juego se atora,
+            // se presentan menos frames todavia, la deuda crece mas.
+            //
+            // Medido en GTA V: deuda clavada en su tope de 54.45, sesgo en
+            // 1.25, ratio pedido 5.49 con base 62 -- 340 fps exigidos -- y el
+            // juego tildandose con frenos de 200 ms. La misma partida con el
+            // codigo anterior pedia 3.01.
+            //
+            // Solo se frena el crecimiento: bajar siempre se permite, que es
+            // como el lazo sale de la saturacion cuando el juego se recupera.
+            if (salida_saturada && inc > 0.0) inc = 0.0;
+            debt += inc;
             // Acotada a un tercio de segundo de objetivo: sin esto se enrolla
             // durante un apagon y despues descarga todo junto.
             const double lim = target * 0.33;
@@ -2648,6 +2754,7 @@ static void dyn_apply(double base_fps) {
     // si sola no es la causa, y el limite costaba precision real: 79% de
     // ventanas dentro del +-5% contra 89%. Se retira hasta tener una causa
     // demostrada en vez de una coincidencia.
+    salida_saturada = (want > 6.0);
     if (want > 6.0) {
         static bool said_hi = false;
         if (!said_hi) {
@@ -3908,6 +4015,26 @@ static void query_state(void) {
 }
 
 
+static void arm_slinit_temprano(void) {
+    if (g_orig_slinit != nullptr) return;
+    HMODULE si = GetModuleHandleW(L"sl.interposer.dll");
+    if (si == nullptr) return;
+    void *fi = (void *)GetProcAddress(si, "slInit");
+    if (fi == nullptr) { log_line("  ! slInit no esta exportado aca"); return; }
+    const MH_STATUS init = MH_Initialize();
+    if (init != MH_OK && init != MH_ERROR_ALREADY_INITIALIZED) {
+        log_num("  ! MinHook no arranco para slInit, codigo ", (unsigned)init);
+        return;
+    }
+    if (MH_CreateHook(fi, (void *)&hk_slInit, (void **)&g_orig_slinit) != MH_OK ||
+        MH_EnableHook(fi) != MH_OK) {
+        log_line("  ! no se pudo enganchar slInit");
+        g_orig_slinit = nullptr;
+        return;
+    }
+    log_line("slInit enganchado");
+}
+
 static void arm_multiplier_override(unsigned char *base) {
     if (base == nullptr || g_orig_getfeaturefn != nullptr) return;
     void *f = (void *)GetProcAddress((HMODULE)base, "slGetFeatureFunction");
@@ -3935,6 +4062,23 @@ static void arm_multiplier_override(unsigned char *base) {
         return;
     }
     log_line("  slGetFeatureFunction hooked");
+
+    arm_slinit_temprano();
+    if (false) {
+        void *fi = (void *)GetProcAddress((HMODULE)base, "slInit");
+        if (fi == nullptr) {
+            log_line("  ! slInit no esta exportado aca");
+        } else if (MH_CreateHook(fi, (void *)&hk_slInit,
+                                 (void **)&g_orig_slinit) != MH_OK) {
+            log_line("  ! no se pudo enganchar slInit");
+            g_orig_slinit = nullptr;
+        } else if (MH_EnableHook(fi) != MH_OK) {
+            log_line("  ! no se pudo activar el enganche de slInit");
+            g_orig_slinit = nullptr;
+        } else {
+            log_line("  slInit enganchado");
+        }
+    }
 
     // After MH_Initialize, not before it. Putting this above the init made
     // MH_CreateHook fail with "not initialised" and the else branch swallowed
@@ -6071,6 +6215,11 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             g_sub2 = flag_file(L"mfg-sub2.txt");
             g_twocopies = flag_file(L"mfg-twocopies.txt");
             g_ceilfirst = flag_file(L"mfg-ceilfirst.txt");
+            g_ota = flag_file(L"mfg-ota.txt");
+            // Con la bandera puesta hay que llegar antes que la llamada del
+            // juego, y el armado del hilo del panel llega tarde en los juegos
+            // que importan el interposer estaticamente.
+            if (g_ota) arm_slinit_temprano();
             g_slowalt = !flag_file(L"mfg-noslowalt.txt");
             g_quiet = flag_file(L"mfg-quiet.txt");
             g_nullalt = flag_file(L"mfg-nullalt.txt");
