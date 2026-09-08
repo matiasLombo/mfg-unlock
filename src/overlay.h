@@ -143,7 +143,33 @@ static const int kStops[] = { 100, 125, 150, 175,
                               200, 225, 250, 275, 300, 325, 350, 375, 400,
                               450, 500, 550, 600 };
 static const int kNStops = (int)(sizeof(kStops) / sizeof(kStops[0]));
-static const int kMinCustom = 200, kMaxCustom = 600;
+// El piso baja de 200 a 150. Medido en el banco, base fijada en 59 por el slow
+// frame, 45-47 ventanas por punto, distribucion por ventana con PresentCount:
+//
+//   pedido  ratio  ventanas en el valor  cambios  reservas  perdidas  latencia media  swing
+//   1.25    1.22        45 de 47          148       223        16       10.2 ms      8.3 ms
+//   1.50    1.47        36 de 47          147       223         0       12.6 ms      4.5 ms
+//   1.75    1.73        46 de 47          146       223         0       14.1 ms      4.0 ms
+//   2.00    2.00        47 de 47            1       223         0       13.9 ms      3.6 ms
+//
+// Lo que se creia y era falso: que abajo de 2.0x prender y apagar la generacion
+// costaria mas que cambiar de cuenta. Cuesta lo mismo -- los ~147 cambios salen
+// enteros del ciclo de 16 ms, y las reservas se quedan en 223, el piso del
+// entero fijo. Alternar 0/1 reserva MENOS que alternar 1/2 (272 a 2.50x): la
+// reserva sigue el tamano de la cuenta, no los cambios.
+//
+// Por que 150 y no 110: 1.25x es el unico punto que tira presentaciones (16, y
+// sl.log no habia registrado ninguna en ninguna otra configuracion) y su swing
+// es el doble que el de cualquier otro. Ahi el estado bajo ocupa el 75% del
+// ciclo y la mayoria de los frames no generan nada, que es de donde sale su
+// latencia baja -- no es un frame mas rapido, son dos poblaciones.
+//
+// Y lo que NO justifica esto: la latencia. 1.50x y 1.75x caen dentro del ruido
+// entre corridas (siete corridas de 2.50x dan medias de 12.4 a 15.0). El unico
+// punto claramente por debajo es 1.25x, que es el que no se ofrece. Lo que
+// sub-2.0x da de verdad es un escalon de fps entre apagado y 2x, y menos
+// interpolacion para quien vea artefactos en 2x. Eso ultimo no lo mide el banco.
+static const int kMinCustom = 150, kMaxCustom = 600;
 
 // Objetivos de DYNAMIC, en fps presentados. El cero es AUTO y significa el
 // refresh del monitor, que es lo que el controlador usa cuando no se le da un

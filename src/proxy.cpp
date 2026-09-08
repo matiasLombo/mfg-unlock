@@ -74,6 +74,11 @@ static bool g_slowalt = false;        // mfg-slowalt.txt
 static int  g_slowalt_len = 240;       // rendered frames per block
 static int  g_block_ms = 0;           // mfg-blockms.txt, 0 = default
 static bool g_peralt = false;         // mfg-peralt.txt: diffuse per frame
+// mfg-sub2.txt: SOLO para medir. Baja el piso del target por debajo de 200
+// en el camino de mfg-settings.txt, para poder medir 1.25x/1.50x/1.75x sin
+// bajar el piso del panel, que es justo lo que hay que decidir con esos
+// numeros. Sin el archivo, el comportamiento es identico al de antes.
+static bool g_sub2 = false;           // mfg-sub2.txt
 // mfg-optsv3.txt: SOLO para el banco. GTA V llena DLSSGOptions con
 // structVersion 3 y el sample con 5, y eso se leyo de los logs de los dos.
 // En v3 no existe numFramesToGenerate, asi que la cuenta que force_into
@@ -3527,7 +3532,14 @@ static void settings_load(void) {
         } else if (is_tgt && v >= 0 && v <= kMaxCustom) {
             // Un ajuste guardado por una version anterior puede traer 150. Se
             // sube al piso en vez de aceptarlo: el panel ya no ofrece ese valor.
-            g_dyn_target = v < kMinCustom ? kMinCustom : v;
+            //
+            // Con mfg-sub2.txt el piso baja a 110, que es lo mas chico que el
+            // scheduler puede expresar sin que el estado bajo sea todo el ciclo.
+            // Es para medir: el banco escribe el multiplicador por este mismo
+            // archivo, asi que sin esto una corrida a --fractional 150 mide un
+            // 2.00x plano y parece que anduvo. Paso exactamente eso una vez.
+            const int piso = g_sub2 ? 110 : kMinCustom;
+            g_dyn_target = v < piso ? piso : v;
         }
         i = j;
     }
@@ -5684,6 +5696,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             g_pin_latency = flag_file(L"mfg-pinlatency.txt");
             g_pace_follow = flag_file(L"mfg-pacefollow.txt");
             g_frac_enabled = !flag_file(L"mfg-nofrac.txt");
+            g_sub2 = flag_file(L"mfg-sub2.txt");
             g_slowalt = !flag_file(L"mfg-noslowalt.txt");
             g_quiet = flag_file(L"mfg-quiet.txt");
             g_nullalt = flag_file(L"mfg-nullalt.txt");
