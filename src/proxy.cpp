@@ -454,7 +454,49 @@ static double g_rfx_gpu = 0.0;     // sim start -> fin de render en GPU
 static double g_rfx_drv = 0.0;     // sim start -> fin de driver
 static long long g_qpc_freq = 1;   // set in DllMain
 static double g_rfx_ft = 0.0;          // gpuFrameTimeUs, para validar contra la base
+static double g_ctrl_fps = 0.0;       // frames/tiempo, insesgada, para el controlador
 static double g_rfx_base = 0.0;        // base en fps, del contador de frames de Reflex
+static ULONGLONG g_ctrl_rfx_ms = 0;    // ultima vez que Reflex alimento el estimador
+
+// El estimador de base del controlador. La logica es la misma de siempre y no
+// se toca: lo unico que cambia es de donde viene el dt.
+//
+// Se calcula n/suma(dt) y no 1/promedio(dt): promediar intervalos para despues
+// invertir NO da la tasa media -- por Jensen 1/E[dt] <= E[1/dt] -- y con tiempos
+// de frame que varian la base salia sistematicamente baja, el controlador pedia
+// de mas y las presentadas quedaban 2% arriba del objetivo. Ese era el sesgo
+// residual que no se explicaba.
+static void ctrl_feed_dt(double dt) {
+    if (dt <= 0.0) return;
+    static double ring[8] = { 0,0,0,0,0,0,0,0 };
+    static int ri = 0, rn = 0;
+    static double rsum = 0.0;
+    if (rn == 8) rsum -= ring[ri];
+    ring[ri] = dt;
+    rsum += dt;
+    ri = (ri + 1) & 7;
+    if (rn < 8) ++rn;
+    g_ctrl_fps = rsum > 0.0 ? (double)rn / rsum : 0.0;
+    // Un escalon invalida la historia: se reempieza con el valor nuevo en vez
+    // de arrastrar ocho frames de la carga anterior.
+    static double prev2 = 0.0;
+    if (prev2 > 0.0 && rn > 1) {
+        const double media = rsum / (double)rn;
+        const bool lejos2 = dt < media * 0.75 || dt > media * 1.33;
+        const bool igual2 = dt > prev2 * 0.88 && dt < prev2 * 1.12;
+        if (lejos2 && igual2) {
+            ring[0] = dt; ri = 1; rn = 1; rsum = dt;
+            g_ctrl_fps = 1.0 / dt;
+        }
+    }
+    prev2 = dt;
+}
+
+// Reflex manda mientras siga reportando. Medio segundo de silencio -- el menu de
+// GTA V congela el marcador -- y el camino del token vuelve a alimentar.
+static bool ctrl_fed_by_reflex(void) {
+    return g_ctrl_rfx_ms != 0 && GetTickCount64() - g_ctrl_rfx_ms < 500;
+}
 static LONG g_rfx_n = 0;
 // Minimo y maximo ademas del promedio: si la cadencia fraccionaria alterna
 // entre comportarse como el entero de abajo y el de arriba, la latencia seria
@@ -802,6 +844,13 @@ static void reflex_take(const void *state, int atras) {
                 t_ref = tn.QuadPart;
             }
         }
+    }
+    // El intervalo de frame del driver, al mismo estimador de siempre. Rango
+    // fisico: 1 ms a 500 ms, o sea 2 a 1000 fps. Fuera de ahi el informe no
+    // dice lo que creemos y se deja pasar al camino del token.
+    if (ft >= 1000 && ft <= 500000) {
+        ctrl_feed_dt((double)ft / 1e6);
+        g_ctrl_rfx_ms = GetTickCount64();
     }
     g_rfx_lastid = id;
     g_rfx_gpu += (double)(gpu - sim);
@@ -1957,7 +2006,6 @@ static double g_lo_time = 0.0;
 static double g_hi_time = 0.0;
 static double g_token_fps = 0.0;      // and the rate that follows from it
 static double g_token_dt_fast = 0.0;  // la misma senal, para el controlador
-static double g_ctrl_fps = 0.0;       // frames/tiempo, insesgada, para el controlador
 static double g_base_fps = 0.0;       // that, divided by the multiplier in force
 static long long g_last_token_qpc = 0;
 
@@ -2242,30 +2290,9 @@ static void note_rendered_frame(void) {
             // base salia sistematicamente baja, el controlador pedia de mas y
             // las presentadas quedaban 2% arriba del objetivo. Ese era el sesgo
             // residual que no se explicaba.
-            {
-                static double ring[8] = { 0,0,0,0,0,0,0,0 };
-                static int ri = 0, rn = 0;
-                static double rsum = 0.0;
-                if (rn == 8) rsum -= ring[ri];
-                ring[ri] = dt;
-                rsum += dt;
-                ri = (ri + 1) & 7;
-                if (rn < 8) ++rn;
-                g_ctrl_fps = rsum > 0.0 ? (double)rn / rsum : 0.0;
-                // Un escalon invalida la historia: se reempieza con el valor
-                // nuevo en vez de arrastrar ocho frames de la carga anterior.
-                static double prev2 = 0.0;
-                if (prev2 > 0.0 && rn > 1) {
-                    const double media = rsum / (double)rn;
-                    const bool lejos2 = dt < media * 0.75 || dt > media * 1.33;
-                    const bool igual2 = dt > prev2 * 0.88 && dt < prev2 * 1.12;
-                    if (lejos2 && igual2) {
-                        ring[0] = dt; ri = 1; rn = 1; rsum = dt;
-                        g_ctrl_fps = 1.0 / dt;
-                    }
-                }
-                prev2 = dt;
-            }
+            // Solo si Reflex no lo esta alimentando: su intervalo es el del
+            // driver y no depende de como llame el juego al token.
+            if (!ctrl_fed_by_reflex()) ctrl_feed_dt(dt);
             if (g_token_dt_fast <= 0.0) {
                 g_token_dt_fast = dt;
             } else {
@@ -2302,9 +2329,10 @@ static void note_rendered_frame(void) {
             // veces llame el juego al token. El camino viejo queda de reserva
             // para cuando no haya informe -- sin Reflex, o con el marcador
             // congelado como en el menu de GTA V.
-            const double base_para_dyn = g_rfx_base > 1.0 ? g_rfx_base
-                                       : (g_ctrl_fps > 0.0 ? g_ctrl_fps : g_base_fps);
-            dyn_apply(base_para_dyn);
+            // Sin bypass: el estimador es el mismo de siempre, con su
+            // correccion de Jensen y su deteccion de escalon. Lo unico que
+            // cambio es que ahora lo alimenta Reflex y no el conteo de llamadas.
+            dyn_apply(g_ctrl_fps > 0.0 ? g_ctrl_fps : g_base_fps);
             if (g_probe_left > 0) {
                 const LONG pc = g_rt_present_count;
                 LONG d = pc - g_probe_pc0;
