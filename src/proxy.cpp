@@ -3564,6 +3564,13 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
         // del sesgo de DYNAMIC y probablemente la dispersion.
         //
         // La prueba de que quedo bien es que "salto atras" caiga a cero en juego.
+        //
+        // Cuarta cosa que rompia, y la mas traicionera porque parecia fisica:
+        // pedir 2.50 en Cyberpunk entregaba 2.63x y 2.55x, un +2 a +5% que no
+        // aparecia sobre la pila 2.13 en el banco. Con el gate arreglado da
+        // 2.48x y 2.50x. No era el esquema fraccionario: la ventana son 45
+        // frames del gate, y cuando el gate cuenta triple esos 45 cubren unos
+        // 15 frames reales, con el sesgo colandose en la mediana.
         static unsigned max_idx = 0;
         static void *last_tok = nullptr;
         static bool have = false;
