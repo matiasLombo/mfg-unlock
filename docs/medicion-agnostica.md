@@ -126,12 +126,68 @@ NO VERIFICADO: por que nuestra intercepcion de la creacion del swapchain no toma
 en Halo. Esa carpeta tiene ReShade como `dxgi.dll`, DLSS Enabler, renodx y UE4SS
 encadenados.
 
+## 5b. Dos alternativas que no estaban en la lista
+
+Esta seccion existe porque la primera version de este documento contestaba solo
+las cinco preguntas del objetivo y saltaba a "arreglemos el swapchain", que es lo
+mas barato. Buscar alternativas dio dos caminos mejores, y los dos EVITAN el
+problema en vez de pelearlo.
+
+### A. El contador de presentaciones lo da Streamline, no el swapchain
+
+`slDLSSGGetState` devuelve un `DLSSGState` con:
+
+    uint32_t numFramesActuallyPresented;   // desde la ultima llamada
+    uint32_t numFramesToGenerateMax;       // techo del sistema
+
+Fuente: `corpus/slheaders/sl_dlss_g_v2.12.0.h`. El layout esta confirmado porque
+`numFramesToGenerateMax` (offset 52) es un campo que este proyecto YA lee bien;
+`numFramesActuallyPresented` esta en el 48, justo antes.
+
+Es API publica de Streamline: in-process, sin enganchar el swapchain, sin ETW,
+sin privilegios y sin parche de bytes. Existe en todo juego que use DLSS-G, y en
+el log de Halo ya aparece `state: slDLSSGGetState captured`.
+
+Hoy lo llamamos UNA sola vez, con una guarda `g_asked_state`, y solo para leer el
+techo. El contador nunca se leyo.
+
+Dos complicaciones, dichas antes de entusiasmarse:
+
+  - El contador se reinicia en cada llamada, asi que hay que llamarlo periodico y
+    acumular.
+  - El plugin exige que se llame desde el hilo de present. En Halo el log dice
+    "the plugin requires the present thread for this call" y salteamos la
+    llamada, porque el hilo del token no es el que configuro DLSS-G. Hay que
+    resolver desde donde llamarlo.
+
+### B. La vtable del swapchain se toma con un swapchain propio
+
+La tecnica documentada para enganchar sin depender de la factory del juego es
+crear un dispositivo y un swapchain PROPIOS, descartables, leer su vtable y
+enganchar la ranura. La vtable la comparten todas las instancias creadas por la
+misma implementacion de DXGI, asi que no importa quien envolvio la factory del
+juego. Es lo que hace kiero, y las guias lo llaman el metodo universal
+justamente porque no depende de encontrar el puntero del juego.
+
+Fuentes: kiero (Rebzzel) y las guias del metodo de dispositivo descartable en
+guidedhacking.
+
+Contra lo que hacemos hoy: enganchamos `CreateSwapChainForHwnd` en la factory, y
+si la factory del juego esta envuelta por otro overlay podemos no verla nunca.
+Eso encaja con Halo, donde no hay una sola linea de swapchain en el log.
+
 ## 6. Que camino sirve
 
-**Sirve, y es el mas barato: arreglar la obtencion del swapchain (opcion d).**
-Ya estamos dentro del proceso. No hacen falta ETW ni privilegios para contar
-presentaciones: hace falta el swapchain que el juego usa de verdad. Es un
-problema acotado y con una prueba clara, que `dp > 0` en Halo.
+**Primero A**, el contador de Streamline. No necesita swapchain en absoluto, es
+API publica, y el campo de al lado ya lo leemos bien. Si anda, resuelve el conteo
+de presentaciones en cualquier juego con DLSS-G sin tocar el sistema de hooks.
+
+**Segundo B**, tomar la vtable con un swapchain propio. Resuelve el caso de Halo
+sin pelear con quien envolvio la factory, y de paso da el Present para el HUD.
+
+**Arreglar la intercepcion actual de la factory queda TERCERO**, no primero como
+decia la primera version de este documento. Es el camino que ya sabemos que falla
+en presencia de otros overlays.
 
 **Sirve para el multiplicador, si se resuelve lo anterior.** Presentadas sobre
 base es medicion propia y no depende de que NVIDIA exponga nada.
