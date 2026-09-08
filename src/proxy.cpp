@@ -2139,6 +2139,29 @@ static LONG loop_bound_for(LONG n) {
 }
 
 static void set_count_now(LONG n) {
+    // El byte parcheado es el limite del bucle; la cuenta de la API dimensiona
+    // la reserva. Si el byte supera a lo que la API pidio, el bucle corre mas
+    // iteraciones que la memoria que hay, y eso es un acceso invalido.
+    //
+    // El freno limitaba SOLO la escritura de la API y dejaba el byte suelto.
+    // En Halo eso quedo a la vista: "freno: la cuenta se limita a la del juego
+    // 1" y en la misma corrida "slowalt: API count now 3", con el byte
+    // siguiendo al 3. Crasheo a los 36 s, otra vez dentro de 190_E658703.dll.
+    //
+    // Las dos mitades tienen que frenarse juntas o ninguna.
+    if (!g_wic_ok) {
+        const LONG suyo = g_last_seen_generated;
+        const LONG tope = (suyo >= 1 && suyo <= 5) ? suyo : 0;
+        if (n > tope) {
+            static LONG dicho = -1;
+            if (dicho != tope) {
+                dicho = tope;
+                log_num("freno: el byte de la cuenta tambien se limita a ",
+                        (unsigned)tope);
+            }
+            n = tope;
+        }
+    }
     if (g_wic_mode) {
         // n is generated frames, which is what the field holds: the multiplier
         // is n + 1.
