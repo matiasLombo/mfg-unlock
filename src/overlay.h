@@ -52,6 +52,10 @@ static volatile bool g_ov_visible = false;
 struct Glyph { char c; unsigned char col[5]; };
 static const Glyph kFont[] = {
     {' ',{0x00,0x00,0x00,0x00,0x00}}, {'0',{0x3E,0x51,0x49,0x45,0x3E}},
+    // Flechas para el HUD: en DYNAMIC dicen si el multiplicador subio o
+    // bajo desde el refresco anterior. Columnas de izquierda a derecha,
+    // bit 0 arriba, igual que el resto de la fuente.
+    {'^',{0x10,0x08,0x04,0x08,0x10}}, {'v',{0x04,0x08,0x10,0x08,0x04}},
     {'/',{0x20,0x10,0x08,0x04,0x02}}, {'>',{0x00,0x41,0x22,0x14,0x08}},
     {'1',{0x00,0x42,0x7F,0x40,0x00}}, {'2',{0x42,0x61,0x51,0x49,0x46}},
     {'3',{0x21,0x41,0x45,0x4B,0x31}}, {'4',{0x18,0x14,0x12,0x7F,0x10}},
@@ -104,7 +108,9 @@ static const int kHotHud = 102;          // el casillero del pie
 // El HUD es una segunda ventana, no un dibujo dentro del swapchain del juego.
 // Misma receta que el panel, que es la unica que en este proyecto nunca rompio
 // el render: capa propia, sin foco, transparente a los clicks.
-static const int kHudW = 340, kHudH = 30;
+// 460 y no 340: en DYNAMIC la linea lleva el multiplicador vivo, la flecha y
+// el rango recorrido, y con 340 se montaba sobre la latencia de la derecha.
+static const int kHudW = 460, kHudH = 30;
 static unsigned *g_hud_px = nullptr;
 static HWND g_hud_hwnd = nullptr;
 static HDC  g_hud_dc = nullptr;
@@ -205,7 +211,9 @@ static int  g_ov_editlen = 0;
 // la fila nueva, y eso le habria cambiado el significado a cada comparacion
 // del proxy sin un solo error de compilacion.
 static const int kSelDynamic = 7;                  // la fila CUSTOM
-static const int kSelDynFuture = 8;                // DYNAMIC, grisada
+static const int kSelDynFuture = 8;                // DYNAMIC, seleccionable
+// Decia "grisada" y dejo de ser cierto cuando DYNAMIC paso a ser nuestro:
+// en ov_build_panel su fila es la unica con avail fijo en true.
 static const int kSelMaxFixed = 6;                 // la ultima de 2X..6X
 static const char *kRowName[kPanRows] = { "AUTO", "OFF", "2X", "3X", "4X",
                                           "5X", "6X", "CUSTOM", "DYNAMIC" };
@@ -459,9 +467,11 @@ static int ov_edit_commit(void) {
     }
     while (fdig < 2) { frac *= 10; ++fdig; }   // "2.5" es 2.50, no 2.05
     int v = whole * 100 + frac;
-    // CUSTOM va de 2.00 a 6.00. El piso ya no es 1.00: AUTO se fue del panel y
-    // los fraccionarios por debajo de 2.0 todavia no estan medidos. El techo es
-    // el limite estructural del plugin, no una preferencia.
+    // CUSTOM va de 1.50 a 6.00. El piso bajo de 2.00 a 1.50 cuando los
+    // fraccionarios de abajo se midieron: 1.50x entrega 1.47 sin perder ni una
+    // presentacion, y 1.25x pierde 16, que es por que el piso es 1.50 y no 1.10.
+    // La tabla completa esta al lado de kMinCustom. El techo es el limite
+    // estructural del plugin, no una preferencia.
     if (v < kMinCustom) v = kMinCustom;
     if (v > kMaxCustom) v = kMaxCustom;
     return v;
@@ -901,13 +911,55 @@ static void hud_build(void) {
     const int sel = (int)g_force_sel;
     const char *nm = (sel >= 0 && sel < kPanRows) ? kRowName[sel] : "?";
     for (const char *q = nm; *q != 0 && k < 40; ++q) line[k++] = *q;
-    if (sel == kSelDynamic) {
+    // El multiplicador vivo. En CUSTOM es el que se tecleo y no se mueve; en
+    // DYNAMIC lo escribe el controlador cuadro a cuadro, y ahi es el dato que
+    // faltaba: la fila decia "DYNAMIC" y nunca en cuanto estaba.
+    if (sel == kSelDynamic || sel == kSelDynFuture) {
         const int v = (int)g_dyn_target;
         line[k++] = 32;
         line[k++] = (char)(48 + (v / 100) % 10);
         line[k++] = 46;
         line[k++] = (char)(48 + (v / 10) % 10);
         line[k++] = (char)(48 + v % 10);
+
+        // Y los cambios, que en DYNAMIC son la mitad de la informacion: un
+        // numero solo no dice si esta quieto en 2.47 o rebotando entre 2.1 y
+        // 2.8. La flecha es contra el refresco anterior y el rango es lo
+        // recorrido en los ultimos seis refrescos, o sea unos tres segundos.
+        //
+        // Se muestra solo en DYNAMIC: en CUSTOM el valor no se mueve nunca y
+        // una flecha ahi seria ruido que finge actividad.
+        if (sel == kSelDynFuture) {
+            static int prev = 0;
+            static int ring[6] = { 0, 0, 0, 0, 0, 0 };
+            static int rpos = 0, rn = 0;
+            ring[rpos] = v;
+            rpos = (rpos + 1) % 6;
+            if (rn < 6) ++rn;
+            int lo = v, hi = v;
+            for (int i = 0; i < rn; ++i) {
+                if (ring[i] < lo) lo = ring[i];
+                if (ring[i] > hi) hi = ring[i];
+            }
+            // Banda muerta de 0.02 para la flecha: sin ella parpadea con el
+            // ruido de un digito y deja de leerse como direccion.
+            if (v > prev + 2)      line[k++] = '^';
+            else if (v < prev - 2) line[k++] = 'v';
+            else                   line[k++] = 32;
+            prev = v;
+            // El rango solo si hay algo que contar. Cuando esta clavado,
+            // "2.47 2.47-2.47" es peor que nada.
+            if (hi - lo > 2 && k < 46) {
+                line[k++] = 32;
+                line[k++] = (char)(48 + (lo / 100) % 10);
+                line[k++] = 46;
+                line[k++] = (char)(48 + (lo / 10) % 10);
+                line[k++] = 45;                                  // '-'
+                line[k++] = (char)(48 + (hi / 100) % 10);
+                line[k++] = 46;
+                line[k++] = (char)(48 + (hi / 10) % 10);
+            }
+        }
     }
     line[k] = 0;
     ov_text(line, 10.0f, 11.0f, 1.7f, 0.72f, 0.96f, 0.74f);
