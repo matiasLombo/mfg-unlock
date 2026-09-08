@@ -2756,7 +2756,45 @@ static void fractional_tick(void) {
         // Once per frame, because the caller is now gated on the frame index.
         // The edge check that used to stand here was undoing the burst, and
         // against a gated caller it would drop any frame whose dt repeated.
-        sa_clock += g_last_dt;
+        //
+        // AHORA MIDE TIEMPO, NO LLAMADAS.
+        //
+        // Sumaba g_last_dt una vez por llamada que pasaba el gate, y eso es un
+        // conteo de llamadas disfrazado de reloj. Dos formas de romperse, las
+        // dos hacia el mismo lado:
+        //
+        //   - g_last_dt es el ULTIMO intervalo observado, no el transcurrido
+        //     desde la vuelta anterior. Si el juego hace mas de una llamada por
+        //     frame -- Cyberpunk hace 2.6 despues del gate, medido: 288504
+        //     llamadas contra 110847 que pasan -- el reloj avanza 2.6 veces mas
+        //     rapido y los bloques salen 2.6 veces mas cortos.
+        //   - Las llamadas con dt fuera de [2ms, 200ms] NO actualizan g_last_dt
+        //     pero igual suman el valor viejo. Una rafaga de cinco llamadas en
+        //     un milisegundo suma cinco intervalos completos.
+        //
+        // Consecuencia medida en Cyberpunk con CUSTOM 2.50: la cuenta de la API
+        // cambiaba cada 140 ms de mediana y con minimos de 0 ms, cuando el ciclo
+        // pide un cambio cada 384 ms. Cambiar la cuenta asi de rapido es la
+        // condicion de crash ya documentada -- treinta frames renderizados es lo
+        // que corre limpio -- y el juego se caia. Con 2X entero no se cae porque
+        // no alterna la cuenta.
+        //
+        // El reloj de pared no depende de nada de eso: se llame una vez o cien
+        // por frame, la suma de los intervalos reales es el tiempo real. Y el
+        // horario esta expresado en segundos, asi que la fuente correcta son
+        // segundos.
+        {
+            static LONGLONG prev_qpc = 0;
+            LARGE_INTEGER ahora;
+            QueryPerformanceCounter(&ahora);
+            if (prev_qpc != 0 && g_qpc_freq > 0) {
+                const double d = (double)(ahora.QuadPart - prev_qpc) / (double)g_qpc_freq;
+                // Un salto largo es una pantalla de carga o un menu, no tiempo
+                // de juego: se ignora en vez de saltear medio ciclo de golpe.
+                if (d > 0.0 && d < 0.5) sa_clock += d;
+            }
+            prev_qpc = ahora.QuadPart;
+        }
         // Read from mfg-blockms.txt when present, so the block length can be
         // swept without a rebuild. The unit is milliseconds of the cadence
         // clock, which advances once per frame-token call -- about seven times
@@ -2915,7 +2953,11 @@ static void fractional_tick(void) {
         static double sa_bias = 0.0;
         static double cyc_gen = 0.0;
         static int cyc_frames = 0;
-        if (sa_clock < g_last_dt && g_lo_time + g_hi_time > 0.5) {
+        // El umbral era g_last_dt porque el reloj avanzaba de a un dt por
+        // vuelta. Ahora avanza tiempo real, asi que el paso tipico es mucho
+        // menor: se usa un valor fijo y chico, holgado contra el ciclo de
+        // 0.768 s y suficiente para detectar la vuelta.
+        if (sa_clock < 0.05 && g_lo_time + g_hi_time > 0.5) {
             // Weighted by time, for the same reason the blocks are: presented
             // frames per second over rendered frames per second is what the
             // player experiences.
