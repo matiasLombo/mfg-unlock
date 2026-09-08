@@ -323,6 +323,11 @@ static PFN_slGetFeatureFunction g_orig_getfeaturefn = nullptr;
 typedef unsigned (*PFN_slInit)(void *, unsigned long long);
 static PFN_slInit g_orig_slinit = nullptr;
 static bool g_ota = false;              // mfg-ota.txt
+// Probado en el sample del banco, que como Halo no pedia OTA: banderas 133 ->
+// 205, de un sl.dlss_g mapeado se pasa a tres -- uno de ellos el 134656 de
+// ProgramData, donde el parche del contador SI engancha -- y el fraccionario
+// sigue entregando lo pedido: 3.50 pedido, 3.50x entregado (p10 3.44, p90
+// 3.57) contra 3.51x sin OTA. Con tres copias mapeadas no se pierde nada.
 static const int kPrefFlags = 88;
 
 // Engancha SOLO slInit, para poder correrlo temprano.
