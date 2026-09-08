@@ -2098,6 +2098,9 @@ static int  g_jitter_pct = 0;         // mfg-jitter.txt, porcentaje
 static double g_present_block_us = 0.0;   // blocked inside Present, per window
 static double g_token_block_us = 0.0;     // blocked inside slGetNewFrameToken
 static volatile LONG g_rt_present_count = 0;
+// Forma del salto de indice entre llamadas consecutivas al token, para saber si
+// el gate se rompe por intercalado de hilos.
+static volatile LONG g_paso_igual = 0, g_paso_uno = 0, g_paso_salta = 0, g_paso_atras = 0;
 // The swap chain, kept so the runtime's own present counter can be sampled
 // from anywhere -- specifically from the frame-token hook, once per rendered
 // frame, off the present path entirely.
@@ -2282,6 +2285,10 @@ static void note_rendered_frame(void) {
                                     (unsigned)g_smfl_calls);
                         log_num("  hook calls total ", (unsigned)g_token_calls);
                         log_num("  frames past the gate ", (unsigned)g_frames_gated);
+                        log_num("    salto igual ", (unsigned)g_paso_igual);
+                        log_num("    salto +1 ", (unsigned)g_paso_uno);
+                        log_num("    salto adelante ", (unsigned)g_paso_salta);
+                        log_num("    salto atras ", (unsigned)g_paso_atras);
                         {
                             static const char *kG[6] = {
                                 "    gap <0.5ms ", "    gap 0.5-2ms ",
@@ -3544,12 +3551,50 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     // the same index and hand back the same token. Comparing that is exact and
     // needs no threshold.
     {
-        static unsigned last_idx = 0;
+        // Se acepta un frame cuando su indice SUPERA al maximo aceptado, no
+        // cuando difiere del de la llamada anterior.
+        //
+        // Con una sola fuente las dos reglas dan lo mismo: 1,1,2,2,3 acepta
+        // 1,2,3. Con dos fuentes intercaladas no. Cyberpunk mapea dos copias de
+        // sl.dlss_g y cada una lleva su propio indice, asi que comparar con la
+        // llamada anterior daba distinto casi siempre. Medido por ventana de
+        // juego: 45 pasaban el gate -- 30 con salto +1 y 15 con salto ATRAS --
+        // contra una base real de Reflex de 41/s. La cuenta salia 128.9/s, 3.1
+        // veces la real, y eso rompio el multiplicador contado, el aprendizaje
+        // del sesgo de DYNAMIC y probablemente la dispersion.
+        //
+        // La prueba de que quedo bien es que "salto atras" caiga a cero en juego.
+        static unsigned max_idx = 0;
         static void *last_tok = nullptr;
         static bool have = false;
-        const bool same = have && (idx != nullptr ? (*idx == last_idx)
-                                                  : (tok == last_tok));
-        if (idx != nullptr) last_idx = *idx;
+        static unsigned last_idx = 0;   // solo diagnostico
+        bool same;
+        if (idx != nullptr) {
+            const unsigned v = *idx;
+            // Un indice muy por debajo del maximo no es una revisita sino un
+            // reinicio -- swapchain nuevo, o vuelta de cero -- y sin esto el
+            // gate quedaria trabado para siempre.
+            if (have && v + 1000u < max_idx) { have = false; }
+            same = have && v <= max_idx;
+            if (!same) max_idx = v;
+        } else {
+            same = have && tok == last_tok;
+        }
+        // Diagnostico: last_idx ya no decide nada, solo mide la forma del
+        // salto entre llamadas consecutivas para poder ver el intercalado.
+        // Antes el gate suponia que las llamadas de un frame llegan
+        // seguidas. Cyberpunk emite desde siete hilos a la vez, y si dos frames
+        // se intercalan la comparacion contra la llamada ANTERIOR da distinto
+        // siempre y pasan todas. Ahi el gate contaria 113/s con una base real
+        // de 39. Se cuenta la forma del salto para saber si es eso.
+        if (idx != nullptr && have) {
+            const unsigned d = *idx - last_idx;      // sin signo, a proposito
+            if (*idx == last_idx)      ++g_paso_igual;
+            else if (d == 1u)          ++g_paso_uno;
+            else if (d < 0x80000000u)  ++g_paso_salta;
+            else                       ++g_paso_atras;
+        }
+        last_idx = (idx != nullptr) ? *idx : last_idx;
         last_tok = tok;
         have = true;
         ++g_token_calls;
