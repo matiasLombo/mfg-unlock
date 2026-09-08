@@ -2254,8 +2254,23 @@ static void note_rendered_frame(void) {
                         // razon: la base y lo presentado ya estan medidos con
                         // el instrumento honesto, y una segunda cuenta propia
                         // seria un numero mas que puede discrepar.
+                        // La MISMA base con la que planifica dyn_apply, no
+                        // g_rendered_fps. El sesgo se aprende comparando lo
+                        // pedido contra lo entregado, y lo entregado sale de
+                        // dividir por esta base: si las dos funciones dividen
+                        // por numeros distintos, el sesgo corrige una
+                        // discrepancia que no existe.
+                        //
+                        // En Cyberpunk g_rendered_fps da 113 donde la base real
+                        // es 39, porque el gate de frames dispara unas tres
+                        // veces por frame renderizado. Con eso, dyn_control veia
+                        // 216/113 = 1.9 entregado contra 5.2 pedido, concluia
+                        // que faltaba muchisimo y empujaba el sesgo a su tope de
+                        // 1.25. Medido: ratio crudo 4.15, sesgo 1.25, pedido
+                        // 5.19, presentadas 216 contra un objetivo de 165.
                         if (win_elapsed > 0.0)
-                            dyn_control(g_rendered_fps, dp / win_elapsed);
+                            dyn_control(g_ctrl_fps > 0.0 ? g_ctrl_fps : g_base_fps,
+                                        dp / win_elapsed);
                         // A1 necesita saber si la interpolacion arranco. La
                         // base honesta es la de Reflex; si lo presentado la
                         // supera con holgura, esta generando.
@@ -2581,11 +2596,22 @@ static void dyn_apply(double base_fps) {
     // sobrepaso se entrega de menos, el promedio vuelve al objetivo.
     static double debt = 0.0;          // presentaciones adeudadas
     static LONG last_pc = 0;
-    static ULONGLONG last_t = 0;
-    const ULONGLONG now_ms = GetTickCount64();
+    static LONGLONG last_qpc = 0;
+    // QPC y no GetTickCount64. Esta funcion corre por frame -- cada 4.7 ms a
+    // 212 fps -- y el tick tiene grano de ~15 ms. Como last_pc se actualizaba
+    // en CADA llamada pero now_ms solo avanzaba cuando saltaba el tick, el
+    // delta de presentaciones cubria 4.7 ms y el de tiempo 15 ms: dos
+    // intervalos distintos. La deuda ganaba ~1.5 presentaciones inventadas por
+    // tick, sin relacion con el rendimiento, hasta saturar en su tope.
+    //
+    // Medido en Cyberpunk: deuda +24 de mediana llegando a 54.45, objetivo
+    // efectivo 213 contra un objetivo de 165, ratio crudo 6.2 donde tocaba 4.2.
+    // Es el mismo defecto que 275cf16 arreglo en el reloj de bloques.
+    LARGE_INTEGER qnow; QueryPerformanceCounter(&qnow);
+    const LONGLONG now_q = qnow.QuadPart;
     const LONG pc = g_rt_present_count;
-    if (last_t != 0 && now_ms > last_t && pc >= last_pc) {
-        const double secs = (double)(now_ms - last_t) / 1000.0;
+    if (last_qpc != 0 && now_q > last_qpc && g_qpc_freq > 0 && pc >= last_pc) {
+        const double secs = (double)(now_q - last_qpc) / (double)g_qpc_freq;
         if (secs < 0.5) {              // un salto largo es un cambio de escena
             debt += target * secs - (double)(pc - last_pc);
             // Acotada a un tercio de segundo de objetivo: sin esto se enrolla
@@ -2598,7 +2624,7 @@ static void dyn_apply(double base_fps) {
         }
     }
     last_pc = pc;
-    last_t = now_ms;
+    last_qpc = now_q;
     // La deuda se paga en medio segundo. Se probo en 0.8 -- factor 1.2 -- para
     // achicar el subdisparo que quedaba, y salio peor: 79% contra 87%, con las
     // ventanas altas de vuelta en 150-179. Pagar mas lento deja que el
@@ -2661,6 +2687,15 @@ static void dyn_apply(double base_fps) {
     g_opt_pending = 1;
     log_num("dynamic: ratio now x100 ", (unsigned)next);
     log_num("  from base ", (unsigned)(base_fps + 0.5));
+    // Por que pide lo que pide. En Cyberpunk pidio 5.97 con base 40 y objetivo
+    // 165, cuando el ratio crudo es 4.13: el exceso sale de aca o del sesgo, y
+    // razonarlo desde el codigo fallo dos veces seguidas.
+    log_num("  deuda x100 (mas 32768 si es negativa) ",
+            (unsigned)(debt < 0.0 ? 32768u + (unsigned)(-debt * 100.0 + 0.5)
+                                  : (unsigned)(debt * 100.0 + 0.5)));
+    log_num("  objetivo efectivo ", (unsigned)(target_eff + 0.5));
+    log_num("  ratio crudo x100 ", (unsigned)(raw * 100.0 + 0.5));
+    log_num("  sesgo x100 ", (unsigned)(g_dyn_bias[dyn_bucket(raw)] * 100.0 + 0.5));
 }
 
 static void dynamic_tick(void) {
