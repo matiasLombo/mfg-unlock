@@ -79,6 +79,7 @@ static bool g_peralt = false;         // mfg-peralt.txt: diffuse per frame
 // bajar el piso del panel, que es justo lo que hay que decidir con esos
 // numeros. Sin el archivo, el comportamiento es identico al de antes.
 static bool g_sub2 = false;           // mfg-sub2.txt
+static bool g_rfxdump = false;        // mfg-rfxdump.txt: auditar el layout del informe
 // mfg-optsv3.txt: SOLO para el banco. GTA V llena DLSSGOptions con
 // structVersion 3 y el sample con 5, y eso se leyo de los logs de los dos.
 // En v3 no existe numFramesToGenerate, asi que la cuenta que force_into
@@ -455,6 +456,8 @@ static double g_rfx_drv = 0.0;     // sim start -> fin de driver
 static long long g_qpc_freq = 1;   // set in DllMain
 static double g_rfx_ft = 0.0;          // gpuFrameTimeUs, para validar contra la base
 static double g_ctrl_fps = 0.0;       // frames/tiempo, insesgada, para el controlador
+static bool g_dyn_sat_hi = false;      // el ratio pedido quedo en el tope
+static bool g_dyn_sat_lo = false;      // ...o en el piso
 static double g_rfx_base = 0.0;        // base en fps, del contador de frames de Reflex
 static ULONGLONG g_ctrl_rfx_ms = 0;    // ultima vez que Reflex alimento el estimador
 
@@ -788,6 +791,75 @@ static const int kReflexBack = 6;
 static const int kReflexEvery = 4;
 
 // atras=0 es el informe 63, el mas reciente; atras=1 el 62, y asi.
+// Audita el layout del informe de Reflex sin compararlo contra nada: si los
+// offsets son los correctos, tres cosas tienen que cumplirse solas.
+//
+//   1. Los 64 informes son un anillo por frame, asi que sus ids tienen que ser
+//      consecutivos y descendentes desde el 63.
+//   2. gpuActiveRenderTimeUs tiene que coincidir con gpuRenderEnd-gpuRenderStart.
+//      Son el mismo dato por dos caminos; si no coinciden, uno de los dos no es
+//      el campo que creemos.
+//   3. Las marcas de tiempo de un frame van en orden: sim <= renderSubmit <=
+//      present <= driver.
+//
+// El layout se derivo contra Streamline 2.13. Cyberpunk corre un interposer
+// 2.7.1 y ahi el id avanza 430 veces por segundo con 222 presentaciones por
+// segundo -- una base no puede ser el doble de lo presentado. Esto dice si el
+// problema es el layout o es otra cosa.
+static void reflex_audit(const void *state) {
+    if (!g_rfxdump) return;
+    static int veces = 0;
+    if (veces >= 3) return;
+    ++veces;
+    log_line("reflex: auditoria del layout");
+    // 1. ids de los 64 informes, en orden de anillo
+    unsigned long long prev = 0;
+    int consec = 0, saltos = 0, ceros = 0;
+    for (int i = 63; i >= 0; --i) {
+        const unsigned char *q = (const unsigned char *)state + 72 + 152 * i;
+        const unsigned long long id = *(const unsigned long long *)(q + 0);
+        if (id == 0) { ++ceros; continue; }
+        if (prev != 0) { if (prev == id + 1) ++consec; else ++saltos; }
+        prev = id;
+    }
+    log_num("  ids consecutivos ", (unsigned)consec);
+    log_num("  ids con salto ", (unsigned)saltos);
+    log_num("  ids en cero ", (unsigned)ceros);
+    // 2 y 3, sobre el informe mas nuevo
+    const unsigned char *q = (const unsigned char *)state + 72 + 152 * 63;
+    const unsigned long long sim0 = *(const unsigned long long *)(q + 16);
+    const unsigned long long sim1 = *(const unsigned long long *)(q + 24);
+    const unsigned long long sub0 = *(const unsigned long long *)(q + 32);
+    const unsigned long long pre1 = *(const unsigned long long *)(q + 56);
+    const unsigned long long drv1 = *(const unsigned long long *)(q + 72);
+    const unsigned long long gr0 = *(const unsigned long long *)(q + 96);
+    const unsigned long long gr1 = *(const unsigned long long *)(q + 104);
+    const unsigned act = *(const unsigned *)(q + 112);
+    const unsigned ft = *(const unsigned *)(q + 116);
+    log_num("  id del mas nuevo ", (unsigned)*(const unsigned long long *)(q + 0));
+    log_num("  gpuActiveRenderTimeUs ", act);
+    log_num("  gpuRenderEnd-Start us ", (unsigned)(gr1 > gr0 ? gr1 - gr0 : 0));
+    log_num("  gpuFrameTimeUs ", ft);
+    log_line(sim0 <= sim1 && sim1 <= sub0 && sub0 <= pre1 && pre1 <= drv1
+             ? "  orden de marcas: OK" : "  orden de marcas: FUERA DE ORDEN");
+    // Volcado crudo del cuerpo, por si hay que buscar los campos a mano.
+    for (int off = 0; off < 128; off += 16) {
+        char linea[80];
+        int k = 0;
+        linea[k++] = ' '; linea[k++] = ' ';
+        const char *hex = "0123456789ABCDEF";
+        linea[k++] = hex[(off >> 4) & 15]; linea[k++] = hex[off & 15];
+        linea[k++] = ':';
+        for (int b = 0; b < 16; ++b) {
+            linea[k++] = ' ';
+            linea[k++] = hex[(q[off + b] >> 4) & 15];
+            linea[k++] = hex[q[off + b] & 15];
+        }
+        linea[k] = 0;
+        log_line(linea);
+    }
+}
+
 static void reflex_take(const void *state, int atras) {
     const unsigned char *q = (const unsigned char *)state + 72 + 152 * (63 - atras);
     const unsigned long long id  = *(const unsigned long long *)(q + 0);
@@ -901,9 +973,14 @@ static unsigned hk_slReflexGetState(void *state) {
     // 72 + 152*i. El [63] es el mas reciente: 72 + 152*63 = 9648.
     static int calls = 0;
     ++calls;
+    // La auditoria va sobre el buffer del JUEGO, no sobre el nuestro: en
+    // Cyberpunk la consulta propia devuelve los 64 informes en cero, y los
+    // unicos datos reales llegan por aca.
+    if (r == 0 && state != nullptr) reflex_audit(state);
     if (r == 0 && state != nullptr) reflex_take(state, 0);
     if (r == 0 && state != nullptr && !g_reflex_dumped && calls > 300) {
         g_reflex_dumped = true;
+        log_num("reflex: llamadas del juego en la corrida ", (unsigned)calls);
         log_num("reflex: latencyReportAvailable ",
                 (unsigned)((const unsigned char *)state)[33]);
         const unsigned char *p = (const unsigned char *)state + 9648;
@@ -2494,10 +2571,32 @@ static void dyn_apply(double base_fps) {
     if (last_t != 0 && now_ms > last_t && pc >= last_pc) {
         const double secs = (double)(now_ms - last_t) / 1000.0;
         if (secs < 0.5) {              // un salto largo es un cambio de escena
-            debt += target * secs - (double)(pc - last_pc);
-            // Acotada a un tercio de segundo de objetivo: sin esto se enrolla
-            // durante un apagon y despues descarga todo junto.
-            const double lim = target * 0.33;
+            // Anti-windup: no se acumula deuda en la direccion que ya esta
+            // saturada. Si el ratio pedido quedo pegado al tope, mas deuda no
+            // pide mas -- solo hace falta descargarla despues, y esa descarga
+            // es la que manda al controlador al otro tope.
+            //
+            // Sin esto, en Cyberpunk DYNAMIC pasaba el 55% del tiempo en 6.00x
+            // y el 44% en 2.00x, con el 1% repartido en todo lo demas. Bang-bang
+            // puro. En el banco no se veia porque ahi el sistema entrega lo que
+            // se le pide, el error queda chico y la deuda nunca se acerca a su
+            // limite.
+            const double inc = target * secs - (double)(pc - last_pc);
+            if (!((inc > 0.0 && g_dyn_sat_hi) || (inc < 0.0 && g_dyn_sat_lo)))
+                debt += inc;
+            // La autoridad del termino integral, acotada de verdad.
+            //
+            // Estaba en un tercio del objetivo y entra multiplicada por dos, o
+            // sea que por si sola movia el objetivo efectivo entre 0.34x y
+            // 1.66x -- un rango de 5 a 1. Con una base que en juego va de 31 a
+            // 65 fps, ese termino solo alcanza para tocar los dos topes: 274/31
+            // da 8.8 y 56/65 da 0.86. Por eso oscilaba de extremo a extremo.
+            //
+            // 0.08 deja el objetivo efectivo entre 0.84x y 1.16x. Sigue siendo
+            // mucho mas de lo que necesita el sesgo que este termino corrige --
+            // el +2% que quedaba sin explicar en el banco -- y ya no alcanza
+            // para saturar por si mismo.
+            const double lim = target * 0.08;
             if (debt > lim) debt = lim;
             if (debt < -lim) debt = -lim;
         } else {
@@ -2533,6 +2632,9 @@ static void dyn_apply(double base_fps) {
         want = 6.0;
     }
     if (want < 2.0) want = 2.0;
+    // Para el anti-windup de la proxima vuelta.
+    g_dyn_sat_hi = want >= 6.0;
+    g_dyn_sat_lo = want <= 2.0;
     // Se acumula todos los frames, se cambie o no el ratio: la ganancia necesita
     // el promedio de lo pedido durante la ventana, no el ultimo valor.
     g_dyn_asked_sum += (double)g_dyn_target / 100.0;
@@ -5777,6 +5879,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             g_pace_follow = flag_file(L"mfg-pacefollow.txt");
             g_frac_enabled = !flag_file(L"mfg-nofrac.txt");
             g_sub2 = flag_file(L"mfg-sub2.txt");
+            g_rfxdump = flag_file(L"mfg-rfxdump.txt");
             g_slowalt = !flag_file(L"mfg-noslowalt.txt");
             g_quiet = flag_file(L"mfg-quiet.txt");
             g_nullalt = flag_file(L"mfg-nullalt.txt");
