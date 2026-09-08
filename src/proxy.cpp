@@ -2698,60 +2698,6 @@ static void fractional_tick(void) {
     double per_frame = (double)g_dyn_target / 100.0 - 1.0;
     if (per_frame < 0.0) per_frame = 0.0;
     if (per_frame > 5.0) per_frame = 5.0;
-    // El techo lo pone el juego, no nosotros.
-    //
-    // Cuando la cuenta VARIA tiene que quedar estrictamente por debajo de la que
-    // el juego declaro. Si la toca o la supera, el plugin no enciende la
-    // interpolacion: no genera de menos, no genera nada, y sl.log no registra un
-    // solo cambio de estado. Con la cuenta FIJA no pasa -- ahi cualquier valor
-    // anda.
-    //
-    // Medido en la escena determinista de Cyberpunk (Cyberpunk2077.exe
-    // -benchmark), midiendo solo ventanas de juego:
-    //
-    //   pedido  cuentas  el juego  max nuestra vs juego  entregado
-    //   2.50     1<->2    x4 (3)      2 < 3               2.50   OK
-    //   2.90     1<->2    x4 (3)      2 < 3               2.94   OK
-    //   3.10     2<->3    x4 (3)      3 = 3               1.17   NO GENERA
-    //   3.50     2<->3    x4 (3)      3 = 3               0.98   NO GENERA
-    //   4.50     3<->4    x4 (3)      4 > 3               1.01   NO GENERA
-    //   5.50     4<->5    x4 (3)      5 > 3               0.99   NO GENERA
-    //   2.50     1<->2    x2 (1)      2 > 1               1.17   NO GENERA
-    //   5.00     4 FIJA   x4 (3)      4 > 3               4.86   OK
-    //
-    // La anteultima fila es la que cierra el caso: se cambio SOLO el ajuste del
-    // juego, de x4 a x2, y el mismo 2.50 paso de andar a no andar. No es el
-    // ratio, ni el ritmo de cambio (con bloques 20x mas largos falla igual), ni
-    // las dos copias del plugin (el banco con dos copias entrega 3.51), ni el
-    // valor absoluto de la cuenta.
-    //
-    // Levantar el techo no se puede: la unica palanca es el ajuste del propio
-    // juego, y Cyberpunk ya esta en su maximo. Mandar una cuenta fija y variar
-    // solo el byte tampoco -- eso ya se midio y rompe, porque un bound menor que
-    // (cuenta + 1) detiene la presentacion: 2.25x entrego 1.56 asi.
-    //
-    // El sample del banco NO necesita esto: declara cuenta 3 y 4.50 entrega
-    // 4.51. Por eso el banco nunca lo vio. Se acota igual, porque lo que se
-    // envia son juegos y el unico juego medido lo necesita.
-    {
-        const LONG suyo = g_last_seen_generated;
-        if (suyo >= 1 && suyo <= 5) {
-            // El ciclo alterna lo y lo+1, asi que el maximo es lo+1 y tiene que
-            // ser < suyo. Es decir per_frame < suyo - 1.
-            const double techo = (double)suyo - 1.0 - 0.01;
-            if (per_frame > techo) {
-                static LONG dicho = -1;
-                if (dicho != suyo) {
-                    dicho = suyo;
-                    log_num("techo del juego: cuenta declarada ", (unsigned)suyo);
-                    log_num("  el fraccionario no pasa de x100 ",
-                            (unsigned)(unsigned int)((techo + 1.0) * 100.0));
-                }
-                if (techo < 0.0) return;      // el juego no deja fraccionario
-                per_frame = techo;
-            }
-        }
-    }
 
     // The shape of a whole period, decided once, rather than a value decided
     // per frame and then held back.
