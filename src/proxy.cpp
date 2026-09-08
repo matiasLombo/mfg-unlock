@@ -2689,23 +2689,43 @@ static void fractional_tick(void) {
         // cuenta. Cada cambio de cuenta hace que el plugin libere y reserve del
         // orden de 750 MB, medido en GTA V.
         //
-        // MEDIDO, y los 16 ms se quedan. A 2.50x, misma escena, 47 ventanas:
+        // MEDIDO. A 2.50x, misma escena, 47 ventanas cada uno, y la
+        // distribucion es por ventana con PresentCount, nunca la media sola:
         //
-        //   bloque   vram alloc  cambios de latencia  distribucion por ventana
-        //   16 ms       297           148             46 de 47 en 2.50
-        //   125 ms      233            20             15 en 2.00 y 18 en 3.00
+        //   bloque  ciclo    vram   cambios   distribucion por ventana
+        //   16 ms   0.512 s   297     148     46 de 47 en 2.50
+        //   24 ms   0.768 s   272      98     47 de 47 en 2.50
+        //   125 ms  4.0 s     233      20     15 en 2.00 y 18 en 3.00
         //
-        // Los cambios de latencia caen 86%, pero la cadencia se rompe: el
-        // jugador pasa dos segundos a 2x y dos a 3x en vez de 2.5x estable.
-        // Un ciclo mas largo que la ventana de medicion no es un problema del
-        // instrumento -- es lo que se ve.
+        // Los 24 ms son el arreglo: un tercio menos de reconfiguraciones de
+        // latencia sin pagar nada en cadencia. La distribucion no empeora --
+        // 47 de 47 contra 46 de 47, que es la misma cosa, no una mejora.
         //
-        // Y de paso corrige la premisa: las reservas de VRAM casi no son
-        // nuestras. Bajaron 297 -> 233, y 233 es lo que mide un entero fijo que
-        // hace tres cambios de cuenta en toda la corrida. El piso es del plugin
-        // y lo nuestro agrega unas 64. Lo que si escala con nuestros cambios son
-        // las reconfiguraciones de latencia: 148, 20, 3.
-        const double kBlockSecs = g_block_ms > 0 ? (double)g_block_ms / 1000.0 : 0.016;
+        // Los 125 ms son el extremo, no el candidato: un ciclo de 4 s es ocho
+        // ventanas de medicion, y ahi si se rompe. Pero eso no es un artefacto
+        // del instrumento: un ciclo de 4 s es literalmente dos segundos a 2x y
+        // dos a 3x, y eso el jugador lo ve. El compromiso no es continuo, tiene
+        // un codo, y el codo esta arriba de 0.768 s.
+        //
+        // El techo de 24 ms no es arbitrario. El ciclo son 32 bloques, o sea
+        // 0.768 s, y la ventana de 45 frames a base 59 dura 0.763 s: el ciclo
+        // entra justo. Subir mas el bloque saca el ciclo de la ventana, que es
+        // el punto donde toda ventana lee un entero entero -- primero deja de
+        // medirse, y despues, mas arriba, deja de servir.
+        //
+        // Y de paso corrige la premisa que se venia repitiendo: las reservas de
+        // VRAM casi no son nuestras. 297 -> 272 -> 233, y 233 es lo que mide un
+        // entero fijo que hace tres cambios de cuenta en toda la corrida. El
+        // piso es del plugin y lo nuestro agrega unas 64. Lo que si escala con
+        // nuestros cambios son las reconfiguraciones de latencia: 148, 98, 20, 3.
+        //
+        // La condicion es lo >= 1, no "arriba de 2.0x", porque el mecanismo por
+        // el que se eligieron los 16 ms es que el estado bajo apague la
+        // generacion. Con lo == 0 entrar y salir cuesta una presentacion y solo
+        // los 16 ms sobreviven la transicion; con lo >= 1 la generacion nunca
+        // se apaga y esa razon no aplica. Debajo de 2.0x no se toca nada.
+        const double kBlockSecs = g_block_ms > 0 ? (double)g_block_ms / 1000.0
+                                                 : (lo >= 1 ? 0.024 : 0.016);
         // Thirty-two blocks, not eight. The split is quantised to 1/kBlocks of
         // the cycle, and below 2.0x the rate weighting pushes the useful range
         // to one end: 1.90x wants 94% of the time generating, which eight
