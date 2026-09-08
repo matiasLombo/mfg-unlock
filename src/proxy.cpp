@@ -507,7 +507,27 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
             // juego pidio no compra nada y arriesga la reserva. Se espeja.
             if (!g_wic_ok) {
                 const LONG suyo = g_last_seen_generated;
-                const LONG tope = (suyo >= 1 && suyo <= 5) ? suyo : 1;
+                if (suyo < 1 || suyo > 5) {
+                    // Nunca vimos que cuenta pide el juego -- en Halo no hay una
+                    // sola linea de "the game itself last asked for" en toda la
+                    // corrida. Sin ese dato no hay a que espejarse, asi que no se
+                    // escribe la cuenta: se deja la del juego intacta. Poner un
+                    // valor de reserva seria forzar a ciegas, que es exactamente
+                    // lo que hizo crashear a ese juego.
+                    static bool dicho_nada = false;
+                    if (!dicho_nada) {
+                        dicho_nada = true;
+                        log_line("freno: sin parche y sin saber que pide el juego, "
+                                 "no se toca la cuenta");
+                    }
+                    // El modo tambien vuelve como estaba: unas lineas mas
+                    // arriba se escribio eOn, y dejarlo puesto con una cuenta
+                    // que no elegimos seria encender la generacion por nuestra
+                    // cuenta en un plugin que no sabemos manejar.
+                    *(LONG *)(p + 32) = *savedMode;
+                    return;
+                }
+                const LONG tope = suyo;
                 if (escribir > tope) {
                     static LONG dicho = -1;
                     if (dicho != tope) {
