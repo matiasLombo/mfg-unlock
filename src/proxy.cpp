@@ -2466,6 +2466,66 @@ static void dyn_apply(double base_fps) {
     // cuesta mas de lo que la zona muerta desvia, que es algo que este proyecto
     // ya sabia y aca se volvio a comprobar.
     if (diff < 10) return;
+
+    // El techo de cadencia -- ceil(ratio - 1) -- es lo que decide la cuenta que
+    // se le pide a la API, y cambiar esa cuenta rapido es la condicion de crash
+    // ya medida: por frame y en bloques de ocho frames crashean, treinta frames
+    // entre cambios corre limpio. Un ratio que se mueve DENTRO de una banda no
+    // cuesta nada; lo que cuesta es cruzar un entero.
+    //
+    // Sin esto, en Cyberpunk el controlador escribio 763 ratios y cruzo enteros
+    // 295 veces en 71 segundos -- intervalo mediano de 32 ms y minimo de 0 --
+    // y el juego se cayo. La base que estaba persiguiendo era falsa (mediana
+    // 1789 fps con el refresco en 165), pero el controlador no tiene por que
+    // saberlo: aunque la base fuera buena, nada justifica cruzar un entero dos
+    // veces en el mismo milisegundo.
+    //
+    // Dos frenos, y hacen falta los dos:
+    //   - histeresis: hay que pasar el entero por 0.15 para que cuente, asi un
+    //     ratio que tiembla alrededor de 3.00 no alterna la cuenta;
+    //   - piso de tiempo: 500 ms entre cruces. Es reloj de pared a proposito,
+    //     no frames, porque el contador de frames es justamente el que puede
+    //     estar mintiendo -- y un freno que depende del instrumento roto no
+    //     frena nada.
+    //
+    // Cuando el freno actua no se descarta la correccion: se recorta el ratio
+    // al borde de la banda actual. El controlador sigue siguiendo el objetivo
+    // lo mejor que puede sin tocar la cuenta, que es exactamente lo que se
+    // quiere mientras la base no sea confiable.
+    {
+        static ULONGLONG last_ceil_ms = 0;
+        auto ceil_of = [](LONG x100) -> int {
+            const int gen = (x100 - 100 + 99) / 100;   // ceil(ratio - 1)
+            return gen < 0 ? 0 : gen;
+        };
+        const int cur_ceil = ceil_of(cur);
+        const int next_ceil = ceil_of(next);
+        if (next_ceil != cur_ceil) {
+            const bool muy_pronto =
+                last_ceil_ms != 0 && now_ms - last_ceil_ms < 500;
+            // Cuanto paso del entero. Subiendo, el borde es cur_ceil*100+100;
+            // bajando, el borde es la base de la banda actual.
+            const LONG borde = next_ceil > cur_ceil
+                             ? (LONG)cur_ceil * 100 + 100
+                             : (LONG)next_ceil * 100 + 100;
+            const LONG pasado = next > borde ? next - borde : borde - next;
+            if (muy_pronto || pasado < 15) {
+                // Recortar al borde de la banda, sin cruzarlo.
+                next = next_ceil > cur_ceil ? borde - 1 : borde + 1;
+                if (next > cur ? next - cur : cur - next) {
+                    static ULONGLONG dicho = 0;
+                    if (now_ms - dicho > 2000) {
+                        dicho = now_ms;
+                        log_num("dynamic: cruce de entero frenado, ratio x100 ",
+                                (unsigned)next);
+                    }
+                }
+                if ((next > cur ? next - cur : cur - next) < 10) return;
+            } else {
+                last_ceil_ms = now_ms;
+            }
+        }
+    }
     g_dyn_target = next;
     // Solo la primera bajada grande de ratio, que es el caso del sobrepaso.
     if (!g_probe_done && g_probe_left == 0 && cur - next > 80) {
