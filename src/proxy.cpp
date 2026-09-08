@@ -79,7 +79,15 @@ static bool g_peralt = false;         // mfg-peralt.txt: diffuse per frame
 // bajar el piso del panel, que es justo lo que hay que decidir con esos
 // numeros. Sin el archivo, el comportamiento es identico al de antes.
 static bool g_sub2 = false;           // mfg-sub2.txt
-static bool g_rfxdump = false;        // mfg-rfxdump.txt: auditar el layout del informe
+// mfg-twocopies.txt: SOLO para el banco. Contiene la ruta de una segunda copia
+// de sl.dlss_g; se carga a proposito para reproducir lo que hace Cyberpunk, que
+// mapea la del juego Y la del cache OTA. g_wic y g_count_imm son punteros unicos
+// y la segunda copia parcheada los pisa, asi que las escrituras por frame se van
+// a un modulo que no genera. El sample no lo hace solo: Streamline avisa
+// "eLoadDownloadedPlugins flag not passed to preferences", y esa bandera la pasa
+// la aplicacion en slInit, no un archivo de configuracion.
+static bool g_twocopies = false;      // mfg-twocopies.txt
+static volatile LONG g_twocopies_pending = 0;
 // mfg-optsv3.txt: SOLO para el banco. GTA V llena DLSSGOptions con
 // structVersion 3 y el sample con 5, y eso se leyo de los logs de los dos.
 // En v3 no existe numFramesToGenerate, asi que la cuenta que force_into
@@ -265,6 +273,10 @@ static volatile LONG g_asked_state = 0;
 typedef unsigned (*PFN_slDLSSGSetOptions)(const void *, const void *);
 typedef unsigned (*PFN_slGetFeatureFunction)(unsigned, const char *, void *&);
 static PFN_slDLSSGSetOptions g_orig_setoptions = nullptr;
+// Restauracion diferida de las opciones del juego: ver hk_slDLSSGSetOptions.
+static unsigned char *g_restore_p = nullptr;
+static LONG g_restore_cnt = 0, g_restore_mode = 0;
+static bool g_restore_pending = false;
 static PFN_slGetFeatureFunction g_orig_getfeaturefn = nullptr;
 
 // Enough of the last call to make it again ourselves. The header says
@@ -456,8 +468,6 @@ static double g_rfx_drv = 0.0;     // sim start -> fin de driver
 static long long g_qpc_freq = 1;   // set in DllMain
 static double g_rfx_ft = 0.0;          // gpuFrameTimeUs, para validar contra la base
 static double g_ctrl_fps = 0.0;       // frames/tiempo, insesgada, para el controlador
-static bool g_dyn_sat_hi = false;      // el ratio pedido quedo en el tope
-static bool g_dyn_sat_lo = false;      // ...o en el piso
 static double g_rfx_base = 0.0;        // base en fps, del contador de frames de Reflex
 static ULONGLONG g_ctrl_rfx_ms = 0;    // ultima vez que Reflex alimento el estimador
 
@@ -791,75 +801,6 @@ static const int kReflexBack = 6;
 static const int kReflexEvery = 4;
 
 // atras=0 es el informe 63, el mas reciente; atras=1 el 62, y asi.
-// Audita el layout del informe de Reflex sin compararlo contra nada: si los
-// offsets son los correctos, tres cosas tienen que cumplirse solas.
-//
-//   1. Los 64 informes son un anillo por frame, asi que sus ids tienen que ser
-//      consecutivos y descendentes desde el 63.
-//   2. gpuActiveRenderTimeUs tiene que coincidir con gpuRenderEnd-gpuRenderStart.
-//      Son el mismo dato por dos caminos; si no coinciden, uno de los dos no es
-//      el campo que creemos.
-//   3. Las marcas de tiempo de un frame van en orden: sim <= renderSubmit <=
-//      present <= driver.
-//
-// El layout se derivo contra Streamline 2.13. Cyberpunk corre un interposer
-// 2.7.1 y ahi el id avanza 430 veces por segundo con 222 presentaciones por
-// segundo -- una base no puede ser el doble de lo presentado. Esto dice si el
-// problema es el layout o es otra cosa.
-static void reflex_audit(const void *state) {
-    if (!g_rfxdump) return;
-    static int veces = 0;
-    if (veces >= 3) return;
-    ++veces;
-    log_line("reflex: auditoria del layout");
-    // 1. ids de los 64 informes, en orden de anillo
-    unsigned long long prev = 0;
-    int consec = 0, saltos = 0, ceros = 0;
-    for (int i = 63; i >= 0; --i) {
-        const unsigned char *q = (const unsigned char *)state + 72 + 152 * i;
-        const unsigned long long id = *(const unsigned long long *)(q + 0);
-        if (id == 0) { ++ceros; continue; }
-        if (prev != 0) { if (prev == id + 1) ++consec; else ++saltos; }
-        prev = id;
-    }
-    log_num("  ids consecutivos ", (unsigned)consec);
-    log_num("  ids con salto ", (unsigned)saltos);
-    log_num("  ids en cero ", (unsigned)ceros);
-    // 2 y 3, sobre el informe mas nuevo
-    const unsigned char *q = (const unsigned char *)state + 72 + 152 * 63;
-    const unsigned long long sim0 = *(const unsigned long long *)(q + 16);
-    const unsigned long long sim1 = *(const unsigned long long *)(q + 24);
-    const unsigned long long sub0 = *(const unsigned long long *)(q + 32);
-    const unsigned long long pre1 = *(const unsigned long long *)(q + 56);
-    const unsigned long long drv1 = *(const unsigned long long *)(q + 72);
-    const unsigned long long gr0 = *(const unsigned long long *)(q + 96);
-    const unsigned long long gr1 = *(const unsigned long long *)(q + 104);
-    const unsigned act = *(const unsigned *)(q + 112);
-    const unsigned ft = *(const unsigned *)(q + 116);
-    log_num("  id del mas nuevo ", (unsigned)*(const unsigned long long *)(q + 0));
-    log_num("  gpuActiveRenderTimeUs ", act);
-    log_num("  gpuRenderEnd-Start us ", (unsigned)(gr1 > gr0 ? gr1 - gr0 : 0));
-    log_num("  gpuFrameTimeUs ", ft);
-    log_line(sim0 <= sim1 && sim1 <= sub0 && sub0 <= pre1 && pre1 <= drv1
-             ? "  orden de marcas: OK" : "  orden de marcas: FUERA DE ORDEN");
-    // Volcado crudo del cuerpo, por si hay que buscar los campos a mano.
-    for (int off = 0; off < 128; off += 16) {
-        char linea[80];
-        int k = 0;
-        linea[k++] = ' '; linea[k++] = ' ';
-        const char *hex = "0123456789ABCDEF";
-        linea[k++] = hex[(off >> 4) & 15]; linea[k++] = hex[off & 15];
-        linea[k++] = ':';
-        for (int b = 0; b < 16; ++b) {
-            linea[k++] = ' ';
-            linea[k++] = hex[(q[off + b] >> 4) & 15];
-            linea[k++] = hex[q[off + b] & 15];
-        }
-        linea[k] = 0;
-        log_line(linea);
-    }
-}
-
 static void reflex_take(const void *state, int atras) {
     const unsigned char *q = (const unsigned char *)state + 72 + 152 * (63 - atras);
     const unsigned long long id  = *(const unsigned long long *)(q + 0);
@@ -973,14 +914,9 @@ static unsigned hk_slReflexGetState(void *state) {
     // 72 + 152*i. El [63] es el mas reciente: 72 + 152*63 = 9648.
     static int calls = 0;
     ++calls;
-    // La auditoria va sobre el buffer del JUEGO, no sobre el nuestro: en
-    // Cyberpunk la consulta propia devuelve los 64 informes en cero, y los
-    // unicos datos reales llegan por aca.
-    if (r == 0 && state != nullptr) reflex_audit(state);
     if (r == 0 && state != nullptr) reflex_take(state, 0);
     if (r == 0 && state != nullptr && !g_reflex_dumped && calls > 300) {
         g_reflex_dumped = true;
-        log_num("reflex: llamadas del juego en la corrida ", (unsigned)calls);
         log_num("reflex: latencyReportAvailable ",
                 (unsigned)((const unsigned char *)state)[33]);
         const unsigned char *p = (const unsigned char *)state + 9648;
@@ -1077,7 +1013,29 @@ static void query_state(void);
 
 // ---- the sub-frame count, made writable ---------------------------------
 
-static volatile unsigned char *g_wic = nullptr;         // the count in the work item
+// Una LISTA de sitios, no un puntero.
+//
+// Eran punteros unicos y cada copia parcheada los pisaba. Con dos copias de
+// sl.dlss_g en el proceso -- lo que hace Cyberpunk, que mapea la del juego Y la
+// del cache OTA -- las escrituras por frame se iban al modulo que se parcheo
+// ultimo, que no es necesariamente el que genera.
+//
+// Reproducido en el banco con mfg-twocopies.txt: pidiendo 2.50x con dos copias
+// entrega 2.00 en las 34 ventanas, y con una copia entrega 2.50 en las 34.
+// Separacion total, sin una sola excepcion.
+//
+// Escribir en una copia que no se usa es inofensivo: es un byte en su .text que
+// nadie lee. Buscar cual es la buena seria adivinar; escribir en todas no.
+static const int kMaxSitios = 4;
+static void sitio_add(volatile unsigned char **lista, int *n, volatile unsigned char *q) {
+    for (int i = 0; i < *n; ++i) if (lista[i] == q) return;
+    if (*n < kMaxSitios) lista[(*n)++] = q;
+}
+static void sitio_write(volatile unsigned char **lista, int n, unsigned char v) {
+    for (int i = 0; i < n; ++i) if (lista[i] != nullptr) *lista[i] = v;
+}
+static volatile unsigned char *g_wic_sitios[kMaxSitios] = { nullptr, nullptr, nullptr, nullptr };
+static int g_wic_n = 0;
 static bool g_wic_mode = false;                         // mfg-wic.txt
 
 // The count in the work item, rather than the comparison that reads it.
@@ -1139,14 +1097,17 @@ static int patch_work_item_count(unsigned char *text, size_t len) {
     q[0] = 0x6A;    // push imm8
     q[1] = 1;       // NN
     q[2] = 0x58;    // pop rax
-    g_wic = q + 1;
+    sitio_add(g_wic_sitios, &g_wic_n, q + 1);
     log_line("  work item count is ours (bound, index and metering agree)");
     return 1;
 }
 
-static volatile unsigned char *g_count_imm = nullptr;   // the NN byte, in .text
-static volatile unsigned char *g_count_imm2 = nullptr;  // the same, in the entry guard
-static volatile unsigned char *g_count_imm3 = nullptr;  // and in the metering
+static volatile unsigned char *g_imm_sitios[kMaxSitios] = { nullptr, nullptr, nullptr, nullptr };
+static int g_imm_n = 0;
+static volatile unsigned char *g_imm2_sitios[kMaxSitios] = { nullptr, nullptr, nullptr, nullptr };
+static int g_imm2_n = 0;
+static volatile unsigned char *g_imm3_sitios[kMaxSitios] = { nullptr, nullptr, nullptr, nullptr };
+static int g_imm3_n = 0;
 static volatile unsigned char *g_gen_flag = nullptr;    // 1 generating, 0 not
 static volatile unsigned char *g_lat_allow = nullptr;   // 1 reconfigure, 0 leave alone
 
@@ -1752,7 +1713,7 @@ static int patch_subframe_count(unsigned char *base) {
     // calling VirtualProtect that often would be both slow and pointless.
     DWORD ignored = 0;
     VirtualProtect(p + 2, 1, PAGE_EXECUTE_READWRITE, &ignored);
-    g_count_imm = p + 2;
+    sitio_add(g_imm_sitios, &g_imm_n, p + 2);
 
     // And the count the flip metering is programmed with.
     //
@@ -1791,7 +1752,7 @@ static int patch_subframe_count(unsigned char *base) {
                 VirtualProtect(m, 4, om, &om);
                 DWORD ig = 0;
                 VirtualProtect(m + 1, 1, PAGE_EXECUTE_READWRITE, &ig);
-                g_count_imm3 = m + 1;
+                sitio_add(g_imm3_sitios, &g_imm3_n, m + 1);
                 log_line("  metering count made writable too");
             }
         } else {
@@ -1916,7 +1877,7 @@ static int patch_subframe_count(unsigned char *base) {
             VirtualProtect(q, 6, o2, &o2);
             DWORD ig = 0;
             VirtualProtect(q + 2, 1, PAGE_EXECUTE_READWRITE, &ig);
-            g_count_imm2 = q + 2;
+            sitio_add(g_imm2_sitios, &g_imm2_n, q + 2);
         }
     } else {
         log_num("  ! loop entry guard not unique, sites: ", (unsigned)g_found);
@@ -1997,10 +1958,10 @@ static void set_count_now(LONG n) {
     if (g_wic_mode) {
         // n is generated frames, which is what the field holds: the multiplier
         // is n + 1.
-        if (g_wic != nullptr) {
+        if (g_wic_n > 0) {
             if (n < 0) n = 0;
             if (n > 5) n = 5;
-            *g_wic = (unsigned char)n;
+            sitio_write(g_wic_sitios, g_wic_n, (unsigned char)n);
             // The pacer waits on its own copy. Without this it keeps waiting
             // for the ceiling the API was told, which is the whole throughput
             // loss above 2.0x.
@@ -2012,12 +1973,12 @@ static void set_count_now(LONG n) {
         }
         return;
     }
-    if (g_count_imm == nullptr) return;
+    if (g_imm_n == 0) return;
     if (n < 0) n = 0;                    // zero is legal: the loop is skipped
     if (n > 5) n = 5;                    // the plugin's own ceiling
     // The guard first, so a frame can never see a raised bound with the old
     // gate still shut, or the reverse.
-    if (g_count_imm2 != nullptr) *g_count_imm2 = (unsigned char)loop_bound_for(n);
+    sitio_write(g_imm2_sitios, g_imm2_n, (unsigned char)loop_bound_for(n));
     // The same number as the loop, zero included. Clamping this to one "just
     // in case" was the whole mismatch coming back: the metering programmed a
     // batch for one generated frame while the loop produced none, and the
@@ -2028,7 +1989,7 @@ static void set_count_now(LONG n) {
     // this carrying the cadence, 1.50x still presented 30 rather than 22.5.
     // Whatever the loop produces is presented regardless of this byte, so the
     // fraction cannot be moved here. Kept in agreement with the loop.
-    if (g_count_imm3 != nullptr) *g_count_imm3 = (unsigned char)n;
+    sitio_write(g_imm3_sitios, g_imm3_n, (unsigned char)n);
     // Held on. Measured both ways at 1.50x, base 80: following the count gives
     // 20.6 fps and 361 state changes, holding it on gives 39.3 fps and one.
     // Neither reaches the 120 the ratio asks for -- the rate tracks how often
@@ -2044,7 +2005,7 @@ static void set_count_now(LONG n) {
         *g_lat_allow = 0;
         log_line("fractional: frame latency now left alone");
     }
-    *g_count_imm = (unsigned char)loop_bound_for(n);
+    sitio_write(g_imm_sitios, g_imm_n, (unsigned char)loop_bound_for(n));
     g_count_live = n;
 }
 
@@ -2571,32 +2532,10 @@ static void dyn_apply(double base_fps) {
     if (last_t != 0 && now_ms > last_t && pc >= last_pc) {
         const double secs = (double)(now_ms - last_t) / 1000.0;
         if (secs < 0.5) {              // un salto largo es un cambio de escena
-            // Anti-windup: no se acumula deuda en la direccion que ya esta
-            // saturada. Si el ratio pedido quedo pegado al tope, mas deuda no
-            // pide mas -- solo hace falta descargarla despues, y esa descarga
-            // es la que manda al controlador al otro tope.
-            //
-            // Sin esto, en Cyberpunk DYNAMIC pasaba el 55% del tiempo en 6.00x
-            // y el 44% en 2.00x, con el 1% repartido en todo lo demas. Bang-bang
-            // puro. En el banco no se veia porque ahi el sistema entrega lo que
-            // se le pide, el error queda chico y la deuda nunca se acerca a su
-            // limite.
-            const double inc = target * secs - (double)(pc - last_pc);
-            if (!((inc > 0.0 && g_dyn_sat_hi) || (inc < 0.0 && g_dyn_sat_lo)))
-                debt += inc;
-            // La autoridad del termino integral, acotada de verdad.
-            //
-            // Estaba en un tercio del objetivo y entra multiplicada por dos, o
-            // sea que por si sola movia el objetivo efectivo entre 0.34x y
-            // 1.66x -- un rango de 5 a 1. Con una base que en juego va de 31 a
-            // 65 fps, ese termino solo alcanza para tocar los dos topes: 274/31
-            // da 8.8 y 56/65 da 0.86. Por eso oscilaba de extremo a extremo.
-            //
-            // 0.08 deja el objetivo efectivo entre 0.84x y 1.16x. Sigue siendo
-            // mucho mas de lo que necesita el sesgo que este termino corrige --
-            // el +2% que quedaba sin explicar en el banco -- y ya no alcanza
-            // para saturar por si mismo.
-            const double lim = target * 0.08;
+            debt += target * secs - (double)(pc - last_pc);
+            // Acotada a un tercio de segundo de objetivo: sin esto se enrolla
+            // durante un apagon y despues descarga todo junto.
+            const double lim = target * 0.33;
             if (debt > lim) debt = lim;
             if (debt < -lim) debt = -lim;
         } else {
@@ -2632,9 +2571,6 @@ static void dyn_apply(double base_fps) {
         want = 6.0;
     }
     if (want < 2.0) want = 2.0;
-    // Para el anti-windup de la proxima vuelta.
-    g_dyn_sat_hi = want >= 6.0;
-    g_dyn_sat_lo = want <= 2.0;
     // Se acumula todos los frames, se cambie o no el ratio: la ganancia necesita
     // el promedio de lo pedido durante la ventana, no el ultimo valor.
     g_dyn_asked_sum += (double)g_dyn_target / 100.0;
@@ -2673,7 +2609,7 @@ static void dyn_apply(double base_fps) {
 }
 
 static void dynamic_tick(void) {
-    if (g_count_imm != nullptr) return;
+    if (g_imm_n > 0) return;
     if (!sel_is_frac()) return;
     const LONG want = dynamic_want();
     static LONG last_want = -1;
@@ -2751,7 +2687,7 @@ static void fractional_tick(void) {
             set_count_now(g_last_seen_generated);
         return;
     }
-    if (g_wic_mode ? (g_wic == nullptr) : (g_count_imm == nullptr)) return;
+    if (g_wic_mode ? (g_wic_n == 0) : (g_imm_n == 0)) return;
     if (g_base_fps <= 1.0) return;
 
     // The multiplier, straight. No target to chase and so no loop to settle:
@@ -4797,6 +4733,30 @@ static DWORD WINAPI recorder(LPVOID) {
             // Fuera del bloque de abajo a proposito: el HUD no depende de que
             // el panel este abierto.
             hud_tick();
+            if (InterlockedExchange(&g_twocopies_pending, 0) != 0) {
+                wchar_t ruta[MAX_PATH];
+                beside_dll(ruta, L"mfg-twocopies.txt");
+                HANDLE h2 = CreateFileW(ruta, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (h2 != INVALID_HANDLE_VALUE) {
+                    char b2[MAX_PATH * 2];
+                    DWORD g2 = 0;
+                    if (ReadFile(h2, b2, sizeof(b2) - 1, &g2, nullptr) && g2 > 4) {
+                        b2[g2] = 0;
+                        for (DWORD k2 = 0; k2 < g2; ++k2)
+                            if (b2[k2] == 13 || b2[k2] == 10) { b2[k2] = 0; break; }
+                        wchar_t w2[MAX_PATH * 2];
+                        if (MultiByteToWideChar(CP_UTF8, 0, b2, -1, w2, MAX_PATH * 2) > 0) {
+                            log_line("banco: cargando una SEGUNDA copia a proposito");
+                            log_line(b2);
+                            if (LoadLibraryW(w2) == nullptr)
+                                log_num("  no se pudo cargar, error ",
+                                        (unsigned)GetLastError());
+                        }
+                    }
+                    CloseHandle(h2);
+                }
+            }
 
             if (g_ov_visible) {
                 const bool lmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
@@ -5600,6 +5560,9 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         }
         log_line("sl.dlss_g mapped");
         log_wide("  in ", d->FullDllName);
+        // Marcar nada mas: esto corre bajo el loader lock y LoadLibrary desde
+        // aca falla por diseno. La carga se hace en el camino de present.
+        if (g_twocopies) g_twocopies_pending = 1;
         {
             const int sc = patch_subframe_count(reinterpret_cast<unsigned char *>(d->DllBase));
             log_num("  sub-frame count made writable, sites: ", (unsigned)sc);
@@ -5879,7 +5842,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             g_pace_follow = flag_file(L"mfg-pacefollow.txt");
             g_frac_enabled = !flag_file(L"mfg-nofrac.txt");
             g_sub2 = flag_file(L"mfg-sub2.txt");
-            g_rfxdump = flag_file(L"mfg-rfxdump.txt");
+            g_twocopies = flag_file(L"mfg-twocopies.txt");
             g_slowalt = !flag_file(L"mfg-noslowalt.txt");
             g_quiet = flag_file(L"mfg-quiet.txt");
             g_nullalt = flag_file(L"mfg-nullalt.txt");
