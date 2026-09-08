@@ -160,6 +160,30 @@ Dos complicaciones, dichas antes de entusiasmarse:
     llamada, porque el hilo del token no es el que configuro DLSS-G. Hay que
     resolver desde donde llamarlo.
 
+#### Probado, y NO alcanza tal como esta: -94%
+
+Se implemento la consulta y se midio en Cyberpunk contra la capa vieja, que ahi
+si funciona. 77 pares comparables:
+
+    capa NUEVA (slDLSSGGetState)      mediana   7.7 fps   (p10 4.1, p90 20.6)
+    capa VIEJA (PresentCount runtime)  mediana 147.3 fps   (p10 134.6, p90 157.0)
+    diferencia mediana -94.1%; dentro del 10%: 0 de 77
+
+No es "cuenta solo las generadas": eso daria -25%, no -94%.
+
+Causa que encaja con el campo: dice "frames presentados desde la ULTIMA LLAMADA a
+slDLSSGGetState", y no somos el unico llamador. Cyberpunk tambien lo llama -- su
+propio sl.log avisa sobre esas llamadas -- asi que cada llamada del juego
+reinicia el contador y nosotros solo vemos el pedazo entre su ultima llamada y la
+nuestra.
+
+**Sin verificar todavia**: la salida seria OBSERVAR en vez de CONSULTAR --
+enganchar `slDLSSGGetState` y sumar lo que el plugin le devuelve a cualquier
+llamador, con lo cual ningun reinicio se pierde. No esta probado; hay que hacerlo
+en una POC aislada y no dentro del dll, que es el error que produjo este -94%.
+
+El codigo de la consulta se revirtio: no queda en el arbol.
+
 ### B. La vtable del swapchain se toma con un swapchain propio
 
 La tecnica documentada para enganchar sin depender de la factory del juego es
