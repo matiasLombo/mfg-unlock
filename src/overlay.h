@@ -175,7 +175,18 @@ static const int kNStops = (int)(sizeof(kStops) / sizeof(kStops[0]));
 // punto claramente por debajo es 1.25x, que es el que no se ofrece. Lo que
 // sub-2.0x da de verdad es un escalon de fps entre apagado y 2x, y menos
 // interpolacion para quien vea artefactos en 2x. Eso ultimo no lo mide el banco.
-static const int kMinCustom = 150, kMaxCustom = 600;
+// El piso vuelve a 200. Se bajo a 150 con la tabla de arriba, que sigue siendo
+// cierta -- 1.50x entrega 1.47 sin perder una sola presentacion, sin costar
+// reservas ni reconfiguraciones extra -- y aun asi en GTA V no se vio bien ni
+// fluido. El banco mide el ratio, la latencia y las perdidas; no mide como se
+// ve, y esa era la unica razon que le quedaba a sub-2.0x. Sin esa razon no hay
+// opcion que ofrecer.
+//
+// Para retomarlo, si se retoma: la sospecha es que con cuenta 0 la mitad de los
+// frames no llevan interpolacion, asi que la cadencia mezcla dos texturas de
+// movimiento distintas. Eso se atacaria con la distribucion, no con el ratio, y
+// el banco no lo puede juzgar.
+static const int kMinCustom = 200, kMaxCustom = 600;
 
 // Objetivos de DYNAMIC, en fps presentados. El cero es AUTO y significa el
 // refresh del monitor, que es lo que el controlador usa cuando no se le da un
@@ -467,7 +478,7 @@ static int ov_edit_commit(void) {
     }
     while (fdig < 2) { frac *= 10; ++fdig; }   // "2.5" es 2.50, no 2.05
     int v = whole * 100 + frac;
-    // CUSTOM va de 1.50 a 6.00. El piso bajo de 2.00 a 1.50 cuando los
+    // CUSTOM va de 2.00 a 6.00. Bajo a 1.50 un rato y volvio: los
     // fraccionarios de abajo se midieron: 1.50x entrega 1.47 sin perder ni una
     // presentacion, y 1.25x pierde 16, que es por que el piso es 1.50 y no 1.10.
     // La tabla completa esta al lado de kMinCustom. El techo es el limite

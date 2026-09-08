@@ -128,30 +128,20 @@ static bool flag_file(const wchar_t *name) {
     return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
 }
 
-// El handle se abre una vez y se queda. Antes esta funcion hacia CreateFileW,
-// SetFilePointer, tres WriteFile y CloseHandle POR LINEA -- seis llamadas al
-// sistema cada una -- y el bloque por ventana escribe unas 25 lineas cada 45
-// frames, en el hilo de render.
-//
-// Se abre igual que antes, con FILE_APPEND_DATA y FILE_SHARE_READ, asi que el
-// archivo se sigue pudiendo leer con el juego abierto -- que es como se miro
-// todo el dia.
-//
-// No se buffea el contenido: sigue habiendo un WriteFile por linea. Bufferear
-// costaria perder el final del log en un crash, y hoy el final del log fue
-// justo lo que explico uno.
-static HANDLE g_log_h = INVALID_HANDLE_VALUE;
-
+// Se abre y se cierra por linea, a proposito. Se probo dejar el handle abierto
+// -- seis llamadas al sistema por linea contra una sola apertura -- y en GTA V
+// el log murio despues del attach: salieron las lineas del hilo del loader y
+// ninguna de los otros hilos. sl.log seguia vivo y DLSS-G corriendo con la
+// cuenta alternando, asi que la dll andaba y solo habia dejado de escribir.
+// Revertido sin diagnosticar del todo: el cambio no compraba nada medido y
+// rompia leer el log con el juego abierto, que es como se diagnostica todo aca.
 static void log_line(const char *text) {
     if (g_log[0] == 0) return;
-    if (g_log_h == INVALID_HANDLE_VALUE) {
-        g_log_h = CreateFileW(g_log, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
-                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (g_log_h == INVALID_HANDLE_VALUE) return;
-        SetFilePointer(g_log_h, 0, nullptr, FILE_END);
-    }
-    HANDLE h = g_log_h;
+    HANDLE h = CreateFileW(g_log, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
     DWORD n = 0;
+    SetFilePointer(h, 0, nullptr, FILE_END);
     // Milliseconds since the dll attached, so this file can be lined up against
     // sl.log. Without it, "panel: shown" and "Out of order frame" cannot be put
     // on the same timeline, which is exactly the correlation under test: in GTA
@@ -176,6 +166,7 @@ static void log_line(const char *text) {
     while (text[len] != 0) ++len;
     WriteFile(h, text, (DWORD)len, &n, nullptr);
     WriteFile(h, "\r\n", 2, &n, nullptr);
+    CloseHandle(h);
 }
 
 static void log_num(const char *label, unsigned long long v) {
