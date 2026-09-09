@@ -10,9 +10,10 @@ Cada veredicto dice de que corrida salio y con que binario.
 
 ## M7. Oraculo externo
 
-**NO SE PUDO PROBAR**: los dos caminos quedaron bloqueados por cosas fuera de mi
-alcance. Se intentaron los dos hasta el final, y los bloqueos estan medidos, no
-supuestos.
+**El camino sin elevacion NO ANDA**, demostrado con el cliente de NVIDIA.
+**El camino con elevacion sigue NO SE PUDO PROBAR**: falta un UAC.
+
+Los dos se llevaron hasta el final y los bloqueos estan medidos, no supuestos.
 
 ### Camino A: PresentMon
 
@@ -61,8 +62,22 @@ que FrameView necesite su propia aplicacion corriendo para que el servicio
 recolecte, o que el presentador no cuente como "juego" para el (ventana chica,
 sin pantalla completa exclusiva).
 
-Lo importante para quien lo retome: **el camino no esta cerrado por permisos**.
-Todo esto corrio sin elevar.
+**El discriminador**: se corrio el cliente de prueba del propio NVIDIA,
+`FvSDKTestClient_Public.exe`, con el presentador andando al lado. Imprime
+`InitializeFvSDKSession SUCCESS` y `Executing Test Case 001` y **no reporta ni un
+dato** en 20 segundos. Asi que no es un error de nuestra POC: el servicio no esta
+entregando datos en esta maquina, ni siquiera a la herramienta de NVIDIA.
+
+Por eso este camino pasa de NO SE PUDO PROBAR a **NO ANDA**: se lo llevo hasta el
+final y lo que devuelve esta medido -- FV_NO_DATA -- y confirmado con un segundo
+cliente independiente.
+
+Lo importante para quien lo retome: **no esta cerrado por permisos**. Todo esto
+corrio sin elevar. Lo que falta averiguar es por que el servicio no recolecta.
+
+**Referencia medida en la misma corrida**, con el presentador: **4123
+presentaciones en 25.002 s = 164.91 fps**, vsync a 165 Hz. Ese es el numero que
+un oraculo tendria que reproducir.
 
 Lo que costo llegar hasta ahi, por si alguien lo retoma: el dll exporta UNA sola
 funcion, `fv_QueryInterface` -- el patron de NVAPI. Los stubs viven en un `.lib`
