@@ -189,6 +189,23 @@ medicion y quedo el cartel. Restaurada la llamada, el log dice 2.11 y 2.14.
     camino no se ejercita ahi. Halo lo carga dinamicamente y por eso deberia
     funcionar, pero deberia no es una medicion.
 
+## Sustitucion completa en un juego que YA funciona, medida
+
+Cyberpunk forzado a ROJO con consentimiento, con el arreglo de la comparacion de
+rutas puesto -- o sea sustituyendo TAMBIEN la copia OTA:
+
+    corrida   sustituciones   versiones mapeadas    DLSS-G    contador p90
+    1         18              todas 2.12            4.00x     3.97
+    2         18              todas 2.12            4.00x     3.97
+    3         18              todas 2.12            4.01x     4.00
+    linea base (sin sustituir)                      4.02x     3.97
+
+Indistinguible, tres de tres. Ninguna copia 2.14 sobrevive. Cambiarle a un juego
+que anda TODO su set de plugins no lo degrada ni lo rompe.
+
+Antes del arreglo eran 7 sustituciones y la copia OTA entraba igual; ahora son
+18 y no queda ninguna.
+
 ## Lo que este documento NO afirma
 
 No afirma que sustituir el set arregle Halo. Eso es una hipotesis sin probar: el
