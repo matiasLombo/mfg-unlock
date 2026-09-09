@@ -107,7 +107,33 @@ Corrida del 2026-09-08, 120 presentaciones con vsync por modo.
 
 ## M4. D3DKMT sin privilegios
 
-Pendiente.
+**NO SE PUDO PROBAR**: falta el layout exacto de `D3DKMT_QUERYSTATISTICS` para
+esta version de Windows. Haria falta sacarlo de los headers del WDK, que no estan
+en esta maquina, o de una fuente confiable -- no inventarlo.
+
+Lo que si quedo establecido, y no es poco:
+
+    entry points en gdi32.dll, todos presentes:
+      D3DKMTQueryStatistics      SI     D3DKMTGetPresentHistory   SI
+      D3DKMTOpenAdapterFromHdc   SI     D3DKMTQueryAdapterInfo    SI
+      D3DKMTCloseAdapter         SI     D3DKMTGetDeviceState      SI
+
+    D3DKMTQueryStatistics(PROCESS) sin elevar -> NTSTATUS 0xC000000D
+    con el LUID del adaptador (00000000-000130EB) sacado de DXGI -> mismo codigo
+
+**0xC000000D es STATUS_INVALID_PARAMETER, no STATUS_ACCESS_DENIED.** Eso importa:
+la barrera NO es la elevacion. Las funciones se pueden llamar desde un proceso
+comun; lo que falta es armar bien la estructura.
+
+Es la diferencia con ETW, donde la barrera si es de privilegios y esta cerrada
+(ver `docs/medicion-agnostica.md`, punto 2). Aca la puerta esta abierta y lo que
+falta es la llave correcta.
+
+Que haria falta para cerrarlo: el `d3dkmthk.h` del WDK, o la definicion publicada
+de la estructura para esta build de Windows. Con eso la POC ya esta escrita y
+solo hay que corregir el armado.
+
+POC: `poc/m4-d3dkmt/m4.cpp`, g++ con -lgdi32. Corrida del 2026-09-08, sin elevar.
 
 ## M5. DwmGetCompositionTimingInfo
 
