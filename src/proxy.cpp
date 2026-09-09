@@ -2855,6 +2855,39 @@ static inline int dyn_bucket(double ratio) {
 static double g_dyn_asked_sum = 0.0;
 static LONG g_dyn_asked_n = 0;
 
+// El integrador de DYNAMIC, apagado por defecto desde 2026-09-09.
+//
+// El controlador tenia DOS lazos para el mismo trabajo: el feedforward
+// target/base, que ya calcula el ratio necesario, mas el sesgo aprendido por
+// banda, que corrige el error de modelo -- y encima un integrador (debt) sobre
+// el error de presentaciones. El integrador es redundante con el sesgo y es el
+// que rompe: no hay perturbacion persistente que rechazar cuando la base se
+// mide directamente.
+//
+// Comprobado comparando dos corridas de Cyberpunk con el mismo binario:
+//
+//     corrida   objetivo efectivo (nominal 165)   sesgo
+//     buena     153-160                           0.88-1.06
+//     mala      274 en 168 de 220 cambios         1.25 (su tope)
+//
+// En la mala, integrador y sesgo quedaron los dos clavados en el riel y el
+// controlador pidio 6x permanente sin recuperarse. salida_saturada congela el
+// inc positivo pero NO desenrolla la deuda ya acumulada, y el sesgo no tenia
+// ese guard, asi que siguio aprendiendo con la salida recortada.
+//
+// Ademas las unidades no cerraban: debt acumula FRAMES y se sumaba a un rate
+// (target + debt*2.0), asi que la ganancia efectiva dependia del periodo de
+// tick. Y el clamp de +-33% con ganancia 2 daba +-66% del setpoint, cuando la
+// corrida buena solo necesito +-7%.
+//
+// Se deja detras de mfg-deuda.txt para poder correr el A/B con el MISMO
+// binario, que es la unica forma de comparar dos controladores sin cambiar
+// tambien el codigo debajo.
+static bool g_usar_deuda = false;
+// Salida recortada en el ultimo tick: mientras lo este, el sesgo no aprende.
+// Sin esto el sesgo aprende de un tramo donde la entrega estaba limitada por el
+// techo y no por el modelo, que es como llego a 1.25.
+static bool g_dyn_recortado = false;
 static void dyn_control(double base_fps, double presented_fps) {
     if (g_force_sel != kSelDynFuture) return;
     if (base_fps <= 1.0 || presented_fps <= 1.0) return;
@@ -2872,6 +2905,7 @@ static void dyn_control(double base_fps, double presented_fps) {
     // en 143 igual y el resultado en 64% contra 66%, o sea nada. El sesgo
     // residual de +2% no viene de ahi y sigue sin explicacion.
     if (!stable) return;
+    if (g_dyn_recortado) return;   // salida recortada: el error no es del modelo
     if (asked_avg < 2.0) return;
     const double delivered = presented_fps / base_fps;
     if (delivered <= 0.5) return;
@@ -3012,7 +3046,7 @@ static void dyn_apply(double base_fps) {
     // achicar el subdisparo que quedaba, y salio peor: 79% contra 87%, con las
     // ventanas altas de vuelta en 150-179. Pagar mas lento deja que el
     // sobrepaso del escalon entre otra vez en el promedio de la ventana.
-    const double target_eff = target + debt * 2.0;
+    const double target_eff = g_usar_deuda ? (target + debt * 2.0) : target;
     const double raw = (target_eff > 1.0 ? target_eff : 1.0) / base_fps;
     double want = raw * g_dyn_bias[dyn_bucket(raw)];
     // El techo es el estructural, 6.0.
@@ -3028,6 +3062,7 @@ static void dyn_apply(double base_fps) {
     // exactamente 6.0 -- que es el maximo estructural y por lo tanto saturacion
     // plena -- contaba como no saturado y la deuda seguia creciendo.
     salida_saturada = (want >= 6.0);
+    g_dyn_recortado = (want >= 6.0 || want <= 2.0);
     if (want > 6.0) {
         static bool said_hi = false;
         if (!said_hi) {
@@ -7665,6 +7700,8 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 }
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
+            g_usar_deuda = flag_file(L"mfg-deuda.txt");
+            if (g_usar_deuda) log_line("dynamic: integrador de deuda ENCENDIDO (mfg-deuda.txt)");
             g_optsv3 = flag_file(L"mfg-optsv3.txt");
             { wchar_t mp[MAX_PATH]; beside_dll(mp, L"mfg-markergap.txt");
               HANDLE mh = CreateFileW(mp, GENERIC_READ, FILE_SHARE_READ, nullptr,
