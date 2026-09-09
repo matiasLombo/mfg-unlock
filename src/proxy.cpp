@@ -2883,7 +2883,7 @@ static LONG g_dyn_asked_n = 0;
 // Se deja detras de mfg-deuda.txt para poder correr el A/B con el MISMO
 // binario, que es la unica forma de comparar dos controladores sin cambiar
 // tambien el codigo debajo.
-static bool g_usar_deuda = false;
+static bool g_usar_deuda = true;
 // Salida recortada en el ultimo tick: mientras lo este, el sesgo no aprende.
 // Sin esto el sesgo aprende de un tramo donde la entrega estaba limitada por el
 // techo y no por el modelo, que es como llego a 1.25.
@@ -3063,6 +3063,27 @@ static void dyn_apply(double base_fps) {
     // plena -- contaba como no saturado y la deuda seguia creciendo.
     salida_saturada = (want >= 6.0);
     g_dyn_recortado = (want >= 6.0 || want <= 2.0);
+    // Back-calculation: lo que la salida NO pudo entregar se saca de la deuda.
+    //
+    // Antes la deuda solo se congelaba (salida_saturada frena el inc positivo) y
+    // nunca se desenrollaba, asi que una vez en el riel el controlador pedia 6x
+    // para siempre. Medido: objetivo efectivo 274 contra 165 nominal en 168 de
+    // 220 cambios, con el sesgo tambien clavado en su tope de 1.25.
+    //
+    // Se descuenta el exceso convertido a la misma unidad en que entra la deuda:
+    // exceso de ratio x base = fps que se pidieron de mas, dividido por la
+    // ganancia 2.0 (que es 1/0.5s, el horizonte de correccion).
+    {
+        const double techo = 6.0, piso = 2.0;
+        const double recorte = want > techo ? want - techo
+                             : (want < piso ? want - piso : 0.0);
+        if (recorte != 0.0 && g_usar_deuda) {
+            debt -= recorte * base_fps / 2.0;
+            const double lim2 = target * 0.33;
+            if (debt > lim2) debt = lim2;
+            if (debt < -lim2) debt = -lim2;
+        }
+    }
     if (want > 6.0) {
         static bool said_hi = false;
         if (!said_hi) {
@@ -3649,8 +3670,29 @@ static void fractional_tick(void) {
         {
             static double last_req = -1.0;
             if (frac != last_req) {
+                // Solo un cambio GRANDE reinicia el ciclo.
+                //
+                // El reinicio se puso para que elegir otro multiplicador en el
+                // panel no espere medio minuto -- o sea para un cambio manual,
+                // que siempre es grande. Pero DYNAMIC mueve el ratio ~8 veces
+                // por segundo, y con cualquier cambio reiniciando, el ciclo de
+                // 0.768 s nunca termina: el diseno da 2 cambios de cuenta por
+                // ciclo (~15 frames renderizados entre cambios) y medido salian
+                // cada 6.8.
+                //
+                // Y eso cuesta. Con la base estable, ventanas con >=6 cambios
+                // miden 15.2 % de desvio relativo contra 12.7 % de las que
+                // tienen menos, con la densidad de cambios igual entre bases
+                // estables e inestables (5.8 contra 5.5), asi que no es el
+                // confound de la base.
+                //
+                // Los ajustes chicos de DYNAMIC ahora viajan en el ciclo que ya
+                // esta corriendo: hi_blocks se recalcula igual, pero el reloj no
+                // se reinicia.
+                const double salto = frac > last_req ? frac - last_req : last_req - frac;
                 last_req = frac;
-                request_changed = hi_blocks >= 0;
+                request_changed = hi_blocks >= 0 && salto > 0.5;
+                if (hi_blocks >= 0 && salto <= 0.5) hi_blocks = -2;   // recalcular sin reiniciar
             }
         }
         if (request_changed) {
@@ -7700,8 +7742,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 }
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
-            g_usar_deuda = flag_file(L"mfg-deuda.txt");
-            if (g_usar_deuda) log_line("dynamic: integrador de deuda ENCENDIDO (mfg-deuda.txt)");
+            if (flag_file(L"mfg-sin-deuda.txt")) { g_usar_deuda = false; log_line("dynamic: integrador de deuda APAGADO (mfg-sin-deuda.txt)"); }
             g_optsv3 = flag_file(L"mfg-optsv3.txt");
             { wchar_t mp[MAX_PATH]; beside_dll(mp, L"mfg-markergap.txt");
               HANDLE mh = CreateFileW(mp, GENERIC_READ, FILE_SHARE_READ, nullptr,
