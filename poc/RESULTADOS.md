@@ -35,7 +35,42 @@ Pendiente.
 
 ## M2. Vtable del swapchain via swapchain propio
 
-Pendiente.
+**ANDA**: 300 presentaciones contadas contra 300 reales, diferencia 0.0%.
+
+La verdad no viene del oraculo M7 sino de la propia POC, que es mejor testigo
+para este caso: la app ES la que llama a Present, asi que su contador no estima
+nada.
+
+Como se probo. Se crean dos swapchains en el mismo proceso:
+
+    A -- el "del juego", creado PRIMERO, sobre su ventana
+    B -- el nuestro, descartable, creado DESPUES, sobre otra ventana
+
+Se lee la vtable a traves de B, se parchea la ranura 8 (Present) y se presenta
+300 veces SOLO por A. El hook conto 300.
+
+    vtable de A: 00007ff910b0c688
+    vtable de B: 00007ff910b0c688
+    comparten vtable: SI
+
+Las dos instancias comparten vtable porque la implementacion de DXGI es la
+misma, asi que parchear por cualquiera engancha a todas las del proceso. No
+depende de ver la creacion del swapchain del juego ni de quien envolvio la
+factory.
+
+Por que importa: hoy el dll engancha `CreateSwapChainForHwnd` en la factory, y en
+Halo -- con ReShade como dxgi.dll, DLSS Enabler, renodx y UE4SS encadenados -- no
+hay una sola linea de swapchain en todo el log. Este metodo no tiene esa
+dependencia.
+
+Limite NO probado todavia: la POC crea sus dos swapchains con la misma llamada y
+en el mismo proceso. Falta ver si la vtable sigue siendo la misma cuando otro
+overlay devuelve un objeto ENVUELTO -- un proxy con vtable propia. Ese es el caso
+de Halo y esta POC no lo reproduce.
+
+POC: `poc/m2-vtable/m2.cpp`, compilado con g++
+(`g++ -std=c++17 -O2 -o m2.exe m2.cpp -ld3d11 -ldxgi -luser32 -lole32`).
+Corrida del 2026-09-08, binario m2.exe de 100.090 bytes.
 
 ## M3. GetLastPresentCount y GetFrameStatistics
 
