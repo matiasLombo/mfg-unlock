@@ -97,6 +97,16 @@ para tres funciones de strsafe. Compila y corre.
 **Salvedad**: el cabo de `__GSHandlerCheck` no hace la comprobacion real. Sirve
 para una POC de medicion, NO para produccion.
 
+### Camino C: RTSS, descartado sin gasto
+
+RTSS expone FPS por aplicacion en memoria compartida y no necesita
+elevacion, asi que era el tercer candidato. **No esta instalado**: no hay
+carpeta de RivaTuner, no hay claves de RTSS en el registro, y la memoria
+compartida `RTSSSharedMemoryV2` no existe. MSI Afterburner esta instalado
+pero sin RTSS al lado.
+
+Con esto se agotan los caminos sin elevacion que esta maquina ofrece.
+
 ### Lo que igual quedo cubierto
 
 El proposito de M7 era tener un numero independiente contra el cual validar los
