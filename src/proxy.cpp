@@ -2265,6 +2265,45 @@ static double g_pres_ms_max = 0.0;
 static int    g_pres_n = 0;
 static int    g_pres_hitch = 0;             // intervals over 33 ms
 static int    g_pres_bucket[6] = { 0, 0, 0, 0, 0, 0 };
+// El reloj de la PANTALLA, que es otro que el de Present.
+//
+// Todo lo de arriba mide intervalos entre LLAMADAS a Present. NVIDIA dice
+// explicitamente que eso no sirve para juzgar fluidez con DLSS-G: el plugin
+// retrasa la imagen por hardware DESPUES de Present(), y la guia de
+// ProgrammingGuideDLSS_G manda medir MsBetweenDisplayChange y no
+// MsBetweenPresents. Explica de paso por que el pacer daba vuelta toda la
+// distribucion de intervalos y no cambiaba nada visible ([[present-timing-is-
+// not-fluidity]]): movia el reloj que no se ve.
+//
+// SyncQPCTime es el instante en que el panel escaneo la ultima imagen. Cuando
+// cambia, hubo un cambio de imagen de verdad; si no cambia entre dos presents,
+// esa presentacion no llego a la pantalla como imagen propia. Esto tambien
+// responde la pregunta que quedo abierta en note_display -- si de cada lote de
+// 4 llega una sola o si el driver devuelve la estructura vieja -- porque
+// presentaciones por cambio de imagen lo dice directo.
+static long long g_disp_qpc = 0;      // SyncQPCTime del ultimo cambio visto
+static unsigned  g_disp_refresh = 0;  // PresentRefreshCount en ese cambio
+static int    g_disp_changes = 0;     // cambios de imagen en la ventana
+static int    g_disp_presents = 0;    // presentaciones en la misma ventana
+static double g_disp_ms_sum = 0.0;
+static double g_disp_ms_max = 0.0;
+static int    g_disp_hitch = 0;       // cambios separados por mas de 33 ms
+static int    g_disp_bucket[6] = { 0, 0, 0, 0, 0, 0 };
+static int    g_disp_skip = 0;        // cambios que saltaron mas de un refresh
+// PresentRefreshCount, que es el unico dato de pantalla que resulto confiable.
+//
+// SyncQPCTime NO sirve para MsBetweenDisplayChange: viene repetido. Se midio y
+// el control lo mata -- en ventanas SIN generacion, donde cada presentacion es
+// un frame real, daba 6.42 presentaciones por "cambio de imagen" y 49
+// imagenes/s contra 312 presentaciones/s. Un artefacto que aparece igual de
+// fuerte sin un solo frame generado no esta midiendo frames generados.
+//
+// PresentRefreshCount cuenta REFRESHES del panel. Si avanza a ~165/s el panel
+// va normal y lo grueso era SyncQPCTime; presentaciones por refresh dice si
+// cada presentacion se gano su refresh o si se pisan entre ellas.
+static unsigned  g_ref_first = 0;
+static unsigned  g_ref_last = 0;
+static long long g_ref_qpc0 = 0;
 static double g_lo_time = 0.0;
 static double g_hi_time = 0.0;
 static double g_token_fps = 0.0;      // and the rate that follows from it
@@ -2562,6 +2601,44 @@ static void note_rendered_frame(void) {
                             g_pres_ms_sum = 0.0; g_pres_ms_max = 0.0;
                             g_pres_n = 0; g_pres_hitch = 0;
                             for (int b = 0; b < 6; ++b) g_pres_bucket[b] = 0;
+                        }
+                        // PANTALLA: el mismo analisis sobre el reloj que se ve.
+                        // Se emite aparte y con los mismos baldes a proposito,
+                        // para poder comparar los dos relojes lado a lado.
+                        if (g_disp_changes > 0) {
+                            log_num("  PANTALLA cambios de imagen ", (unsigned)g_disp_changes);
+                            log_num("    presentaciones ", (unsigned)g_disp_presents);
+                            log_num("    presentaciones por cambio x100 ",
+                                    (unsigned)((unsigned long long)g_disp_presents * 100ULL
+                                               / (unsigned)g_disp_changes));
+                            log_num("    display ms avg x10 ",
+                                    (unsigned)(g_disp_ms_sum / (double)g_disp_changes * 10.0));
+                            log_num("    display ms max x10 ", (unsigned)(g_disp_ms_max * 10.0));
+                            log_num("    hitches de pantalla over 33ms ", (unsigned)g_disp_hitch);
+                            log_num("    refreshes salteados ", (unsigned)g_disp_skip);
+                            if (g_ref_qpc0 != 0 && g_qpc_freq > 0 && g_ref_last > g_ref_first) {
+                                LARGE_INTEGER ahora;
+                                QueryPerformanceCounter(&ahora);
+                                const double seg = (double)(ahora.QuadPart - g_ref_qpc0)
+                                                 / (double)g_qpc_freq;
+                                if (seg > 0.05) {
+                                    log_num("    refreshes del panel por seg ",
+                                            (unsigned)((double)(g_ref_last - g_ref_first) / seg));
+                                    log_num("    presentaciones por refresh x100 ",
+                                            (unsigned)((double)g_disp_presents * 100.0
+                                                       / (double)(g_ref_last - g_ref_first)));
+                                }
+                            }
+                            g_ref_first = 0; g_ref_last = 0; g_ref_qpc0 = 0;
+                            for (int b = 0; b < 6; ++b)
+                                if (g_disp_bucket[b] > 0) {
+                                    log_num("    dbucket ", (unsigned)b);
+                                    log_num("      count ", (unsigned)g_disp_bucket[b]);
+                                }
+                            g_disp_ms_sum = 0.0; g_disp_ms_max = 0.0;
+                            g_disp_changes = 0; g_disp_presents = 0; g_disp_hitch = 0;
+                            g_disp_skip = 0;
+                            for (int b = 0; b < 6; ++b) g_disp_bucket[b] = 0;
                         }
                         log_num("  counted multiplier x100 ",
                                 (unsigned)((unsigned long long)dp * 100ULL / 45ULL));
@@ -4748,6 +4825,29 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
                 g_lat_sum += age;
                 ++g_lat_n;
                 if ((int)age > g_lat_max) g_lat_max = (int)age;
+            }
+            // Y el reloj de la pantalla, del mismo muestreo. Una presentacion
+            // que no mueve SyncQPCTime no puso una imagen nueva en el panel.
+            ++g_disp_presents;
+            if (g_ref_first == 0) { g_ref_first = fs.PresentRefreshCount; g_ref_qpc0 = now.QuadPart; }
+            g_ref_last = fs.PresentRefreshCount;
+            if (fs.SyncQPCTime.QuadPart != g_disp_qpc) {
+                if (g_disp_qpc != 0) {
+                    const double dms = (double)(fs.SyncQPCTime.QuadPart - g_disp_qpc)
+                                     / (double)g_qpc_freq * 1000.0;
+                    if (dms > 0.0 && dms < 500.0) {
+                        g_disp_ms_sum += dms;
+                        ++g_disp_changes;
+                        if (dms > g_disp_ms_max) g_disp_ms_max = dms;
+                        const int b = dms < 4.0 ? 0 : dms < 8.0 ? 1 : dms < 12.0 ? 2
+                                    : dms < 20.0 ? 3 : dms < 33.0 ? 4 : 5;
+                        ++g_disp_bucket[b];
+                        if (dms > 33.0) ++g_disp_hitch;
+                        if (fs.PresentRefreshCount - g_disp_refresh > 1) ++g_disp_skip;
+                    }
+                }
+                g_disp_qpc = fs.SyncQPCTime.QuadPart;
+                g_disp_refresh = fs.PresentRefreshCount;
             }
         }
     }

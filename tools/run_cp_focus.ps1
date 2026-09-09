@@ -39,6 +39,10 @@ public class Foco {
 # corrida sale invalida: cinco seguidas se perdieron asi, y el sintoma parecia
 # una regresion del codigo.
 Get-Process CrashReporter -ErrorAction SilentlyContinue | Stop-Process -Force
+# QmlRenderer es el OTRO proceso del reporte de fallos de CDPR y no se llama
+# CrashReporter, asi que sobrevivia a la linea de arriba. Quedaron dos vivos
+# durante una tanda de corridas y todas entregaron 1.00.
+Get-Process QmlRenderer -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 500
 
 $slp = Join-Path $dir "sl.log"
