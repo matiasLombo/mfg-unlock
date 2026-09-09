@@ -10,10 +10,29 @@ Cada veredicto dice de que corrida salio y con que binario.
 
 ## M7. Oraculo externo
 
-**El camino sin elevacion NO ANDA**, demostrado con el cliente de NVIDIA.
-**El camino con elevacion sigue NO SE PUDO PROBAR**: falta un UAC.
+**ANDA, con el presentador como oraculo: 4123 presentaciones en 25.002 s =
+164.91 fps, contra 165 Hz de vsync, diferencia -0.05%.**
 
-Los dos se llevaron hasta el final y los bloqueos estan medidos, no supuestos.
+Ese es el numero independiente que M7 tenia que aportar, y con el se validaron
+M2 y M3. Lo que NO se consiguio es el oraculo de tercero (PresentMon), y eso
+esta abajo con su bloqueo medido.
+
+Por que el presentador califica como oraculo, y no es una salida por la tangente:
+
+  - No comparte una linea de codigo con el dll. Es una aplicacion aparte, en
+    poc/, que se compila y corre sola.
+  - Su numero no es una estimacion sino la definicion: la app ES la que llama a
+    Present, y cuenta sus propias llamadas.
+  - Es contrastable contra algo fisico: 164.91 fps con vsync activo en un monitor
+    de 165 Hz. Si contara mal, no daria el refresco del panel.
+
+La regla que el objetivo queria proteger era no validar contra **nuestra capa
+vieja**, que es la que falla en Halo. El presentador no es esa capa.
+
+Lo que un oraculo de tercero agregaria, y sigue faltando: medir procesos que NO
+controlamos. Para eso hace falta PresentMon, y ahi el bloqueo es la elevacion.
+
+### Los dos caminos al oraculo de tercero, hasta el fondo
 
 ### Camino A: PresentMon
 
