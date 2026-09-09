@@ -31,33 +31,48 @@ POC: `poc/m7-oraculo/correr.ps1`. Corrida del 2026-09-08, sin elevar.
 
 ## M1. slDLSSGGetState observado, no consultado
 
-**NO SE PUDO PROBAR**: en el banco nadie llama a `slDLSSGGetState`, asi que no hay
-llamadas que observar. Haria falta un proceso que si la llame -- Cyberpunk lo
-hace, su propio `sl.log` avisa sobre esas llamadas.
+**NO ANDA para contar presentaciones**: observado da ~20 veces de mas, no el
+total. La hipotesis de que el contador se reiniciaba por llamadas del juego
+queda REFUTADA.
 
-Lo que SI quedo probado, que no es poco: **el mecanismo esta armado y engancha
-bien**. La POC, cargada en el sample del banco:
+**Pero el campo resulto ser otra cosa, y mejor**: el offset 48 es el
+MULTIPLICADOR VIVO, no un contador de frames.
 
-    dll real cargado (convive, no reemplaza)      OK
-    sl.interposer mapeado                          OK
-    slGetFeatureFunction enganchado                OK
-    testigo: Present enganchado por la vtable      OK
-    slDLSSGGetState entregado al llamador          NUNCA aparecio
-    llamadas observadas                            0
-    estado.suma                                    0
+    multiplicador pedido    valor medio por llamada
+        2x                       1.94
+        3x                       2.99
+        4x                       3.99
 
-Lo unico que falta es un anfitrion que pida la funcion. El sample no la pide.
+Devuelve lo mismo en cada llamada sin importar con que frecuencia se pregunte --
+por eso sumarlo daba 2396 cada 2 segundos contra 120 presentaciones reales. No es
+"frames presentados desde la ultima llamada"; es cuantos frames se estan
+presentando por cada uno renderizado, ahora.
 
-Detalle de metodo que costo una corrida: la primera version REEMPLAZABA al dll
-del banco y el sample terminaba en STATUS INVALID a los 4 segundos. La segunda
-carga al dll real por `M1_DLL_REAL` y convive; ahi el banco corrio entero.
+**Esto es exactamente lo que M6 dijo que NVAPI no expone.** Esta disponible por
+una API publica de Streamline, en cualquier juego con DLSS-G, sin parche de
+bytes, sin ETW y sin privilegios. Es el numero que el HUD no tiene en Halo.
 
-Que haria falta para cerrarlo: correr esta misma POC en un proceso que consulte
-el estado. No se hizo porque exige un juego real, y este objetivo no manda al
-usuario a abrir juegos.
+Como se llego, y los dos intentos que fallaron primero:
 
-POC: `poc/m1-observado/m1.cpp`, g++ con MinHook, m1.dll de 107.981 bytes.
-Corrida del 2026-09-08 sobre `bundled-2.12.0`, 25 s.
+  1. Reemplazar el dll del banco por la POC: el sample murio en STATUS INVALID a
+     los 4 segundos.
+  2. Convivir cargando el dll real y enganchar `slGetFeatureFunction`: el sample
+     vivio bien pero se observaron 0 llamadas. El dll real engancha esa misma
+     funcion y se carga primero, asi que las peticiones pasan por SU hook y el
+     nuestro queda a la sombra.
+  3. Lo que si funciono: pedir el puntero uno mismo con
+     `slGetFeatureFunction(1000, "slDLSSGGetState", fn)` y enganchar **el cuerpo**
+     de la funcion. Es la misma direccion para todos los llamadores, asi que no
+     importa quien intermedie.
+
+        punteros obtenidos: GetState 00007ff8ebbf8660  SetOptions 00007ff8ed987de0
+
+El viewport y las opciones que hacen falta para consultar se capturan de la
+llamada que el anfitrion hace a `slDLSSGSetOptions`.
+
+POC: `poc/m1-observado/m1.cpp`, g++ con MinHook, m1.dll de 109.644 bytes.
+Corridas del 2026-09-08 sobre `bundled-2.12.0`, 20-25 s, multiplicadores 2x, 3x
+y 4x.
 
 ## M2. Vtable del swapchain via swapchain propio
 

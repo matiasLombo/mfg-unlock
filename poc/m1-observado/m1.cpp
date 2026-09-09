@@ -116,11 +116,42 @@ static unsigned hk_GetState(const void *vp, void *estado, const void *opts) {
     return r;
 }
 
+// Para poder CONSULTAR hace falta un viewport y unas opciones validas. Se los
+// robamos a la llamada que el propio anfitrion hace a slDLSSGSetOptions.
+static const void *g_vp = nullptr;
+static const void *g_opts = nullptr;
+static volatile LONG g_hilo_opts = 0;
+
+typedef unsigned (*PFN_SetOptions)(const void *, const void *);
+static PFN_SetOptions g_orig_setoptions = nullptr;
+
+static unsigned hk_SetOptions(const void *vp, const void *opts) {
+    if (g_vp == nullptr) {
+        g_vp = vp;
+        g_opts = opts;
+        g_hilo_opts = (LONG)GetCurrentThreadId();
+        anotar("viewport y opciones capturados desde slDLSSGSetOptions, hilo %ld",
+               g_hilo_opts);
+    }
+    return g_orig_setoptions(vp, opts);
+}
+
 typedef unsigned (*PFN_GetFeatureFunction)(unsigned, const char *, void *&);
 static PFN_GetFeatureFunction g_orig_gff = nullptr;
 
 static unsigned hk_GetFeatureFunction(unsigned feature, const char *name, void *&fn) {
     const unsigned r = g_orig_gff(feature, name, fn);
+    if (r == 0 && name != nullptr && fn != nullptr &&
+        strcmp(name, "slDLSSGSetOptions") == 0 && g_orig_setoptions == nullptr) {
+        anotar("slDLSSGSetOptions entregado, enganchando");
+        if (MH_CreateHook(fn, (void *)&hk_SetOptions, (void **)&g_orig_setoptions) == MH_OK &&
+            MH_EnableHook(fn) == MH_OK) {
+            anotar("  enganchado OK");
+            fn = (void *)&hk_SetOptions;
+        } else {
+            g_orig_setoptions = nullptr;
+        }
+    }
     if (r == 0 && name != nullptr && fn != nullptr &&
         strcmp(name, "slDLSSGGetState") == 0 && g_orig_getstate == nullptr) {
         anotar("slDLSSGGetState entregado al llamador, enganchando");
@@ -169,16 +200,70 @@ static DWORD WINAPI hilo(LPVOID) {
     if (si == nullptr) { anotar("NO SE PUDO PROBAR: nunca aparecio sl.interposer"); return 0; }
     anotar("sl.interposer mapeado");
 
-    void *f = (void *)GetProcAddress(si, "slGetFeatureFunction");
-    if (f == nullptr) { anotar("NO SE PUDO PROBAR: sin slGetFeatureFunction"); return 0; }
-    if (MH_CreateHook(f, (void *)&hk_GetFeatureFunction, (void **)&g_orig_gff) != MH_OK ||
-        MH_EnableHook(f) != MH_OK) {
-        anotar("NO SE PUDO PROBAR: no se pudo enganchar slGetFeatureFunction");
+    // Enganchar slGetFeatureFunction NO sirve aca: el dll real tambien lo
+    // engancha y se carga primero, asi que las peticiones del anfitrion pasan
+    // por SU hook y el nuestro queda a la sombra. Se vio en dos corridas
+    // seguidas: 0 llamadas observadas.
+    //
+    // Se pide el puntero uno mismo y se engancha EL CUERPO de la funcion, que es
+    // la misma direccion para todos los llamadores. Asi no importa quien
+    // intermedie ni quien haya pedido el puntero antes.
+    PFN_GetFeatureFunction gff =
+        (PFN_GetFeatureFunction)GetProcAddress(si, "slGetFeatureFunction");
+    if (gff == nullptr) { anotar("NO SE PUDO PROBAR: sin slGetFeatureFunction"); return 0; }
+
+    const unsigned kFeatureDLSS_G = 1000;   // sl_core_types.h
+    void *fn_estado = nullptr;
+    void *fn_opts = nullptr;
+    for (int i = 0; i < 600 && fn_estado == nullptr; ++i) {
+        if (gff(kFeatureDLSS_G, "slDLSSGGetState", fn_estado) != 0) fn_estado = nullptr;
+        if (fn_estado == nullptr) Sleep(100);
+    }
+    if (fn_estado == nullptr) {
+        anotar("NO SE PUDO PROBAR: el plugin nunca entrego slDLSSGGetState");
         return 0;
     }
-    anotar("slGetFeatureFunction enganchado");
+    gff(kFeatureDLSS_G, "slDLSSGSetOptions", fn_opts);
+    anotar("punteros obtenidos: GetState %p  SetOptions %p", fn_estado, fn_opts);
+
+    if (MH_CreateHook(fn_estado, (void *)&hk_GetState, (void **)&g_orig_getstate) != MH_OK ||
+        MH_EnableHook(fn_estado) != MH_OK) {
+        anotar("NO SE PUDO PROBAR: no se pudo enganchar el cuerpo de slDLSSGGetState");
+        return 0;
+    }
+    anotar("cuerpo de slDLSSGGetState enganchado");
+
+    if (fn_opts != nullptr &&
+        MH_CreateHook(fn_opts, (void *)&hk_SetOptions, (void **)&g_orig_setoptions) == MH_OK &&
+        MH_EnableHook(fn_opts) == MH_OK) {
+        anotar("cuerpo de slDLSSGSetOptions enganchado");
+    }
 
     enganchar_present();
+
+    // El sondeo. Sin un segundo llamador no se puede distinguir observar de
+    // consultar: si somos los unicos, nadie reinicia el contador y las dos cosas
+    // dan igual. Asi que la POC hace de "juego" -- consulta seguido -- y al mismo
+    // tiempo observa TODAS las llamadas, las suyas incluidas.
+    //
+    // Si sumar lo observado recupera el total de presentaciones, la hipotesis
+    // queda probada: ningun reinicio se pierde cuando se observa.
+    CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
+        unsigned char st[256];
+        for (;;) {
+            Sleep(5);
+            if (g_orig_getstate == nullptr || g_vp == nullptr) continue;
+            for (int i = 0; i < 256; ++i) st[i] = 0;
+            // GUID de DLSSGState: cc8ac8e1-a179-44f5-97fa-e74112f9bc61
+            static const unsigned char guid[16] = {
+                0xe1,0xc8,0x8a,0xcc, 0x79,0xa1, 0xf5,0x44,
+                0x97,0xfa,0xe7,0x41,0x12,0xf9,0xbc,0x61 };
+            for (int i = 0; i < 16; ++i) st[8 + i] = guid[i];
+            *(unsigned long long *)(st + 24) = 4;
+            hk_GetState(g_vp, st, g_opts);      // por el hook, para que se observe
+        }
+        return 0;
+    }, nullptr, 0, nullptr);
 
     // Informe cada dos segundos: los dos numeros lado a lado.
     LONG p0 = 0, e0 = 0;
