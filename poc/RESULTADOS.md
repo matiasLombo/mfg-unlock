@@ -37,16 +37,32 @@ Dos intentos elevados fallaron por causas que ya estan corregidas en la POC:
 El SDK inicializa desde un proceso comun -- su cliente de prueba imprime
 `InitializeFvSDKSession SUCCESS` sin elevar -- asi que parecia el camino sin UAC.
 
-Se llego hasta el final y NO alcanzo:
+Se llego hasta el final y NO alcanzo, pero el bloqueo quedo acotado a un solo
+punto. La cadena, despues de tres correcciones sucesivas:
 
-    FvSDK_Initialize      0  (exito)
-    FvSDK_CreateSession   0  (exito)
-    FvSDK_EnableMetrics   0  (exito, eAvgFPS)
-    FvSDK_StartSession   20  = FV_SDK_SESSION_IN_PROGRESS
+    FvSDK_Initialize                0  exito
+    FvSDK_CreateSession             0  exito
+    FvSDK_StopSession (previo)      0  exito  <- hacia falta: sin esto,
+                                                 StartSession devolvia 20 =
+                                                 FV_SDK_SESSION_IN_PROGRESS,
+                                                 porque nvfvsdksvc_x64 corre y
+                                                 tiene su propia sesion
+    FvSDK_StartSession              0  exito
+    FvSDK_EnableMetrics(eAvgFPS)    0  exito  <- tiene que ir DESPUES de
+                                                 StartSession; antes devuelve
+                                                 exito pero no queda habilitada
+    FvSDK_SampleData                3  = FV_NO_DATA   <-- ACA SE CORTA
+    FvSDK_ReadData                  9  = FV_METRIC_NOT_ENABLED
     muestras con el pid del presentador: 0
 
-Hay una sesion del SDK ya abierta en la maquina y no se pudo determinar quien la
-tiene. Sin sesion propia no llegan datos.
+O sea: la sesion arranca, la metrica se habilita, y el servicio **no produce
+datos** para nuestro proceso. No se determino por que. Dos hipotesis sin probar:
+que FrameView necesite su propia aplicacion corriendo para que el servicio
+recolecte, o que el presentador no cuente como "juego" para el (ventana chica,
+sin pantalla completa exclusiva).
+
+Lo importante para quien lo retome: **el camino no esta cerrado por permisos**.
+Todo esto corrio sin elevar.
 
 Lo que costo llegar hasta ahi, por si alguien lo retoma: el dll exporta UNA sola
 funcion, `fv_QueryInterface` -- el patron de NVAPI. Los stubs viven en un `.lib`

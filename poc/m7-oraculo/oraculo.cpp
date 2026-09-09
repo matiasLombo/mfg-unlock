@@ -116,12 +116,22 @@ int main(int argc, char **argv) {
     st = ::FvSDK_CreateSession(&ses);
     printf("FvSDK_CreateSession: %d\n", (int)st);
 
-    FvMetricType metricas[] = { eAvgFPS };
-    st = ::FvSDK_EnableMetrics(ses, metricas, 1);
-    printf("::FvSDK_EnableMetrics(eAvgFPS): %d\n", (int)st);
+    // Hay una sesion del SDK en curso (el servicio nvfvsdksvc_x64 corre y
+    // alimenta al FrameView de NVIDIA). Se intenta cerrarla antes de abrir la
+    // nuestra: sin sesion propia, EnableMetrics devuelve exito pero ReadData
+    // contesta 9 = FV_METRIC_NOT_ENABLED.
+    const FvStatus prev = ::FvSDK_StopSession(ses);
+    printf("FvSDK_StopSession previo: %d\n", (int)prev);
+
 
     st = ::FvSDK_StartSession(ses);
     printf("FvSDK_StartSession: %d\n", (int)st);
+
+    // Las metricas se habilitan DESPUES de arrancar la sesion: antes,
+    // EnableMetrics devuelve exito pero ReadData contesta 9 = METRIC_NOT_ENABLED.
+    FvMetricType metricas[] = { eAvgFPS };
+    st = ::FvSDK_EnableMetrics(ses, metricas, 1);
+    printf("::FvSDK_EnableMetrics(eAvgFPS): %d\n", (int)st);
 
     // El presentador: la verdad conocida.
     char cmd[512];
@@ -140,14 +150,23 @@ int main(int argc, char **argv) {
     int leidas = 0;
     for (int i = 0; i < segundos; ++i) {
         Sleep(1000);
-        ::FvSDK_SampleData(ses, FVSDK_SAMPLEDATA_DONOTWAIT);
+        const FvStatus sd = ::FvSDK_SampleData(ses, FVSDK_SAMPLEDATA_DONOTWAIT);
+        if (i == 0) printf("  [diag] SampleData -> %d\n", (int)sd);
         AvgFPS buf[32];
         Samples s;
         s.type = eAvgFPS;
         s.mData = buf;
         s.mNumSamples = 32;
         const FvStatus r = ::FvSDK_ReadData(ses, &s, 32);
-        if (r != FV_SUCCESS) continue;
+        if (i == 0 || (i % 4) == 0)
+            printf("  [diag] ReadData -> %d, muestras devueltas %llu\n",
+                   (int)r, (unsigned long long)s.mNumSamples);
+        if (r != FV_SUCCESS && r != fvh::FV_MORE_DATA) continue;
+        // Diagnostico: que procesos reporta, sin filtrar.
+        for (size_t k = 0; k < s.mNumSamples && k < 32; ++k)
+            if (buf[k].mFPS.PID != 0)
+                printf("  [diag] pid %llu  AvgFPS %.2f\n",
+                       (unsigned long long)buf[k].mFPS.PID, buf[k].mFPS.AvgFPS);
         for (size_t k = 0; k < s.mNumSamples && k < 32; ++k) {
             if (buf[k].mFPS.PID == (unsigned long long)pi.dwProcessId &&
                 buf[k].mFPS.AvgFPS > 0.0) {
