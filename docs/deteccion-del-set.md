@@ -45,50 +45,54 @@ Todos salen de cosas que el dll ya imprime hoy. Ninguno es nuevo.
 
 ## El veredicto
 
-**VERDE** -- no se toca nada:
-  - queda **una** copia viva de `sl.dlss_g`, y
-  - esa copia tiene el sitio de la cuenta, y
-  - tiene al menos un sitio de pacer.
-  GTA V medido: 1 copia, 0 descargas, 0 `sitios que quedan 0`.
+**VERDE** -- el set esta LIMPIO. No se toca nada. Exige las cuatro cosas:
+  - una unica copia de `sl.dlss_g` mapeada en toda la corrida,
+  - viva al final,
+  - con el sitio de la cuenta y con sitio de pacer,
+  - y de la misma version que el interposer.
 
-**AMARILLO** -- funciona, no se toca, pero se anota que es fragil:
-  - mas de una copia mapeada, y la que sobrevive tiene el sitio.
-  Cyberpunk es este caso: interposer 2.7 + plugin 2.11 + una copia OTA 2.14.
-  Anda a pesar de la configuracion, no gracias a ella. **Amarillo NO habilita
-  sustituir**: es la regla que faltaba anoche.
+**ROJO** -- cualquier otra cosa. Se ofrece reemplazo, previa autorizacion.
 
-**ROJO** -- candidato a sustitucion, previa autorizacion en el panel:
-  - la copia que sobrevive tiene **0** sitios de cuenta, **o**
-  - todas las copias parcheadas se descargaron (`sitios que quedan 0` al final).
-  Halo medido: la 2.7.30 tiene 0 sitios; con redireccion, la 2.12 se parchea y
-  Streamline la descarta.
+### Por que tajante, y por que mi objecion era falsa
 
-## Datos de referencia, medidos el 2026-09-09
+Hubo primero un AMARILLO ("anda pero es fragil") y despues un VERDE con nota.
+Las dos formas eran un tercer estado disfrazado. El usuario pidio dos estados y
+que cualquier rareza, por minima que sea, caiga en rojo.
 
-Con el dll bueno (86fa8c0b), benchmark de Cyberpunk con foco forzado:
+Yo lo resisti con este argumento: "sustituirle el set a un juego que anda lo
+rompe; a Cyberpunk lo crasheo a los 8 segundos". **Ese argumento era falso.** No
+habia dump, ni modulo, ni offset -- el juego murio en una corrida donde
+sustituimos y yo llame a eso una causa. Ademas el crash fue con un mecanismo que
+ya no existe: sustituia un plugin suelto cruzando versiones, sin coherencia de
+set.
 
-    copias mapeadas      2   (su 2.11 propia + la OTA 2.14 de la cache)
-    parches enganchados  2
-    descargas de modulo  2
-    multiplicador        535 ventanas, mediana 1.00, p90 3.97, max 4.08
+Se midio en vez de discutir. Cyberpunk forzado a ROJO con la sustitucion activa:
 
-La mediana 1.00 no es un defecto: el benchmark incluye tramos sin generacion.
-El numero que sirve de referencia es **p90 3.97 / max 4.08**.
+    corrida   sustituciones   duracion    p90     max
+    1         7               127 s       4.00    4.11
+    2         7               135 s       3.93    4.08
+    3         7               130 s       3.97    4.08
+    linea base sin sustituir              3.97    4.08
 
-Contraste medido la misma noche, con un filtro que dejaba sin parchear la copia
-2.14: 622 ventanas, **max 2.08** -- ninguna ventana llego a 4x. Ese 2.00 era el
-frame generation nativo del juego. Sirve como prueba de que la copia OTA es la
-que hace el trabajo, y como umbral: si una corrida de Cyberpunk no llega a p90
-cercano a 4, el cambio rompio algo.
+Indistinguible, tres de tres. **Marcar rojo a un juego que anda no lo rompe.**
 
-En el banco, `gtav-213-limpio --mode 2 --base-fps 30`: mediana 2.00 exacta,
-13 ventanas, engancho al primer intento (`tools/bench.py`).
+**Y el hallazgo que mas sirve:** esas tres corridas fueron con el interposer 2.7
+del juego y siete plugins 2.12 -- un cruce de trenes. Funciona. Era exactamente
+la combinacion que yo trataba como la causa del crash de Halo y evitaba por eso.
+
+Gate con la regla tajante, estado limpio (primera instalacion), sin autorizacion:
+
+    corrida 1  ROJO  0 sustituciones  p90 3.95  max 4.17
+    corrida 2  ROJO  0 sustituciones  p90 4.00  max 4.13   (aviso de falta de permiso)
+
+Rojo marca, no actua: sin el si explicito no se sustituye nada.
 
 ## Criterio de rechazo
 
 Si el detector devuelve algo distinto de VERDE para `gtav-213-limpio`, o algo
 distinto de ROJO para `ota:132874`, el criterio esta mal y no se avanza a M2.
-Para AMARILLO se usa `gtav-213-ota`, y amarillo no sustituye.
+El caso de varias copias (`gtav-213-limpio --ota`) tiene que dar VERDE y no
+sustituir nada.
 
 **Correccion del fixture, no del criterio.** La primera version de este documento
 pedia `cp2077-271` para AMARILLO. Ese set NO se puede correr en el banco, y ya

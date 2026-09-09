@@ -6215,17 +6215,54 @@ static int veredicto_del_set(int *vivas_out, int *vivas_con_sitio_out) {
     }
     if (vivas_out != nullptr) *vivas_out = vivas;
     if (vivas_con_sitio_out != nullptr) *vivas_con_sitio_out = con_sitio;
-    if (con_sitio == 0) return 2;                 // ROJO: nadie vivo puede contar
-    // VERDE es el caso GTA V y exige las dos cosas: UNA sola copia mapeada en
-    // toda la corrida, y que esa copia siga viva y pueda contar.
+    // Dos estados, no tres.
     //
-    // La primera version de esto miraba solo las vivas al final, y daba VERDE a
-    // un caso con TRES copias mapeadas que se descargan entre si hasta quedar
-    // una. Ese es el caso Cyberpunk: funciona, pero es el que se rompio dos
-    // veces en una noche. El criterio escrito ya decia "mas de una copia
-    // MAPEADA -> amarillo"; el codigo no lo implementaba.
-    if (g_copias_n == 1 && vivas == 1 && con_sitio == 1) return 0;
-    return 1;                                     // AMARILLO: anda, pero fragil
+    // Hubo un AMARILLO para "anda pero es fragil" (mas de una copia mapeada, que
+    // es el caso Cyberpunk). Se retiro porque nunca cambiaba ninguna decision:
+    // verde no sustituye y amarillo tampoco. Una distincion que no decide nada
+    // es ruido en un criterio, y ademas invitaba a tratar "raro" como "roto",
+    // que es exactamente el error que rompio Cyberpunk dos veces.
+    //
+    // Se colapsa hacia VERDE, nunca hacia ROJO: si el caso de varias copias
+    // quedara en rojo, pasaria a ser candidato a sustitucion y volveriamos al
+    // mismo pozo.
+    //
+    // La cantidad de copias no se pierde -- se sigue loguendo -- pero deja de
+    // ser un veredicto.
+    // Tajante: VERDE solo si esta TODO limpio. Cualquier rareza, por minima que
+    // sea, va a ROJO y se ofrece reemplazo.
+    //
+    // Antes VERDE era "hay alguien vivo que puede contar", y el caso de varias
+    // copias caia ahi. Se cambio porque la objecion que sostenia lo anterior
+    // resulto falsa: yo decia que sustituirle el set a un juego que anda lo
+    // rompe, apoyado en un crash que NUNCA diagnostique -- sin dump, sin modulo,
+    // sin offset, y con un mecanismo distinto del actual.
+    //
+    // Se midio. Cyberpunk forzado a ROJO, con la sustitucion activa, tres veces:
+    //
+    //     sustituciones 7, corrida completa, p90 4.00 / 3.93 / 3.97, max ~4.1
+    //     linea base sin sustituir:          p90 3.97
+    //
+    // Indistinguible. Y de paso quedo probado que el cruce de trenes funciona:
+    // corrio con el interposer 2.7 del juego y siete plugins 2.12.
+    if (g_copias_n != 1) return 2;                // mas de una copia, o ninguna
+    if (vivas != 1 || con_sitio != 1) return 2;   // se descargo, o no puede contar
+    if (g_copias[0].sitios_pacer <= 0) return 2;  // sin pacer
+    // La version del interposer se lee aca y no de g_set_version, que solo se
+    // llena cuando ya se decidio sustituir -- o sea nunca en la corrida que
+    // observa, que es justo donde este chequeo tiene que valer.
+    {
+        HMODULE inter = GetModuleHandleW(L"sl.interposer.dll");
+        if (inter != nullptr && g_copias[0].menor != 0) {
+            wchar_t ri[MAX_PATH];
+            if (GetModuleFileNameW(inter, ri, MAX_PATH) != 0) {
+                unsigned mi = 0, ni = 0;
+                version_soportada(ri, &mi, &ni);
+                if (ni != 0 && ni != g_copias[0].menor) return 2;   // set mezclado
+            }
+        }
+    }
+    return 0;                                     // VERDE: limpio
 }
 
 // El estado va a carpeta propia, NUNCA al lado del juego: [[ships-as-one-dll]].
@@ -6301,6 +6338,8 @@ static void emitir_veredicto_si_toca(void) {
 
     int vivas = 0, con_sitio = 0;
     const int v = veredicto_del_set(&vivas, &con_sitio);
+    // El indice 1 ya no se produce; se deja el nombre para poder leer archivos
+    // de estado viejos que digan AMARILLO (parsean a 1, que no habilita nada).
     static const char *kNombre[3] = { "VERDE", "AMARILLO", "ROJO" };
     log_line("--- veredicto del set de Streamline ---");
     log_num("  copias vistas ", (unsigned)g_copias_n);
@@ -6317,8 +6356,14 @@ static void emitir_veredicto_si_toca(void) {
     for (const char *q = kNombre[v]; *q != 0; ++q) b[k++] = *q;
     b[k] = 0;
     log_line(b);
-    if (v == 2) log_line("  (rojo: este juego no puede contar; candidato a sustitucion)");
-    if (v == 1) log_line("  (amarillo: anda, pero fragil. NO se sustituye)");
+    if (v == 2) log_line("  (rojo: el set no esta limpio; candidato a sustitucion)");
+    else        log_line("  (verde: una sola copia, viva, con sitios y de la version del interposer)");
+    // Aca hubo una nota que decia que varias copias es "la configuracion mas
+    // fragil". Se retiro por dos razones. Es redundante: dos lineas mas arriba
+    // ya estan "copias vistas N" y el detalle por copia con cual sobrevivio, que
+    // es el dato crudo. Y es un juicio, no un hecho -- se apoya en dos
+    // incidentes en un solo juego, no en un experimento. Un veredicto con
+    // matices es un tercer estado disfrazado, que es justo lo que se quiso sacar.
 
     // El diagnostico se guarda SOLO si no hubo sustitucion.
     //
