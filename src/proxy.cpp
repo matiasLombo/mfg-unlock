@@ -7319,34 +7319,12 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     int corte = n;
     while (corte > 0 && g_ruta_pedida[corte-1] != L'\\' && g_ruta_pedida[corte-1] != L'/')
         --corte;
-    // DIAGNOSTICO: que rutas de Streamline llegan siquiera a este gancho.
-    //
-    // En Halo la copia OTA se mapea igual aunque la interceptamos por carpeta.
-    // Hay dos explicaciones posibles y no se puede elegir entre ellas sin dato:
-    // que el gancho la vea y algo falle despues, o que NGX no la cargue con
-    // LoadLibrary sino mapeandola directo, en cuyo caso nunca pasa por aca.
-    // Esta linea distingue una de la otra. Acotada a 12 para no inundar el log.
-    {
-        static int vistas = 0;
-        // "sl." y no solo "s": la primera version filtraba por la inicial y el
-        // cupo se lleno con Shell32, sspicli y steam_api64 ANTES de que
-        // Streamline cargara a los 9,8 s. El diagnostico salio vacio por el
-        // filtro, no por el fenomeno.
-        bool interesa = (g_ruta_pedida[corte] == L's' || g_ruta_pedida[corte] == L'S') &&
-                        (g_ruta_pedida[corte+1] == L'l' || g_ruta_pedida[corte+1] == L'L') &&
-                        (g_ruta_pedida[corte+2] == L'.');
-        if (!interesa) {
-            for (int i = 0; i + 10 <= n; ++i) {
-                if ((g_ruta_pedida[i] == L'N' || g_ruta_pedida[i] == L'n') &&
-                    (g_ruta_pedida[i+1] == L'G' || g_ruta_pedida[i+1] == L'g') &&
-                    (g_ruta_pedida[i+2] == L'X' || g_ruta_pedida[i+2] == L'x')) { interesa = true; break; }
-            }
-        }
-        if (interesa && vistas < 30) {
-            ++vistas;
-            log_ruta("gancho ve: ", g_ruta_pedida);
-        }
-    }
+    // Aca hubo un bloque de diagnostico que escribia al log DESDE ADENTRO de
+    // LdrLoadDll, en cada carga de modulo del proceso y con el loader lock
+    // tomado. Sirvio para lo que se puso -- probo que el gancho SI ve la copia
+    // OTA, contra mi hipotesis de que NGX la mapeaba por fuera -- y se retira.
+    // Escribir a un archivo bajo el loader lock, por cada DLL que carga el
+    // juego, no es algo que deba quedar en un binario que se distribuye.
 
     // Se reconoce el modulo por su nombre de archivo, y ademas por la carpeta
     // de la cache de NGX: alli los archivos NO se llaman sl.<algo>.dll sino
