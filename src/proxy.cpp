@@ -57,6 +57,7 @@ static LONG g_probe_i = 0;
 static bool g_probe_done = false;
 static void dyn_control(double base_fps, double presented_fps);  // definida mas abajo
 static bool version_soportada(const wchar_t *ruta, unsigned *may, unsigned *men);
+static bool g_ya_sustituimos = false;                         // M3
 static void emitir_veredicto_si_toca(void);   // M1, definida mas abajo
 static bool ruta_de_estado(wchar_t *out, int max);            // M1, idem
 static void dyn_apply(double base_fps);                          // definida mas abajo
@@ -6206,12 +6207,36 @@ static bool ruta_de_estado(wchar_t *out, int max) {
     for (int i = 0; sub[i] != 0; ++i) dir[k++] = sub[i];
     dir[k] = 0;
     CreateDirectoryW(dir, nullptr);
-    // Nombre por ejecutable: un hash simple de la ruta completa alcanza para
-    // separar juegos sin exponer rutas en el nombre del archivo.
+    // La clave es el NOMBRE del ejecutable mas su tamano, no la ruta completa.
+    //
+    // Con la ruta completa el veredicto no persiste en el banco: el worker se
+    // copia a una carpeta nueva en cada corrida, asi que la clave cambiaba
+    // siempre y la segunda corrida nunca encontraba lo que dejo la primera. Sin
+    // eso, el mecanismo entero no se puede probar en la unica herramienta
+    // disponible. Nombre + tamano es estable entre corridas y sigue separando
+    // juegos distintos.
     wchar_t exe[MAX_PATH];
-    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    const DWORD nn = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    int corte = (int)nn;
+    while (corte > 0 && exe[corte-1] != L'\\' && exe[corte-1] != L'/') --corte;
     unsigned long long h = 1469598103934665603ULL;
-    for (DWORD i = 0; i < n; ++i) { h ^= (unsigned long long)exe[i]; h *= 1099511628211ULL; }
+    for (int i = corte; i < (int)nn; ++i) {
+        wchar_t c = exe[i];
+        if (c >= L'A' && c <= L'Z') c = (wchar_t)(c + 32);
+        h ^= (unsigned long long)c; h *= 1099511628211ULL;
+    }
+    {
+        HANDLE hf = CreateFileW(exe, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hf != INVALID_HANDLE_VALUE) {
+            LARGE_INTEGER sz;
+            if (GetFileSizeEx(hf, &sz)) {
+                h ^= (unsigned long long)sz.QuadPart; h *= 1099511628211ULL;
+            }
+            CloseHandle(hf);
+        }
+    }
+    const DWORD n = nn;
     int p = k;
     const wchar_t *sep = L"\\set-";
     for (int i = 0; sep[i] != 0; ++i) dir[p++] = sep[i];
@@ -6263,6 +6288,22 @@ static void emitir_veredicto_si_toca(void) {
     if (v == 2) log_line("  (rojo: este juego no puede contar; candidato a sustitucion)");
     if (v == 1) log_line("  (amarillo: anda, pero fragil. NO se sustituye)");
 
+    // El diagnostico se guarda SOLO si no hubo sustitucion.
+    //
+    // Si se guardara siempre, el veredicto describiria el set YA arreglado --
+    // que es sano, o sea VERDE -- y la corrida siguiente no sustituiria nada,
+    // volviendo al set roto. Andaria una corrida si y una no.
+    //
+    // En el banco esto no se veia porque cada corrida lanza dos pases: el de
+    // referencia no sustituye y reescribe ROJO, y el de objetivo sustituye. En
+    // un juego real, con un solo pase por ejecucion, la oscilacion es real.
+    //
+    // Guardando solo el diagnostico sin sustituir, el ROJO queda pegado y la
+    // sustitucion se sigue aplicando en cada arranque.
+    if (g_ya_sustituimos) {
+        log_line("  (hubo sustitucion: no se pisa el diagnostico guardado)");
+        return;
+    }
     wchar_t ruta[MAX_PATH];
     if (!ruta_de_estado(ruta, MAX_PATH)) return;
     HANDLE h = CreateFileW(ruta, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
@@ -6852,6 +6893,144 @@ static bool igual_sin_caso(const wchar_t *a, const wchar_t *b) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// M2: de donde sale un set de Streamline que si sirva.
+//
+// La regla, y su fundamento: se llevan los PLUGINS a la version del INTERPOSER,
+// nunca al reves. El interposer es el borde con la aplicacion -- el juego se
+// compilo y enlazo contra el -- asi que es lo unico que no se puede mover sin
+// riesgo. Los plugins los carga el interposer y ese borde es interno.
+//
+// Medido en el caso ROJO del banco (ota:132874):
+//     sl.interposer 2.12   <- ya soportada
+//     sl.common 2.7, sl.dlss_g 2.7 (0 sitios), sl.pcl 2.7, sl.reflex 2.7
+// y la cache de NGX tiene los 18 modulos en 2.12. O sea que ese caso se resuelve
+// entero desde el disco, sin red.
+//
+// El interposer NO esta en la cache en ninguna version -- verificado con find
+// sobre todo ProgramData\NVIDIA. Por eso, si la version del interposer no tiene
+// un dlss_g parcheable, este camino no alcanza y hay que decirlo en vez de
+// inventar una mezcla: es exactamente el caso de Halo (interposer 2.7.30, y el
+// unico dlss_g 2.7 de la cache tiene 0 sitios).
+struct ModuloSet {
+    const wchar_t *nombre;      // sl.common.dll
+    wchar_t ruta[MAX_PATH];     // reemplazo elegido, vacio si no hay
+};
+static ModuloSet g_set[9] = {
+    { L"sl.common.dll",  {0} }, { L"sl.dlss_g.dll", {0} },
+    { L"sl.pcl.dll",     {0} }, { L"sl.reflex.dll", {0} },
+    { L"sl.nis.dll",     {0} }, { L"sl.dlss.dll",   {0} },
+    { L"sl.dlss_d.dll",  {0} }, { L"sl.deepdvc.dll",{0} },
+    { L"sl.nvperf.dll",  {0} },
+};
+static bool g_set_armado = false;
+static unsigned g_set_version = 0;
+
+// sl.common.dll -> sl_common_0, que es como se llama la carpeta en la cache.
+static void carpeta_de_cache(const wchar_t *modulo, wchar_t *out) {
+    int k = 0;
+    for (int i = 0; modulo[i] != 0; ++i) {
+        if (modulo[i] == L'.') {
+            // el ".dll" final no se copia
+            if (modulo[i+1] == L'd' && modulo[i+2] == L'l' && modulo[i+3] == L'l') break;
+            out[k++] = L'_';
+        } else {
+            out[k++] = modulo[i];
+        }
+    }
+    out[k++] = L'_'; out[k++] = L'0'; out[k] = 0;
+}
+
+// Busca en la cache un archivo del modulo pedido cuya version sea 2.<menor>.
+static bool buscar_en_cache(const wchar_t *modulo, unsigned menor, wchar_t *out) {
+    wchar_t carpeta[64];
+    carpeta_de_cache(modulo, carpeta);
+    wchar_t patron[MAX_PATH];
+    int k = 0;
+    const wchar_t *base = L"C:\\ProgramData\\NVIDIA\\NGX\\models\\";
+    for (; base[k] != 0; ++k) patron[k] = base[k];
+    for (int i = 0; carpeta[i] != 0; ++i) patron[k++] = carpeta[i];
+    const wchar_t *cola = L"\\versions\\*";
+    for (int i = 0; cola[i] != 0; ++i) patron[k++] = cola[i];
+    patron[k] = 0;
+
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(patron, &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool hallado = false;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (fd.cFileName[0] == L'.') continue;
+        wchar_t glob[MAX_PATH];
+        int q = k - 1;                       // sin el '*'
+        for (int i = 0; i < q; ++i) glob[i] = patron[i];
+        int p = q;
+        for (int i = 0; fd.cFileName[i] != 0; ++i) glob[p++] = fd.cFileName[i];
+        const wchar_t *sub = L"\\files\\*.dll";
+        for (int i = 0; sub[i] != 0; ++i) glob[p++] = sub[i];
+        glob[p] = 0;
+        WIN32_FIND_DATAW fa;
+        HANDLE ha = FindFirstFileW(glob, &fa);
+        if (ha == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            wchar_t ruta[MAX_PATH];
+            int r = 0;
+            for (int i = 0; i < p - 5; ++i) ruta[r++] = glob[i];   // sin "*.dll"
+            for (int i = 0; fa.cFileName[i] != 0 && r < MAX_PATH - 1; ++i) ruta[r++] = fa.cFileName[i];
+            ruta[r] = 0;
+            unsigned may = 0, men = 0;
+            version_soportada(ruta, &may, &men);
+            if (may == 2 && men == menor) {
+                for (int i = 0; i <= r; ++i) out[i] = ruta[i];
+                hallado = true;
+                break;
+            }
+        } while (FindNextFileW(ha, &fa));
+        FindClose(ha);
+    } while (!hallado && FindNextFileW(h, &fd));
+    FindClose(h);
+    return hallado;
+}
+
+// Arma el set apuntando a la version del interposer que ya esta cargado.
+static void armar_set_objetivo(void) {
+    if (g_set_armado) return;
+    HMODULE inter = GetModuleHandleW(L"sl.interposer.dll");
+    if (inter == nullptr) return;            // todavia no cargo; se reintenta
+    g_set_armado = true;
+
+    wchar_t ruta_int[MAX_PATH];
+    if (GetModuleFileNameW(inter, ruta_int, MAX_PATH) == 0) return;
+    unsigned may = 0, men = 0;
+    version_soportada(ruta_int, &may, &men);
+    g_set_version = men;
+    log_num("set: el interposer del juego es 2.", (unsigned long long)men);
+    if (may != 2 || men == 0) { log_line("  no se pudo leer su version; no se arma nada"); return; }
+
+    int hallados = 0;
+    for (int i = 0; i < 9; ++i) {
+        if (buscar_en_cache(g_set[i].nombre, men, g_set[i].ruta)) ++hallados;
+        else g_set[i].ruta[0] = 0;
+    }
+    log_num("  modulos de esa version encontrados en la cache ", (unsigned long long)hallados);
+
+    // El unico que decide si el set sirve: sin sitio en el dlss_g, no hay nada
+    // que hacer con este interposer, y se dice en vez de armar una mezcla.
+    if (g_set[1].ruta[0] != 0) {
+        const int s = sitios_de_cuenta(g_set[1].ruta);
+        log_num("  sitios de cuenta en el dlss_g candidato ", (unsigned long long)(unsigned)s);
+        if (s <= 0) {
+            log_line("  ese dlss_g no se puede parchear: no hay set utilizable "
+                     "para este interposer");
+            for (int i = 0; i < 9; ++i) g_set[i].ruta[0] = 0;
+        }
+    } else {
+        log_line("  no hay dlss_g de esa version en la cache");
+    }
+}
+// ---------------------------------------------------------------------------
+
 // Se engancha LdrLoadDll y no LoadLibraryExW.
 //
 // El primer intento hooked kernel32!LoadLibraryExW y NO disparo nunca: el log
@@ -6867,7 +7046,7 @@ static wchar_t g_ruta_pedida[MAX_PATH];
 // inservible y tuvimos que sustituirlo. Un juego cuyo plugin sirve -- GTA V con
 // 2.13, Cyberpunk con 2.11 -- no cambia en nada: sus cargas de la cache siguen
 // pasando de largo como hasta ahora.
-static bool g_ya_sustituimos = false;
+
 // Veredicto que dejo la corrida ANTERIOR de este mismo ejecutable: -1 sin dato,
 // 0 verde, 1 amarillo, 2 rojo. La sustitucion solo se permite con 2.
 //
@@ -6913,79 +7092,59 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     int corte = n;
     while (corte > 0 && g_ruta_pedida[corte-1] != L'\\' && g_ruta_pedida[corte-1] != L'/')
         --corte;
-    // Dos formas de nombrar al mismo plugin.
-    //
-    // La copia que trae el juego se llama sl.dlss_g.dll, pero la de la cache de
-    // NGX se llama 190_E658703.dll -- un nombre de contenido, no de modulo. Al
-    // comparar solo el nombre de archivo, la carga de la copia OTA pasaba de
-    // largo: la redireccion disparaba una sola vez, la 2.14 entraba igual, y
-    // Streamline se quedaba con ella descartando la nuestra ("sitios que quedan
-    // 0"). Se reconoce tambien por la carpeta, que es de NVIDIA y no de ningun
-    // juego en particular.
-    bool es_dlssg = igual_sin_caso(g_ruta_pedida + corte, L"sl.dlss_g.dll");
-    if (!es_dlssg) {
-        if (!g_ya_sustituimos) return g_orig_ldrload(ruta, carac, nombre, base);
-        static const wchar_t kCache[] = L"sl_dlss_g_0";
-        for (int i = 0; i + 11 <= n && !es_dlssg; ++i) {
+    // Se reconoce el modulo por su nombre de archivo, y ademas por la carpeta
+    // de la cache de NGX: alli los archivos NO se llaman sl.<algo>.dll sino
+    // 190_E658703.dll -- un nombre de contenido. Comparando solo el nombre, la
+    // carga de la copia OTA pasaba de largo y entraba igual; el log lo mostro:
+    // se sustituia una vez, Streamline se quedaba con la que no tocamos, y el
+    // resultado era "sitios que quedan 0".
+    int idx = -1;
+    for (int i = 0; i < 9; ++i) {
+        if (igual_sin_caso(g_ruta_pedida + corte, g_set[i].nombre)) { idx = i; break; }
+    }
+    bool en_cache = false;
+    if (idx < 0) {
+        static const wchar_t kCache[] = L"\\ngx\\models\\sl_";
+        for (int i = 0; i + 16 <= n && !en_cache; ++i) {
             bool m = true;
-            for (int k = 0; k < 11; ++k) {
+            for (int k = 0; k < 16; ++k) {
                 wchar_t x = g_ruta_pedida[i + k];
                 if (x >= L'A' && x <= L'Z') x = (wchar_t)(x + 32);
                 if (x != kCache[k]) { m = false; break; }
             }
-            es_dlssg = m;
+            en_cache = m;
         }
+        if (en_cache) idx = 1;               // una copia OTA: se trata como dlss_g
     }
-    if (!es_dlssg)
-        return g_orig_ldrload(ruta, carac, nombre, base);
+    if (idx < 0) return g_orig_ldrload(ruta, carac, nombre, base);
 
-    // Sirve si tiene el sitio Y es una version soportada. Con cualquiera de las
-    // dos cosas en falta se sustituye.
-    //
-    // Al principio solo se miraba el sitio, y en Halo eso dejaba pasar la copia
-    // OTA 2.14: tiene el sitio, asi que la redireccion no la tocaba. El
-    // resultado fue el peor de los dos mundos. El log lo mostro entero:
-    //
-    //     sl.dlss_g mapped in ...134273...  version soportada: 2.12  (parcheada)
-    //     sl.dlss_g mapped in ...134656...  version NO soportada     (intacta)
-    //     modulo descargado: se retiran sus sitios parcheados
-    //       sitios que quedan 0
-    //
-    // Streamline se queda con la mas nueva y descarta la nuestra, asi que el
-    // plugin vivo termina siendo justo el que no tocamos: cero sitios, ningun
-    // control de la cuenta, DYNAMIC sin efecto y multiplicador contado 1.00.
-    //
-    // Sustituyendo tambien las versiones no soportadas, las dos cargas resuelven
-    // al mismo archivo y no queda copia sin parchear que Streamline pueda
-    // preferir.
     leer_veredicto_previo();
     if (g_veredicto_previo != 2) {
         // Sin un ROJO de la corrida anterior no se sustituye NADA. Un juego que
-        // funciona nunca llega a esta rama, que es lo que faltaba anoche.
+        // funciona nunca llega a esta rama, que es la salvaguarda que faltaba.
         static bool dicho = false;
         if (!dicho) {
             dicho = true;
-            log_num("plugin: sin veredicto ROJO previo, no se sustituye. veredicto=",
+            log_num("set: sin veredicto ROJO previo, no se sustituye. veredicto=",
                     (unsigned long long)(unsigned)(g_veredicto_previo + 1));
         }
         return g_orig_ldrload(ruta, carac, nombre, base);
     }
+
+    armar_set_objetivo();
+    if (g_set_version == 0 || g_set[idx].ruta[0] == 0)
+        return g_orig_ldrload(ruta, carac, nombre, base);
+
+    // Si el que piden YA es de la version del interposer, no se toca: es el caso
+    // normal y sustituirlo seria trabajo y riesgo por nada.
     unsigned may = 0, men = 0;
-    const bool sop = version_soportada(g_ruta_pedida, &may, &men);
-    const int s = sitios_de_cuenta(g_ruta_pedida);
-    if (sop && s > 0) {
-        log_num("plugin: el del juego sirve, version 2.", (unsigned long long)men);
+    version_soportada(g_ruta_pedida, &may, &men);
+    if (may == 2 && men == g_set_version && !en_cache)
         return g_orig_ldrload(ruta, carac, nombre, base);
-    }
-    const wchar_t *alt = plugin_parcheable_en_cache();
-    if (!sop) log_num("plugin: version no soportada en el que pide, 2.",
-                      (unsigned long long)men);
-    else      log_line("plugin: el que pide el juego no tiene el sitio de la cuenta");
+
+    const wchar_t *alt = g_set[idx].ruta;
+    log_num("set: se sustituye un modulo, pedido 2.", (unsigned long long)men);
     log_ruta("  pedido:  ", g_ruta_pedida);
-    if (alt == nullptr) {
-        log_line("  y la cache de NGX no tiene ninguno que lo tenga; se carga el del juego");
-        return g_orig_ldrload(ruta, carac, nombre, base);
-    }
     log_ruta("  cargado: ", alt);
     int m = 0; while (alt[m] != 0) ++m;
     g_us_alt.Buffer = const_cast<wchar_t *>(alt);
@@ -6995,7 +7154,7 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     g_ya_sustituimos = true;
     const NTSTATUS st = g_orig_ldrload(nullptr, carac, &g_us_alt, base);
     if (st < 0) {
-        log_num("  el de la cache no cargo, status ", (unsigned)st);
+        log_num("  no cargo, status ", (unsigned)st);
         log_line("  se vuelve al del juego");
         return g_orig_ldrload(ruta, carac, nombre, base);
     }

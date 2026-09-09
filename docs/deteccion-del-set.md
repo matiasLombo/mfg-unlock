@@ -99,6 +99,47 @@ correcto: el propio banco lo describe como "2.13 con enableOTA true (como
 Cyberpunk)", que es justamente el caso de dos copias. El umbral no se afloja: se
 cambia una probeta imposible por una que existe.
 
+## M2 y M3: resultado medido, 2026-09-09
+
+Regla de M2: se llevan los PLUGINS a la version del INTERPOSER, nunca al reves.
+El interposer es el borde contra el que el juego se compilo; los plugins los
+carga el interposer y ese borde es interno. Si la version del interposer no
+tiene un dlss_g parcheable, se dice y no se arma nada.
+
+Caso ROJO del banco (`ota:132874`), ciclo completo probado POR PASE:
+
+    pase sin estado:   "sin veredicto ROJO previo"  ->  VEREDICTO: ROJO
+    pase con ROJO:     interposer 2.12, 9 modulos en la cache, 4 sustituciones
+                       -> 1 copia, 1 parche, VEREDICTO: VERDE
+
+Multiplicador CONTADO despues de sustituir, base 30, n=24 ventanas cada uno:
+
+    x2 pedido -> 2.00   (p10 2.00  p90 2.00)
+    x3 pedido -> 3.00   (p10 2.97  p90 3.00)
+    x4 pedido -> 4.00   (p10 3.97  p90 4.00)
+
+Todo desde la cache de la maquina. Sin red.
+
+Gate de regresion, benchmark de Cyberpunk con estado borrado (primera instalacion):
+
+    linea base 86fa8c0b   535 ventanas  mediana 1.00  p90 3.97  max 4.08
+    M1  36d5bad           611 ventanas  mediana 1.00  p90 3.91  max 4.11
+    M2+M3                 590 ventanas  mediana 1.00  p90 3.93  max 4.17
+    copias 2, parches 2, sustituciones 0, veredicto AMARILLO en los tres
+
+### Tres defectos que solo apareceieron midiendo
+
+1. La clave del estado usaba la ruta completa del ejecutable, que cambia en cada
+   corrida del banco: el veredicto no persistia y el mecanismo era intesteable.
+   Ahora la clave es nombre + tamano del ejecutable.
+2. El veredicto se pisaba a si mismo. Se recalculaba sobre el set YA sustituido
+   -- que es sano, o sea VERDE -- y la corrida siguiente no sustituia, volviendo
+   al set roto: una corrida si y una no. En el banco no se veia porque cada
+   corrida lanza DOS pases y el de referencia reescribe ROJO. Ahora el
+   diagnostico se guarda solo cuando no hubo sustitucion.
+3. La emision del veredicto estaba solo en el lazo de teclas, que no corre bajo
+   el banco. Va tambien en el camino de present.
+
 ## Lo que este documento NO afirma
 
 No afirma que sustituir el set arregle Halo. Eso es una hipotesis sin probar: el
