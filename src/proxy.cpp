@@ -334,10 +334,6 @@ static volatile LONG g_asked_state = 0;
 typedef unsigned (*PFN_slDLSSGSetOptions)(const void *, const void *);
 typedef unsigned (*PFN_slGetFeatureFunction)(unsigned, const char *, void *&);
 static PFN_slDLSSGSetOptions g_orig_setoptions = nullptr;
-// Restauracion diferida de las opciones del juego: ver hk_slDLSSGSetOptions.
-static unsigned char *g_restore_p = nullptr;
-static LONG g_restore_cnt = 0, g_restore_mode = 0;
-static bool g_restore_pending = false;
 static PFN_slGetFeatureFunction g_orig_getfeaturefn = nullptr;
 // slInit: por aca pasa la aplicacion sus preferencias, y ahi vive la bandera
 // que decide si Streamline puede cargar plugins descargados por OTA.
@@ -6402,6 +6398,23 @@ static void emitir_veredicto_si_toca(void) {
     }
     wchar_t ruta[MAX_PATH];
     if (!ruta_de_estado(ruta, MAX_PATH)) return;
+    // El consentimiento tiene que sobrevivir a esta reescritura.
+    //
+    // Se abre con CREATE_ALWAYS: trunca. Se escribian solo veredicto, vivas y
+    // con_sitio, asi que la linea "consentimiento=" que M4 anexa se borraba y el
+    // permiso duraba UNA corrida. Medido en Cyberpunk: 12:00 sustituyo 18
+    // modulos con permiso; 12:01 el archivo ya no tenia la linea; la corrida
+    // siguiente mapeo su 2.11 y la OTA 2.14 y no sustituyo nada. Es el mismo
+    // defecto de "una corrida si y una no" que ya se corrigio para el veredicto,
+    // ahora en el permiso.
+    //
+    // g_ya_sustituimos no lo tapa: Cyberpunk levanta DOS procesos con el dll
+    // adentro y alcanza con que llegue aca el que no sustituyo.
+    //
+    // Se relee del disco en vez de confiar en g_consentimiento: quien lo llena
+    // es el lazo de teclas, que no corre en todos los procesos ni bajo el banco.
+    // leer_veredicto_previo es idempotente.
+    leer_veredicto_previo();
     HANDLE h = CreateFileW(ruta, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -6419,9 +6432,16 @@ static void emitir_veredicto_si_toca(void) {
     for (const char *q = l3; *q != 0; ++q) txt[t++] = *q;
     txt[t++] = (char)('0' + (con_sitio > 9 ? 9 : con_sitio));
     txt[t++] = '\n';
+    if (g_consentimiento >= 0) {
+        const char *l4 = g_consentimiento == 1 ? "consentimiento=si\n"
+                                               : "consentimiento=no\n";
+        for (const char *q = l4; *q != 0; ++q) txt[t++] = *q;
+    }
     DWORD esc = 0;
     WriteFile(h, txt, (DWORD)t, &esc, nullptr);
     CloseHandle(h);
+    if (g_consentimiento >= 0)
+        log_num("  consentimiento conservado (1 = si) ", (unsigned)g_consentimiento);
     log_line("  estado guardado en LOCALAPPDATA\\mfg-unlock");
 }
 // ---------------------------------------------------------------------------
@@ -6873,110 +6893,6 @@ static bool version_soportada(const wchar_t *ruta, unsigned *may_out, unsigned *
     return ok;
 }
 
-// Se recorre la cache de mas nuevo a mas viejo y se toma el primero que tenga
-// el sitio Y una version soportada.
-static wchar_t g_plugin_cache[MAX_PATH] = {0};
-static bool g_plugin_cache_buscado = false;
-static const wchar_t *plugin_parcheable_en_cache(void) {
-    if (g_plugin_cache_buscado) return g_plugin_cache[0] != 0 ? g_plugin_cache : nullptr;
-    g_plugin_cache_buscado = true;
-
-    const wchar_t *base = L"C:\\ProgramData\\NVIDIA\\NGX\\models\\sl_dlss_g_0\\versions\\";
-    // Los ids son decimales: gana el mas largo, y a igual largo el mayor.
-    wchar_t mejor_id[64] = {0};
-    for (;;) {
-        wchar_t patron[MAX_PATH];
-        int k = 0;
-        for (; base[k] != 0 && k < MAX_PATH - 2; ++k) patron[k] = base[k];
-        patron[k++] = L'*';
-        patron[k] = 0;
-        WIN32_FIND_DATAW fd;
-        HANDLE h = FindFirstFileW(patron, &fd);
-        if (h == INVALID_HANDLE_VALUE) return nullptr;
-        wchar_t candidato[64] = {0};
-        do {
-            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-            if (fd.cFileName[0] == L'.') continue;
-            int n = 0; while (fd.cFileName[n] != 0 && n < 63) ++n;
-            int m = 0; while (mejor_id[m] != 0) ++m;
-            // Ya descartado en una vuelta anterior: no volver a mirarlo.
-            // Se recorre de mayor a menor: ya visto = "es mayor o igual al
-            // ultimo que probe". Estaba invertido en las tres ramas, y el
-            // efecto era que despues de rechazar el build mas alto se salteaban
-            // todos los demas -- la busqueda devolvia "no hay candidato" con el
-            // 2.12 ahi sin mirar. Ids decimales: gana el mas largo, y a igual
-            // largo el mayor.
-            bool ya_visto = false;
-            if (m > 0) {
-                if (n > m) ya_visto = true;
-                else if (n < m) ya_visto = false;
-                else {
-                    ya_visto = true;   // identico al ultimo probado
-                    for (int i = 0; i < n; ++i) {
-                        if (fd.cFileName[i] != mejor_id[i]) { ya_visto = fd.cFileName[i] > mejor_id[i]; break; }
-                    }
-                }
-            }
-            if (ya_visto) continue;
-            int c = 0; while (candidato[c] != 0) ++c;
-            bool mejor = (c == 0);
-            if (!mejor) {
-                if (n > c) mejor = true;
-                else if (n == c) {
-                    for (int i = 0; i < n; ++i) {
-                        if (fd.cFileName[i] != candidato[i]) { mejor = fd.cFileName[i] > candidato[i]; break; }
-                    }
-                }
-            }
-            if (mejor) { for (int i = 0; i <= n; ++i) candidato[i] = fd.cFileName[i]; }
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
-        if (candidato[0] == 0) return nullptr;      // no quedan mas para probar
-
-        // El nombre del .dll adentro de files\ cambia entre builds: se busca.
-        wchar_t dir[MAX_PATH];
-        int j = 0;
-        for (; base[j] != 0 && j < MAX_PATH - 80; ++j) dir[j] = base[j];
-        for (int i = 0; candidato[i] != 0; ++i) dir[j++] = candidato[i];
-        const wchar_t *sufijo = L"\\files\\";
-        for (int i = 0; sufijo[i] != 0; ++i) dir[j++] = sufijo[i];
-        dir[j] = 0;
-        wchar_t glob[MAX_PATH];
-        int q = 0;
-        for (; dir[q] != 0 && q < MAX_PATH - 6; ++q) glob[q] = dir[q];
-        glob[q++] = L'*'; glob[q++] = L'.'; glob[q++] = L'd'; glob[q++] = L'l'; glob[q++] = L'l';
-        glob[q] = 0;
-        WIN32_FIND_DATAW fa;
-        HANDLE ha = FindFirstFileW(glob, &fa);
-        if (ha != INVALID_HANDLE_VALUE) {
-            do {
-                if (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-                wchar_t ruta[MAX_PATH];
-                int r = 0;
-                for (; dir[r] != 0 && r < MAX_PATH - 64; ++r) ruta[r] = dir[r];
-                for (int i = 0; fa.cFileName[i] != 0 && r < MAX_PATH - 1; ++i) ruta[r++] = fa.cFileName[i];
-                ruta[r] = 0;
-                unsigned may = 0, men = 0;
-                const bool sop = version_soportada(ruta, &may, &men);
-                const bool tiene = (sitios_de_cuenta(ruta) >= 1);
-                if (tiene && sop) {
-                    for (int i = 0; i <= r; ++i) g_plugin_cache[i] = ruta[i];
-                    log_num("plugin: candidato aceptado, version 2.", (unsigned long long)men);
-                    FindClose(ha);
-                    return g_plugin_cache;
-                }
-                if (tiene && !sop) {
-                    // Se descarta a proposito: tiene el sitio pero no es 2.12 ni
-                    // 2.13, y una firma sola no alcanza para confiar en el tren.
-                    log_num("plugin: descartado por version, 2.", (unsigned long long)men);
-                }
-            } while (FindNextFileW(ha, &fa));
-            FindClose(ha);
-        }
-        // Ese build no sirve: se baja el techo y se prueba con el siguiente.
-        for (int i = 0; i <= 63; ++i) mejor_id[i] = candidato[i];
-    }
-}
 
 // log_wide toma un UNICODE_STRING; esto es para una ruta suelta.
 static void log_ruta(const char *etiqueta, const wchar_t *s) {

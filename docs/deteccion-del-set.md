@@ -206,6 +206,57 @@ que anda TODO su set de plugins no lo degrada ni lo rompe.
 Antes del arreglo eran 7 sustituciones y la copia OTA entraba igual; ahora son
 18 y no queda ninguna.
 
+## El permiso duraba UNA corrida, 2026-09-09
+
+`emitir_veredicto_si_toca` abre el archivo de estado con CREATE_ALWAYS -- trunca --
+y escribia solo veredicto, vivas y con_sitio. La linea "consentimiento=" que M4
+anexa se borraba, asi que un juego autorizado volvia a "nunca preguntado" en el
+arranque siguiente y no se sustituia nada. Es el mismo defecto de "una corrida si
+y una no" que ya se habia corregido para el veredicto, ahora en el permiso.
+
+`g_ya_sustituimos` no lo tapaba: Cyberpunk levanta DOS procesos con el dll
+adentro y alcanza con que llegue ahi el que no sustituyo.
+
+Se corrigio releyendo el estado del disco antes de truncar y arrastrando la
+linea. Se relee en vez de usar g_consentimiento porque quien lo llena es el lazo
+de teclas, que no corre en todos los procesos ni bajo el banco.
+
+Como se comprobo, con el binario 821bdde8. Hace falta una corrida que NO
+sustituya, que es la unica que llega al camino corregido:
+
+    estado antes    ROJO + consentimiento=no
+    sustituciones   0                      (sin permiso no toca nada)
+    estado guardado 1                      (el camino corregido corrio)
+    log             "consentimiento conservado (1 = si) 0"
+    estado despues  ROJO + consentimiento=no
+
+La corrida anterior, con permiso, NO sirve como prueba: sustituyo 18 modulos y
+salio por el guard viejo sin tocar el codigo nuevo. Se la conto como verificacion
+antes de mirar el log y era falso.
+
+### Gates de ese binario
+
+    banco ota:132874, modo 3      2.97 contado, valido al primer intento
+    Cyberpunk sustituyendo        18 sustituciones, 7 copias TODAS 2.12,
+                                  301 ventanas  p90 3.97  max 4.11  DLSS-G 4.00x
+    Cyberpunk sin sustituir       set propio (2.11 + OTA 2.14),
+                                  111 ventanas  p90 4.04  max 4.08  DLSS-G 4.00x
+    linea base                    p90 3.97  max 4.08
+    GTA V                         VERDE, 1 copia 2.13 viva y parcheada, 31 min
+
+### Una regresion que reporte y no era
+
+La primera corrida de Cyberpunk del dia murio a los 13 s con
+`D3D11CreateDeviceAndSwapChain fallo, hr 0x8007000E` (E_OUTOFMEMORY) y cero
+ventanas. No era el codigo: era un GTA V mio de una prueba anterior que seguia
+vivo desde hacia media hora ocupando 7,4 GB. Sin dump de Cyberpunk y con un
+dump de QmlRenderer -- el CrashReporter de CDPR -- en la misma hora.
+
+Antes de leer una corrida de Cyberpunk hay que mirar que no quede ningun proceso
+pesado vivo. Es la segunda vez en el dia que el entorno contaminado se parece a
+una rotura del codigo; la primera fueron los dialogos de CrashReporter robando
+el foco.
+
 ## Lo que este documento NO afirma
 
 No afirma que sustituir el set arregle Halo. Eso es una hipotesis sin probar: el

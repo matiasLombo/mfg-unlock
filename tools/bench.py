@@ -79,8 +79,14 @@ def evaluar(run):
         return False, "no hay target/sl.log", datos
     if "interpolation state changed from disabled to enabled" not in sl:
         return False, "sl.log nunca habilito la interpolacion", datos
-    if "Achieved 'good' FC" not in sl:
-        return False, "sl.log nunca logro 'good' FC", datos
+    # NO se exige "Achieved 'good' FC".
+    #
+    # Esa cadena la emite el plugin original; el 2.12 que sustituimos no la
+    # escribe. Con ella como requisito se rechazaban corridas perfectamente
+    # validas -- interpolacion habilitada, frame latency en 3, 4 modulos
+    # sustituidos, multiplicador contado 3.80-3.95. Es el mismo error que se
+    # cometio en run_cp_focus.ps1: un criterio tomado de una version de
+    # Streamline aplicado a otra.
     lat = re.findall(r"SetMaximumFrameLatency changed from \d+ to (\d+)", sl)
     if lat and max(int(x) for x in lat) < 2:
         return False, "frame latency se quedo en 1 (no hubo independent flip)", datos
