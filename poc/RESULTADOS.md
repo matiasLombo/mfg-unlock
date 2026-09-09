@@ -24,6 +24,13 @@ Sin elevar sale con **exit code 1**, sin stdout, sin stderr y sin CSV. Coincide
 con la documentacion de Microsoft: ETW en tiempo real solo lo pueden consumir
 procesos elevados, "Performance Log Users" o servicios del sistema.
 
+**Probado bien, sin el confundidor.** La primera vez se corrio sin elevar y con
+el escritorio quieto, y se concluyo "es elevacion" -- pero eso no distinguia
+elevacion de falta de datos, porque sin presentaciones PresentMon no escribe CSV
+igual. Se repitio con `presentador.exe` corriendo al lado, que presenta a 165 fps:
+mismo exit 1, misma ausencia total de salida, mismo CSV inexistente. Ahora si
+esta aislado: es elevacion.
+
 Dos intentos elevados fallaron por causas que ya estan corregidas en la POC:
   - el primero, porque en el escritorio quieto no hay presentaciones que
     capturar y PresentMon no escribe CSV sin filas;
