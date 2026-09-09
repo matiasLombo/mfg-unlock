@@ -66,7 +66,12 @@ ninguno. El caso sin generar valida el instrumento: 303 presentaciones contra
 
 Queda descartada la hipotesis de "de cada lote de 4 llega una sola imagen".
 
-## DYNAMIC contra 4X fijo, dos corridas cada uno
+## DYNAMIC contra 4X fijo -- SUPERADA por la seccion siguiente
+
+Se deja porque muestra el error: se comparo DYNAMIC a 5.4x contra un fijo a
+4.0x, o sea distinto punto de operacion. Sus dos conclusiones -- "DYNAMIC no
+hitchea mas" y "un cuarto de sus hitches caen en un cambio de cuenta" -- las
+corrige el control apareado de mas abajo. LAS DOS eran falsas.
 
     metrica                        4X fijo          DYNAMIC 165
     multiplicador           4.00 (desvio 0.07)   5.46 / 5.40 (desvio 0.43 / 0.36)
@@ -84,16 +89,54 @@ en el fijo son 0 por construccion.
 **Cuidado al leerlo:** la escena del benchmark hitchea sola. 66 hitches con el
 multiplicador clavado en 4.00 y desvio 0.07 no los causa nuestro controlador.
 
-## El hallazgo que no se buscaba: bloqueamos Present un tercio del tiempo
+## DYNAMIC contra un fijo APAREADO: el control que faltaba
 
-    configuracion   bloqueado en Present, mediana de la ventana   peor
-    4X fijo                      34.7 %                          574 ms
-    DYNAMIC c1                   40.7 %                          760 ms
-    DYNAMIC c2                   40.6 %                          770 ms
+La comparacion anterior era contra 4X mientras DYNAMIC corria a 5.4x. Rehecha
+contra 5X fijo, dos corridas de cada uno:
 
-Nuestro pacer frena al juego adentro de `Present` mas de un tercio del tiempo,
-en LAS DOS configuraciones. No es un defecto de DYNAMIC. No estaba medido en
-ninguna parte. Ver [[pacer-blocking-budget]].
+    metrica                 4X fijo    5X FIJO         DYNAMIC 5.4x
+    multiplicador           4.00       5.00            5.46 / 5.40
+    presentaciones/s        133        192             161
+    FUERA DE CADENCIA       23.8 %     1.4 % / 1.0 %   31.0 % / 30.8 %
+    Present tarda (ventana) 34.7 %     10.9 % / 11.1 % 40.7 % / 40.6 %
+    hitches >33ms           66 / 55    20 y 17 / 63    50 y 44 / 50 y 49
+    pico peor               121 ms     108 y 127 ms    473.5 y 474.6 ms
+
+**DYNAMIC es 30 veces peor que un fijo del mismo punto de operacion en cadencia,
+y encima entrega menos fps (161 contra 192).** Ya no hay confound: el control
+esta apareado y reproduce dos de dos.
+
+### Y el costo NO esta en cambiar la cuenta
+
+Era la sospecha natural. Normalizado por presentaciones -- no por conteo crudo,
+que solo refleja cuantas presentaciones cayeron cerca -- estar cerca de un
+cambio de cuenta NO aumenta el riesgo:
+
+    corrida       cerca de un cambio    lejos      riesgo relativo
+    DYNAMIC c1    29.3 % (1909 pres)    31.3 %          0.94
+    DYNAMIC c2    28.6 % (1969 pres)    31.2 %          0.92
+
+Reproducido. El "24 % de los hitches caen en un cambio de cuenta" que se
+reporto antes era casi la proporcion de presentaciones que hay ahi, sobre 12
+eventos. La tasa mide sobre 12.000 presentaciones y dice cerca ~ lejos.
+
+### Lo que si correlaciona: cuanto tarda Present
+
+    configuracion   Present tarda   fuera de cadencia
+    5X fijo             11 %              1.2 %
+    4X fijo             34.7 %           23.8 %
+    DYNAMIC             40.6 %           30.9 %
+
+Monotono en las tres. **CORRECCION de una version anterior de este documento:
+ese numero NO es un freno nuestro.** `g_present_block_us` cronometra solamente
+la llamada original `g_orig_dxgi_present`; es el pacer de DLSS-G reteniendo el
+frame. Se habia escrito "bloqueamos Present un tercio del tiempo", y era falso:
+no lo bloqueamos nosotros. Lo que se midio es que **DYNAMIC hace que el pacer de
+DLSS-G se quede 4 veces mas adentro de Present que un multiplicador fijo del
+mismo tamano**, y que la cadencia sigue a ese numero.
+
+NO esta probado por que. Candidato sin probar: 5X fijo entrega 192 fps, por
+encima del panel, y DYNAMIC apunta a 165 y entrega 161, justo en el refresh.
 
 ## El override SI controla en Cyberpunk con el set sustituido
 
