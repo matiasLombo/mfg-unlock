@@ -56,6 +56,19 @@ static unsigned char g_probe[16];
 static LONG g_probe_i = 0;
 static bool g_probe_done = false;
 static void dyn_control(double base_fps, double presented_fps);  // definida mas abajo
+// Estado del set, compartido entre el hook de carga, el observador y el panel.
+// -1 sin dato, 0 verde, 1 amarillo, 2 rojo.
+static int g_veredicto_previo = -1;
+static bool g_veredicto_leido = false;
+// -1 sin preguntar todavia, 0 dijo que no, 1 dijo que si.
+//
+// M4. Sustituir el Streamline de un juego es una decision del usuario, no
+// nuestra: cambia que binarios corre su juego. Con ROJO solo NO alcanza; hace
+// falta un si explicito, y hasta que lo haya el dll no toca nada y lo dice.
+static int g_consentimiento = -1;
+volatile LONG g_pide_permiso = 0;   // lo lee el panel (overlay.h)
+static void leer_veredicto_previo(void);
+static void guardar_consentimiento(int si);
 static bool version_soportada(const wchar_t *ruta, unsigned *may, unsigned *men);
 static bool g_ya_sustituimos = false;                         // M3
 static void emitir_veredicto_si_toca(void);   // M1, definida mas abajo
@@ -5521,6 +5534,25 @@ static DWORD WINAPI recorder(LPVOID) {
         // la factory no lo va a ver nunca. Se adopta por la vtable compartida.
         adopt_existing_swapchain();
 
+        // M4: preguntar y registrar la respuesta.
+        //
+        // Solo se pregunta si el diagnostico guardado es ROJO y no hay respuesta
+        // todavia. Un juego VERDE o AMARILLO no ve nada de esto.
+        leer_veredicto_previo();
+        g_pide_permiso = (g_veredicto_previo == 2 && g_consentimiento == -1) ? 1 : 0;
+        if (g_pide_permiso) {
+            const bool si = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
+            const bool no = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+            if (si || no) {
+                g_consentimiento = si ? 1 : 0;
+                g_pide_permiso = 0;
+                guardar_consentimiento(g_consentimiento);
+                log_line(si ? "permiso: el usuario acepto el reemplazo del Streamline"
+                            : "permiso: el usuario dijo que no; no se sustituye nada");
+                log_line("  (toma efecto en el proximo arranque del juego)");
+            }
+        }
+
         const bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
         if (down && !was_down) {
             if (g_recording == 0) {
@@ -6408,6 +6440,7 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
                     for (int i = 0; i < nn; ++i) ruta[i] = u->Buffer[i];
                     ruta[nn] = 0;
                     unsigned may = 0, men = 0;
+                    version_soportada(ruta, &may, &men);
                     // Se informa la version y NO se rechaza nada.
                     //
                     // Aca hubo un filtro que se negaba a parchear lo que no
@@ -6640,7 +6673,7 @@ FORWARD(BOOL,  GetFileVersionInfoByHandle,(DWORD a, HANDLE b, DWORD c, LPVOID d)
 // nada -- de modo que esto no le puede cambiar el comportamiento a un juego que
 // hoy funciona, solo puede ayudar a uno que hoy no.
 static int sitios_de_cuenta(const wchar_t *ruta) {
-    HANDLE h = CreateFileW(ruta, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    HANDLE h = CreateFileW(ruta, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return -1;
     LARGE_INTEGER sz;
@@ -6703,7 +6736,16 @@ static int sitios_de_cuenta(const wchar_t *ruta) {
 static bool version_soportada(const wchar_t *ruta, unsigned *may_out, unsigned *men_out) {
     if (may_out != nullptr) *may_out = 0;
     if (men_out != nullptr) *men_out = 0;
-    HANDLE h = CreateFileW(ruta, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    // FILE_SHARE_DELETE y no FILE_SHARE_WRITE, que es el modo correcto para un
+    // archivo que el cargador puede tener mapeado.
+    //
+    // CORRECCION: este cambio se hizo creyendo que explicaba los "version: 2.0"
+    // del log, y NO era eso. La causa real era otra y mas tonta: al sacar el
+    // filtro de version, la edicion borro la llamada a version_soportada y dejo
+    // el log_num, que imprimia una variable en cero. Se afirmo una causa sin
+    // medirla y se escribio aca como si estuviera establecida. El modo de
+    // apertura se deja porque es el correcto, no porque haya arreglado eso.
+    HANDLE h = CreateFileW(ruta, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER sz;
@@ -6993,6 +7035,60 @@ static bool buscar_en_cache(const wchar_t *modulo, unsigned menor, wchar_t *out)
     return hallado;
 }
 
+// Reemplazo del interposer, que es la unica pieza que la cache de NGX no tiene
+// en ninguna version -- verificado con find sobre todo ProgramData\NVIDIA.
+//
+// Dos fuentes, en orden:
+//   1. la carpeta del propio ejecutable del juego. Cubre a Halo, que trae un set
+//      2.13 completo junto a su exe (los ocho sl.*, byte por byte los de GTA V)
+//      y sin embargo carga el 2.7.30 de Engine\Plugins.
+//   2. nuestra carpeta, con lo bajado del release oficial de NVIDIA-RTX.
+//
+// Nunca se escribe al lado del juego.
+static wchar_t g_set_inter[MAX_PATH] = {0};
+
+static bool version_es(const wchar_t *ruta, unsigned v) {
+    unsigned may = 0, men = 0;
+    version_soportada(ruta, &may, &men);
+    return (may == 2 && men == v);
+}
+
+static bool buscar_interposer(unsigned v, wchar_t *out) {
+    // 1) junto al ejecutable
+    wchar_t exe[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        int corte = (int)n;
+        while (corte > 0 && exe[corte-1] != L'\\' && exe[corte-1] != L'/') --corte;
+        wchar_t cand[MAX_PATH];
+        int k = 0;
+        for (; k < corte; ++k) cand[k] = exe[k];
+        const wchar_t *nom = L"sl.interposer.dll";
+        for (int i = 0; nom[i] != 0; ++i) cand[k++] = nom[i];
+        cand[k] = 0;
+        if (version_es(cand, v)) {
+            for (int i = 0; i <= k; ++i) out[i] = cand[i];
+            return true;
+        }
+    }
+    // 2) lo que bajamos, en LOCALAPPDATA\mfg-unlock\sdk\2.<v>\sl.interposer.dll
+    wchar_t base[MAX_PATH];
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH) == 0) return false;
+    wchar_t cand[MAX_PATH];
+    int k = 0;
+    for (; base[k] != 0 && k < MAX_PATH - 64; ++k) cand[k] = base[k];
+    const wchar_t *sub = L"\\mfg-unlock\\sdk\\2.";
+    for (int i = 0; sub[i] != 0; ++i) cand[k++] = sub[i];
+    if (v >= 10) { cand[k++] = (wchar_t)(L'0' + (v / 10)); }
+    cand[k++] = (wchar_t)(L'0' + (v % 10));
+    const wchar_t *cola = L"\\sl.interposer.dll";
+    for (int i = 0; cola[i] != 0; ++i) cand[k++] = cola[i];
+    cand[k] = 0;
+    if (!version_es(cand, v)) return false;
+    for (int i = 0; i <= k; ++i) out[i] = cand[i];
+    return true;
+}
+
 // Arma el set apuntando a la version del interposer que ya esta cargado.
 static void armar_set_objetivo(void) {
     if (g_set_armado) return;
@@ -7015,19 +7111,61 @@ static void armar_set_objetivo(void) {
     }
     log_num("  modulos de esa version encontrados en la cache ", (unsigned long long)hallados);
 
-    // El unico que decide si el set sirve: sin sitio en el dlss_g, no hay nada
-    // que hacer con este interposer, y se dice en vez de armar una mezcla.
+    // El unico que decide si el set sirve: sin sitio en el dlss_g no hay nada
+    // que hacer QUEDANDOSE en la version del interposer.
+    bool sirve = false;
     if (g_set[1].ruta[0] != 0) {
         const int s = sitios_de_cuenta(g_set[1].ruta);
         log_num("  sitios de cuenta en el dlss_g candidato ", (unsigned long long)(unsigned)s);
-        if (s <= 0) {
-            log_line("  ese dlss_g no se puede parchear: no hay set utilizable "
-                     "para este interposer");
-            for (int i = 0; i < 9; ++i) g_set[i].ruta[0] = 0;
-        }
+        sirve = (s > 0);
     } else {
         log_line("  no hay dlss_g de esa version en la cache");
     }
+    if (sirve) return;
+
+    // Segundo intento: mover TAMBIEN el interposer.
+    //
+    // Es el caso de Halo, y es el unico que queda cuando la version del
+    // interposer no tiene un dlss_g parcheable: su 2.7.30 no lo tiene, y el
+    // unico 2.7 de la cache tampoco (0 sitios; el sitio existe desde 2.11).
+    //
+    // Se puede porque Halo carga el interposer DINAMICAMENTE -- verificado
+    // leyendo su tabla de importaciones: no aparece ahi, mientras que Cyberpunk
+    // y el sample del banco si lo importan estaticamente y por eso en esos dos
+    // no hay nada que interceptar.
+    //
+    // El interposer NO esta en la cache de NGX en ninguna version, asi que sale
+    // de nuestra propia carpeta (descargado del release oficial) o del propio
+    // juego si trae uno de esa version.
+    log_line("  se prueba mover tambien el interposer");
+    for (int i = 0; i < 9; ++i) g_set[i].ruta[0] = 0;
+    static const unsigned kCandidatas[3] = { 13, 12, 11 };
+    for (int c = 0; c < 3; ++c) {
+        const unsigned v = kCandidatas[c];
+        wchar_t dlssg[MAX_PATH];
+        if (!buscar_en_cache(L"sl.dlss_g.dll", v, dlssg)) continue;
+        if (sitios_de_cuenta(dlssg) <= 0) continue;
+        wchar_t inter[MAX_PATH];
+        if (!buscar_interposer(v, inter)) {
+            log_num("  hay dlss_g parcheable en 2.", (unsigned long long)v);
+            log_line("    pero no hay interposer de esa version ni en el juego ni bajado");
+            continue;
+        }
+        int hall = 0;
+        for (int i = 0; i < 9; ++i) {
+            if (buscar_en_cache(g_set[i].nombre, v, g_set[i].ruta)) ++hall;
+            else g_set[i].ruta[0] = 0;
+        }
+        for (int i = 0; inter[i] != 0; ++i) g_set_inter[i] = inter[i];
+        g_set_inter[MAX_PATH-1] = 0;
+        g_set_version = v;
+        log_num("  set completo armado en 2.", (unsigned long long)v);
+        log_num("    modulos de la cache ", (unsigned long long)hall);
+        log_ruta("    interposer: ", inter);
+        return;
+    }
+    log_line("  no hay ninguna version con dlss_g parcheable E interposer disponible");
+    g_set_version = 0;
 }
 // ---------------------------------------------------------------------------
 
@@ -7055,8 +7193,22 @@ static wchar_t g_ruta_pedida[MAX_PATH];
 // una de sus copias no tiene el sitio, disparaba la sustitucion, y terminaba
 // cambiandole la copia OTA que si usa. Con el veredicto persistido, un juego que
 // funciona es VERDE o AMARILLO y jamas entra en esta rama.
-static int g_veredicto_previo = -1;
-static bool g_veredicto_leido = false;
+
+
+
+// Agrega la respuesta al mismo archivo de estado, sin tocar el diagnostico.
+static void guardar_consentimiento(int si) {
+    wchar_t ruta[MAX_PATH];
+    if (!ruta_de_estado(ruta, MAX_PATH)) return;
+    HANDLE h = CreateFileW(ruta, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    const char *txt = si ? "consentimiento=si\n" : "consentimiento=no\n";
+    DWORD esc = 0;
+    int n = 0; while (txt[n] != 0) ++n;
+    WriteFile(h, txt, (DWORD)n, &esc, nullptr);
+    CloseHandle(h);
+}
 
 static void leer_veredicto_previo(void) {
     if (g_veredicto_leido) return;
@@ -7076,6 +7228,17 @@ static void leer_veredicto_previo(void) {
         if (b[i] == 'R' && b[i+1] == 'O' && b[i+2] == 'J' && b[i+3] == 'O') { g_veredicto_previo = 2; break; }
         if (b[i] == 'V' && b[i+1] == 'E' && b[i+2] == 'R' && b[i+3] == 'D') { g_veredicto_previo = 0; break; }
         if (b[i] == 'A' && b[i+1] == 'M' && b[i+2] == 'A' && b[i+3] == 'R') { g_veredicto_previo = 1; break; }
+    }
+    for (DWORD i = 0; i + 16 < leidos; ++i) {
+        if (b[i]=='c' && b[i+1]=='o' && b[i+2]=='n' && b[i+3]=='s' && b[i+4]=='e') {
+            for (DWORD j = i; j + 2 < leidos; ++j) {
+                if (b[j] == '=') {
+                    g_consentimiento = (b[j+1] == 's') ? 1 : 0;
+                    break;
+                }
+            }
+            break;
+        }
     }
 }
 static UNICODE_STRING g_us_alt;
@@ -7102,6 +7265,10 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     for (int i = 0; i < 9; ++i) {
         if (igual_sin_caso(g_ruta_pedida + corte, g_set[i].nombre)) { idx = i; break; }
     }
+    // -2 marca al interposer: se sustituye igual que los demas, pero su ruta
+    // vive aparte porque no sale de la cache.
+    const bool es_interposer = igual_sin_caso(g_ruta_pedida + corte, L"sl.interposer.dll");
+    if (es_interposer) idx = -2;
     bool en_cache = false;
     if (idx < 0) {
         static const wchar_t kCache[] = L"\\ngx\\models\\sl_";
@@ -7116,9 +7283,21 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
         }
         if (en_cache) idx = 1;               // una copia OTA: se trata como dlss_g
     }
-    if (idx < 0) return g_orig_ldrload(ruta, carac, nombre, base);
+    if (idx == -1) return g_orig_ldrload(ruta, carac, nombre, base);
 
     leer_veredicto_previo();
+    if (g_veredicto_previo == 2 && g_consentimiento != 1) {
+        // ROJO pero sin un si explicito: no se toca nada. Cambiar que binarios
+        // corre el juego de alguien no es una decision que tome el dll solo.
+        static bool avisado = false;
+        if (!avisado) {
+            avisado = true;
+            log_line("set: este juego no puede usar MFG con su Streamline.");
+            log_line("  hay un reemplazo disponible, pero falta autorizacion.");
+            log_line("  el panel lo pregunta; hasta entonces no se sustituye nada.");
+        }
+        return g_orig_ldrload(ruta, carac, nombre, base);
+    }
     if (g_veredicto_previo != 2) {
         // Sin un ROJO de la corrida anterior no se sustituye NADA. Un juego que
         // funciona nunca llega a esta rama, que es la salvaguarda que faltaba.
@@ -7132,8 +7311,9 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     }
 
     armar_set_objetivo();
-    if (g_set_version == 0 || g_set[idx].ruta[0] == 0)
-        return g_orig_ldrload(ruta, carac, nombre, base);
+    if (g_set_version == 0) return g_orig_ldrload(ruta, carac, nombre, base);
+    const wchar_t *reemplazo = (idx == -2) ? g_set_inter : g_set[idx].ruta;
+    if (reemplazo[0] == 0) return g_orig_ldrload(ruta, carac, nombre, base);
 
     // Si el que piden YA es de la version del interposer, no se toca: es el caso
     // normal y sustituirlo seria trabajo y riesgo por nada.
@@ -7142,8 +7322,9 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     if (may == 2 && men == g_set_version && !en_cache)
         return g_orig_ldrload(ruta, carac, nombre, base);
 
-    const wchar_t *alt = g_set[idx].ruta;
-    log_num("set: se sustituye un modulo, pedido 2.", (unsigned long long)men);
+    const wchar_t *alt = reemplazo;
+    if (idx == -2) log_num("set: se sustituye el INTERPOSER, pedido 2.", (unsigned long long)men);
+    else           log_num("set: se sustituye un modulo, pedido 2.", (unsigned long long)men);
     log_ruta("  pedido:  ", g_ruta_pedida);
     log_ruta("  cargado: ", alt);
     int m = 0; while (alt[m] != 0) ++m;

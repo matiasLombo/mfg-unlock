@@ -33,6 +33,11 @@
 // 2..4   -- eOn with 1, 2 or 3 generated frames, i.e. 2x, 3x, 4x
 // 5 DYNAMIC -- eDynamic, with a frame-rate target
 extern volatile LONG g_force_sel;
+// M4: 1 mientras el panel tiene que preguntar si se sustituye el Streamline del
+// juego. Lo pone proxy.cpp cuando el veredicto guardado es ROJO y todavia no hay
+// respuesta. Cambiar que binarios corre el juego de alguien no es una decision
+// que el dll pueda tomar solo.
+extern volatile LONG g_pide_permiso;
 extern volatile LONG g_force_generated;
 extern volatile LONG g_last_seen_generated;
 extern volatile LONG g_dyn_target;
@@ -321,8 +326,13 @@ static int ov_tgt_h(void) {
     return g_force_sel == kSelDynFuture ? kTgtH : 46;
 }
 
+static const int kPermisoH = 40;
+
 static int ov_panel_h(void) {
-    return kTgtTop + (ov_target_shown() ? ov_tgt_h() + kGap : 0) + kFootH;
+    // La franja de la pregunta se SUMA abajo: asi no se mueve nada de lo que ya
+    // estaba, que es lo unico prudente cuando no se puede ver el resultado.
+    return kTgtTop + (ov_target_shown() ? ov_tgt_h() + kGap : 0) + kFootH
+         + (g_pide_permiso ? kPermisoH : 0);
 }
 
 static void ov_row_rect(int i, float *rx, float *ry, float *rw, float *rh) {
@@ -521,6 +531,19 @@ static void ov_build_panel(void) {
     ov_rect(0, 0, (float)kPanW, (float)h, 0.05f, 0.06f, 0.07f, 0.94f);
     ov_frame(0, 0, (float)kPanW, (float)h, 0.20f, 0.55f, 0.25f, 0.55f);
     ov_rect(0, 0, (float)kPanW, 3.0f, 0.35f, 0.88f, 0.38f, 1.0f);
+
+    // M4: la pregunta va en una franja propia al pie, agregada al alto. Se
+    // dibuja aca, temprano, para que nada de lo de abajo la pise.
+    if (g_pide_permiso) {
+        const float fy = (float)(h - kPermisoH);
+        ov_rect(1.0f, fy, (float)(kPanW - 2), (float)(kPermisoH - 1),
+                0.30f, 0.18f, 0.04f, 0.96f);
+        ov_rect(1.0f, fy, (float)(kPanW - 2), 2.0f, 0.95f, 0.62f, 0.15f, 1.0f);
+        ov_text("ESTE JUEGO NO PUEDE USAR MFG ASI",
+                (float)kPad, fy + 7.0f, 1.5f, 0.98f, 0.80f, 0.35f);
+        ov_text("F7 USAR REEMPLAZO    F8 DEJARLO COMO ESTA",
+                (float)kPad, fy + 22.0f, 1.4f, 0.85f, 0.70f, 0.45f);
+    }
 
     ov_text("MFG UNLOCK", in, 16.0f, 2.4f, 0.42f, 0.95f, 0.45f);
     ov_text("///", (float)(kPanW - kPad - 24), 18.0f, 1.6f, 0.25f, 0.60f, 0.30f);

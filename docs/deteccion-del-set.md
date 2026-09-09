@@ -140,6 +140,51 @@ Gate de regresion, benchmark de Cyberpunk con estado borrado (primera instalacio
 3. La emision del veredicto estaba solo en el lazo de teclas, que no corre bajo
    el banco. Va tambien en el camino de present.
 
+## M4: el consentimiento, medido
+
+Sustituir el Streamline de un juego cambia que binarios corre. Con ROJO solo NO
+alcanza: hace falta un si explicito, y hasta que lo haya el dll no toca nada.
+
+    sin permiso   sustituciones REALES = 0, veredicto ROJO, el set sigue roto
+    con permiso   sustituye, x2 -> 2.00, x3 -> 3.00, x4 -> 4.00 (n=13 c/u)
+
+La pregunta va en una franja al pie del panel, SUMADA al alto para que no mueva
+nada de lo existente: F7 acepta, F8 rechaza. La respuesta se anexa al archivo de
+estado sin pisar el diagnostico. Un juego VERDE o AMARILLO no ve nada.
+
+Cuidado al medir esto: la linea del gate dice "no se sustituye", y contar con
+"se sustituye" toma la negativa como si fuera una accion. Hay que contar
+"se sustituye un modulo" o "se sustituye el INTERPOSER".
+
+Gate de Cyberpunk sobre el binario exacto que se commiteo:
+
+    linea base 86fa8c0b   535 ventanas  p90 3.97  max 4.08
+    este build            625 ventanas  p90 3.86  max 4.17
+    copias 2, parches 2, sustituciones 0, veredicto AMARILLO
+
+Los cuatro gates de builds equivalentes dieron p90 3.97, 3.91, 3.93 y 3.86.
+
+### Un error propio que vale mas que el arreglo
+
+El log venia diciendo "version: 2.0" para copias que son 2.11 y 2.14. Se afirmo
+que la causa era un conflicto de FILE_SHARE al abrir un modulo ya mapeado, se
+cambio el modo de apertura, y se escribio esa causa como comentario en el codigo
+SIN medirla. Era falsa.
+
+La causa real: al sacar el filtro de version, la edicion borro la llamada a
+version_soportada y dejo el log imprimiendo una variable en cero. Se borro la
+medicion y quedo el cartel. Restaurada la llamada, el log dice 2.11 y 2.14.
+
+## Lo que NO esta probado
+
+  - Que la franja de la pregunta se vea bien. Se garantiza que no desplaza nada
+    (se suma al alto) y que sin respuesta no se sustituye; como queda en pantalla
+    no se puede verificar desde aca.
+  - Que sustituir el interposer arregle Halo. El sample del banco lo importa
+    ESTATICAMENTE -- verificado leyendo su tabla de importaciones -- asi que ese
+    camino no se ejercita ahi. Halo lo carga dinamicamente y por eso deberia
+    funcionar, pero deberia no es una medicion.
+
 ## Lo que este documento NO afirma
 
 No afirma que sustituir el set arregle Halo. Eso es una hipotesis sin probar: el
