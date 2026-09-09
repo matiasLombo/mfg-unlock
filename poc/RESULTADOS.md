@@ -74,7 +74,36 @@ Corrida del 2026-09-08, binario m2.exe de 100.090 bytes.
 
 ## M3. GetLastPresentCount y GetFrameStatistics
 
-Pendiente.
+**ANDA GetLastPresentCount**: delta 120 contra 120 reales, 0.0%, en los dos modos
+de swapchain.
+
+**NO ANDA GetFrameStatistics**: falla en los dos modos.
+
+    modo DISCARD (clasico)
+      GetLastPresentCount  delta 120 de 120   hr=0
+      GetFrameStatistics   hr=0x887A0004
+
+    modo FLIP_DISCARD (moderno, el que usan los juegos nuevos)
+      GetLastPresentCount  delta 120 de 120   hr=0
+      GetFrameStatistics   hr=0x887A000B = DXGI_ERROR_FRAME_STATISTICS_DISJOINT
+
+Los dos son metodos del propio swapchain: no necesitan ETW, ni privilegios, ni
+enganchar la creacion. Alcanza con TENER el swapchain, que es justo lo que M2
+resolvio.
+
+**Esto contradice lo que hace hoy el dll.** `src/proxy.cpp` toma el contador de
+presentaciones con `GetFrameStatistics`, que es el que falla en los dos modos
+probados aca. `GetLastPresentCount` es exacto en los dos y ni siquiera se usa.
+
+Ojo con no sobreinterpretar: esta POC corre en una ventana chica sin composicion
+exclusiva, y `GetFrameStatistics` documenta que necesita condiciones que aca no
+se dan. En GTA V si devuelve datos -- el campo aparece 6206 veces en una partida.
+Lo que la POC demuestra es que **hay un contador que anda donde el otro no**, no
+que el otro este roto siempre.
+
+POC: `poc/m3-contadores/m3.cpp`, g++
+(`g++ -std=c++17 -O2 -o m3.exe m3.cpp -ld3d11 -ldxgi -luser32 -lole32`).
+Corrida del 2026-09-08, 120 presentaciones con vsync por modo.
 
 ## M4. D3DKMT sin privilegios
 
