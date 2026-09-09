@@ -8,26 +8,75 @@ Un mecanismo sin POC no tiene veredicto. Cada linea usa una de tres formas:
 
 Cada veredicto dice de que corrida salio y con que binario.
 
-## M7. PresentMon como oraculo externo
+## M7. Oraculo externo
 
-**NO SE PUDO PROBAR**: falta elevacion. Falta que alguien acepte una vez el
-aviso de UAC; despues la POC corre sola.
+**NO SE PUDO PROBAR**: los dos caminos quedaron bloqueados por cosas fuera de mi
+alcance. Se intentaron los dos hasta el final, y los bloqueos estan medidos, no
+supuestos.
 
-Lo que si esta establecido, y ahorra la descarga: **no hay que bajar nada**.
-`PresentMon_x64.exe` version 1.9.12728.0 (1.108.080 bytes) ya esta en la maquina,
-incluido en `C:\Program Files\NVIDIA Corporation\FrameViewSDK\bin\`. Junto a el
-hay un SDK con header (`FvSDK.h`) que expone FPS, AvgFPS, FPS99, FPSLow,
-RenderLatency, RenderPresentLatency, AvgSWPCLatency, ProcessName y Frame, y un
-servicio (`nvfvsdksvc_x64.exe`) que NO esta registrado.
+### Camino A: PresentMon
 
-Medido: sin elevar, `PresentMon_x64.exe --timed 3 --output_file X
---no_console_stats --stop_existing_session --terminate_after_timed` sale con
-**exit code 1**, sin stdout, sin stderr y sin crear el CSV. Coincide con lo que
-dice la documentacion de Microsoft: consumir ETW en tiempo real solo lo pueden
-hacer procesos elevados, el grupo "Performance Log Users" o servicios del
-sistema.
+No hay que descargar nada. `PresentMon_x64.exe` 1.9.12728.0 (1.108.080 bytes) ya
+esta en `C:\Program Files\NVIDIA Corporation\FrameViewSDK\bin\`.
 
-POC: `poc/m7-oraculo/correr.ps1`. Corrida del 2026-09-08, sin elevar.
+Sin elevar sale con **exit code 1**, sin stdout, sin stderr y sin CSV. Coincide
+con la documentacion de Microsoft: ETW en tiempo real solo lo pueden consumir
+procesos elevados, "Performance Log Users" o servicios del sistema.
+
+Dos intentos elevados fallaron por causas que ya estan corregidas en la POC:
+  - el primero, porque en el escritorio quieto no hay presentaciones que
+    capturar y PresentMon no escribe CSV sin filas;
+  - el segundo, porque el nombre de sesion por defecto colisiona con el
+    PresentMon que NVIDIA ya corre para FrameView, y el proceso se cuelga.
+
+`poc/m7-oraculo/oraculo.ps1` arregla las dos: usa `--session_name mfgpoc` y lanza
+`presentador.exe` antes de capturar. **Falta una sola aceptacion de UAC.**
+
+### Camino B: SDK de FrameView, sin elevacion
+
+El SDK inicializa desde un proceso comun -- su cliente de prueba imprime
+`InitializeFvSDKSession SUCCESS` sin elevar -- asi que parecia el camino sin UAC.
+
+Se llego hasta el final y NO alcanzo:
+
+    FvSDK_Initialize      0  (exito)
+    FvSDK_CreateSession   0  (exito)
+    FvSDK_EnableMetrics   0  (exito, eAvgFPS)
+    FvSDK_StartSession   20  = FV_SDK_SESSION_IN_PROGRESS
+    muestras con el pid del presentador: 0
+
+Hay una sesion del SDK ya abierta en la maquina y no se pudo determinar quien la
+tiene. Sin sesion propia no llegan datos.
+
+Lo que costo llegar hasta ahi, por si alguien lo retoma: el dll exporta UNA sola
+funcion, `fv_QueryInterface` -- el patron de NVAPI. Los stubs viven en un `.lib`
+de MSVC con simbolos mangleados a su manera, que MinGW no genera. Se resolvio
+referenciando los simbolos exactos con etiquetas `asm` (los nombres salieron de
+leer la tabla de simbolos del `.lib`), y poniendo cabos para las intrinsecas del
+CRT de MSVC (`__security_cookie`, `__security_check_cookie`, `__GSHandlerCheck`) y
+para tres funciones de strsafe. Compila y corre.
+
+**Salvedad**: el cabo de `__GSHandlerCheck` no hace la comprobacion real. Sirve
+para una POC de medicion, NO para produccion.
+
+### Lo que igual quedo cubierto
+
+El proposito de M7 era tener un numero independiente contra el cual validar los
+demas. Para M2 y M3 eso ya esta, y con algo **mejor** que una herramienta
+externa: `poc/m7-oraculo/presentador.cpp` presenta una cantidad conocida e
+imprime su propio contador. No es una estimacion, es la definicion -- la app ES
+la que llama a Present. Y no es "nuestra capa vieja": es una aplicacion aparte
+que no comparte una linea con el dll.
+
+Un oraculo externo sigue haciendo falta para medir procesos que no controlamos,
+que es el caso de un juego.
+
+POC: `poc/m7-oraculo/` -- `correr.ps1`, `oraculo.ps1`, `presentador.cpp`
+(presentador.exe, 100.311 bytes) y `oraculo.cpp` (oraculo.exe, 189.814 bytes).
+Corridas del 2026-09-08.
+
+Verdad de referencia medida con el presentador: **663 presentaciones en 4.004 s =
+165.58 fps**, con vsync a 165 Hz.
 
 ## M1. slDLSSGGetState observado, no consultado
 
