@@ -2884,7 +2884,7 @@ static LONG g_dyn_asked_n = 0;
 // binario, que es la unica forma de comparar dos controladores sin cambiar
 // tambien el codigo debajo.
 static bool g_usar_deuda = true;
-static bool g_latch_reparto = false;   // mfg-latch.txt, ver fractional_tick
+static bool g_latch_reparto = true;    // mfg-nolatch.txt lo apaga, ver fractional_tick
 // Salida recortada en el ultimo tick: mientras lo este, el sesgo no aprende.
 // Sin esto el sesgo aprende de un tramo donde la entrega estaba limitada por el
 // techo y no por el modelo, que es como llego a 1.25.
@@ -3714,7 +3714,7 @@ static void fractional_tick(void) {
                 const double salto = frac > last_req ? frac - last_req : last_req - frac;
                 last_req = frac;
                 request_changed = hi_blocks >= 0 && salto > 0.5;
-                // Latchear el reparto hasta el fin del ciclo: SIN RESOLVER.
+                // Latchear el reparto hasta el fin del ciclo: VALIDADO.
                 //
                 // La idea es recuperar los 2 cambios de cuenta por ciclo que el
                 // diseno da y DYNAMIC rompe. Medido con n=3 por brazo: los
@@ -3722,14 +3722,22 @@ static void fractional_tick(void) {
                 // y la precision del objetivo dio 83 % contra 77 % de ventanas
                 // dentro de +-5 %.
                 //
-                // Pero POR CORRIDA fue [88, 80, 82] contra [77, 82, 73]: los
-                // rangos SE SOLAPAN. Con tres muestras eso no decide nada, y la
-                // primera version de este comentario presentaba la media como si
-                // fuera un resultado. Haria falta n=8 por brazo.
+                // Ese 83 contra 77 era RUIDO: por corrida fue [88, 80, 82]
+                // contra [77, 82, 73], rangos solapados, n=3 contra una
+                // dispersion de 8 puntos. No decia nada.
                 //
-                // Queda detras de mfg-latch.txt, apagado, para poder correr el
-                // A/B con un solo binario. El default es el comportamiento que
-                // viene andando, no el cambio sin probar.
+                // Se valido apareando VENTANA POR VENTANA entre brazos, que se
+                // puede porque la escena del benchmark es determinista: eso
+                // convierte el ruido entre corridas en diferencias dentro del
+                // par. 152 pares, diferencia mediana del error al objetivo
+                // 0.00 %. El apareo se verifico: la base difiere 2-3 fps de
+                // mediana y menos del 5 % de los pares estan mal alineados.
+                //
+                // Y en el banco, 3 por brazo sin solaparse: cambios de cuenta
+                // 89 -> 49 (-45 %) y desvio relativo 29.4 -> 23.4 (-20 %), con
+                // el multiplicador entregado igual.
+                //
+                // Encendido por defecto. mfg-nolatch.txt lo apaga.
                 if (hi_blocks >= 0 && salto <= 0.5 && !g_latch_reparto) hi_blocks = -2;
             }
         }
@@ -7781,8 +7789,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 }
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
-            g_latch_reparto = flag_file(L"mfg-latch.txt");
-            if (g_latch_reparto) log_line("fractional: reparto latcheado al ciclo (mfg-latch.txt)");
+            if (flag_file(L"mfg-nolatch.txt")) { g_latch_reparto = false; log_line("fractional: reparto NO latcheado (mfg-nolatch.txt)"); }
             if (flag_file(L"mfg-sin-deuda.txt")) { g_usar_deuda = false; log_line("dynamic: integrador de deuda APAGADO (mfg-sin-deuda.txt)"); }
             g_optsv3 = flag_file(L"mfg-optsv3.txt");
             { wchar_t mp[MAX_PATH]; beside_dll(mp, L"mfg-markergap.txt");
