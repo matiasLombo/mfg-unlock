@@ -56,6 +56,9 @@ static unsigned char g_probe[16];
 static LONG g_probe_i = 0;
 static bool g_probe_done = false;
 static void dyn_control(double base_fps, double presented_fps);  // definida mas abajo
+static bool version_soportada(const wchar_t *ruta, unsigned *may, unsigned *men);
+static void emitir_veredicto_si_toca(void);   // M1, definida mas abajo
+static bool ruta_de_estado(wchar_t *out, int max);            // M1, idem
 static void dyn_apply(double base_fps);                          // definida mas abajo
 bool g_dynamic_known = false;
 bool g_ov_enabled = true;
@@ -88,6 +91,10 @@ static bool g_frac_enabled = false;   // mfg-frac.txt
 // justo dentro de esa copia: 0xC0000005 en 190_E658703.dll +0x3F2E9.
 static bool g_wic_ok = true;
 static bool g_vio_alguna_copia = false;
+// Sitios del parche de la cuenta de la ULTIMA copia parcheada. La cuenta se
+// parchea adentro de patch_subframe_count, y el observador de M1 la necesita
+// por copia, no acumulada.
+static int g_wic_sitios_ultima = -1;
 static bool g_quiet = false;          // mfg-quiet.txt: no per-window logging
 static bool g_nullalt = false;        // mfg-nullalt.txt: alternate between equals
 static bool g_slowalt = false;        // mfg-slowalt.txt
@@ -1815,6 +1822,7 @@ static int patch_subframe_count(unsigned char *base) {
         // The comparison patches are exactly what this replaces; leaving
         // them in would put the bound back out of step with the field.
         const int wic_sitios = patch_work_item_count(text, len);
+        g_wic_sitios_ultima = wic_sitios;
         g_vio_alguna_copia = true;
         if (wic_sitios == 0) g_wic_ok = false;
         log_line(wic_sitios > 0
@@ -2776,6 +2784,10 @@ static void dyn_apply(double base_fps) {
     // 158, que es justo el grupo de ventanas que sobraba. Si despues de un
     // sobrepaso se entrega de menos, el promedio vuelve al objetivo.
     static double debt = 0.0;          // presentaciones adeudadas
+    // Cuantas veces los frenos nuevos impidieron que la deuda creciera. Si
+    // esto se acerca al total de llamadas, el termino integral quedo anulado y
+    // el controlador degrado a proporcional puro: hay que saberlo, no suponerlo.
+    static unsigned long g_dyn_llamadas = 0, g_dyn_frenos_tiron = 0, g_dyn_frenos_base = 0;
     static bool salida_saturada = false;   // el ratio quedo pegado al techo
     static LONG last_pc = 0;
     static LONGLONG last_qpc = 0;
@@ -2810,6 +2822,51 @@ static void dyn_apply(double base_fps) {
             // Solo se frena el crecimiento: bajar siempre se permite, que es
             // como el lazo sale de la saturacion cuando el juego se recupera.
             if (salida_saturada && inc > 0.0) inc = 0.0;
+
+            // Y dos frenos mas, por un crash de Halo en los menus.
+            //
+            // El anti-windup de arriba llegaba tarde: salida_saturada solo se
+            // encendia con el ratio YA arriba de 6, y toda la fuga ocurria en la
+            // trepada. Medido en los 160 ms previos al crash:
+            //
+            //   49656  ratio 3.03  base 54  deuda 0     objetivo 165
+            //   49750  ratio 4.06  base 47  deuda 1271  objetivo 190
+            //   49813  ratio 4.56  base 45  deuda 1919
+            //   50110  "needs more than 6x"  ratio 6.00 -> crash
+            //
+            // La deuda fue de 0 a 19.19 presentaciones en 160 ms con el ratio
+            // entre 3 y 4.6, o sea sin saturar nunca. Inflo el objetivo de 165
+            // a 198 fps -- un objetivo que no pidio nadie -- y de ahi salio el
+            // 6x. En esa ventana el conteo recorrio todos los buckets, el 0 seis
+            // veces, con un present de 318 ms y 594 ms de latencia de driver.
+            //
+            // 1) Tiron: si el intervalo entre llamadas se fue al doble de lo que
+            //    la base dice que deberia durar un frame, el juego se esta
+            //    atorando. Pedirle mas es empujar a alguien que ya se cae: el
+            //    lazo se realimenta solo. La deuda deja de crecer; bajar sigue
+            //    permitido, que es como sale de ahi.
+            const double esperado = (base_fps > 1.0) ? (1.0 / base_fps) : 0.02;
+            const bool tiron = (secs > esperado * 2.0);
+
+            // 2) Base no confiable: en un menu o una carga el juego casi no
+            //    renderiza y la base salta (54 -> 47 -> 41 -> 45 en el crash).
+            //    Con la base moviendose asi, el objetivo calculado no significa
+            //    nada y la deuda solo acumula ruido.
+            static double base_prev = 0.0;
+            bool base_inestable = false;
+            if (base_prev > 1.0 && base_fps > 1.0) {
+                const double d = (base_fps > base_prev)
+                                 ? (base_fps - base_prev) / base_prev
+                                 : (base_prev - base_fps) / base_prev;
+                base_inestable = (d > 0.12);
+            }
+            base_prev = base_fps;
+
+            ++g_dyn_llamadas;
+            if ((tiron || base_inestable) && inc > 0.0) {
+                inc = 0.0;
+                if (tiron) ++g_dyn_frenos_tiron; else ++g_dyn_frenos_base;
+            }
             debt += inc;
             // Acotada a un tercio de segundo de objetivo: sin esto se enrolla
             // durante un apagon y despues descarga todo junto.
@@ -2838,7 +2895,10 @@ static void dyn_apply(double base_fps) {
     // si sola no es la causa, y el limite costaba precision real: 79% de
     // ventanas dentro del +-5% contra 89%. Se retira hasta tener una causa
     // demostrada en vez de una coincidencia.
-    salida_saturada = (want > 6.0);
+    // Al techo, no por encima. Antes decia (want > 6.0), asi que un pedido de
+    // exactamente 6.0 -- que es el maximo estructural y por lo tanto saturacion
+    // plena -- contaba como no saturado y la deuda seguia creciendo.
+    salida_saturada = (want >= 6.0);
     if (want > 6.0) {
         static bool said_hi = false;
         if (!said_hi) {
@@ -2888,6 +2948,9 @@ static void dyn_apply(double base_fps) {
     // Por que pide lo que pide. En Cyberpunk pidio 5.97 con base 40 y objetivo
     // 165, cuando el ratio crudo es 4.13: el exceso sale de aca o del sesgo, y
     // razonarlo desde el codigo fallo dos veces seguidas.
+    log_num("  frenos por tiron ", (unsigned long long)g_dyn_frenos_tiron);
+    log_num("  frenos por base inestable ", (unsigned long long)g_dyn_frenos_base);
+    log_num("  llamadas del controlador ", (unsigned long long)g_dyn_llamadas);
     log_num("  deuda x100 (mas 32768 si es negativa) ",
             (unsigned)(debt < 0.0 ? 32768u + (unsigned)(-debt * 100.0 + 0.5)
                                   : (unsigned)(debt * 100.0 + 0.5)));
@@ -4630,6 +4693,12 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     // own scheduler cannot represent. An instrument that cannot fail measures
     // nothing.
     InterlockedIncrement(&g_present_count);
+    // Tambien desde aca, no solo desde el lazo de teclas: ese lazo NO corre bajo
+    // el banco (lo dice el comentario de arm_frametoken_hook, y por eso el
+    // enganche de DXGI se armaba tarde ahi). Sin esto el veredicto de M1 no se
+    // podria medir en la unica herramienta con la que se permite probar.
+    // Se auto-limita: despues de la primera emision es una lectura de bool.
+    emitir_veredicto_si_toca();
     // The runtime's own tally, so our hook can be checked against something we
     // do not maintain. If these two agree, a shortfall of presents against
     // rendered frames is the frame counter's fault and not the hook's.
@@ -4869,6 +4938,92 @@ static void hook_swapchain_present(void *sc) {
     log_line("recorder: present slot swapped (vt[8], not detoured)");
 }
 
+// Adoptar el swapchain que el juego YA tiene.
+//
+// El hook de la factory solo puede ver swapchains creados DESPUES de armarse.
+// En Halo sl.interposer aparece recien a los 11,7 s, con el juego andando: su
+// swapchain ya existe, CreateSwapChain nunca vuelve a pasar por nosotros, y el
+// contador de presentaciones se queda en cero para siempre. Desarmar la bandera
+// de arriba no alcanza para ese caso.
+//
+// La salida ya estaba medida y no hubo que inventarla: M2 (poc/m2-vtable). La
+// vtable de IDXGISwapChain es COMPARTIDA por todos los swapchains del proceso,
+// asi que se crea uno propio y descartable, se le parchea el slot 8, y el del
+// juego queda parcheado tambien. M2 conto 300 de 300 presentaciones de un
+// swapchain ajeno por esta via, con la vtable en la misma direccion para los dos.
+//
+// No se detoura Present: se cambia el puntero del slot, que es la regla que
+// este proyecto ya pago aprender con el overlay de Steam.
+typedef HRESULT(WINAPI *PFN_D3D11CDSC)(void *, int, HMODULE, UINT, const int *, UINT,
+        UINT, const DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **, void **, int *, void **);
+
+static bool g_adopt_done = false;
+static void adopt_existing_swapchain(void) {
+    if (g_adopt_done || g_orig_dxgi_present != nullptr) return;
+    // Primero se le da su chance al camino normal: si el juego crea su swapchain
+    // despues que nosotros, el hook de la factory lo agarra y esto no hace falta.
+    static unsigned long long visto = 0;
+    if (visto == 0) { visto = GetTickCount64(); return; }
+    if (GetTickCount64() - visto < 5000ULL) return;
+    g_adopt_done = true;
+
+    HMODULE d3d11 = LoadLibraryW(L"d3d11.dll");
+    if (d3d11 == nullptr) { log_line("adopcion: no hay d3d11.dll"); return; }
+    PFN_D3D11CDSC crear = reinterpret_cast<PFN_D3D11CDSC>(
+            GetProcAddress(d3d11, "D3D11CreateDeviceAndSwapChain"));
+    if (crear == nullptr) { log_line("adopcion: no hay D3D11CreateDeviceAndSwapChain"); return; }
+
+    WNDCLASSEXW wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"mfg_adopt";
+    RegisterClassExW(&wc);
+    HWND hw = CreateWindowExW(0, L"mfg_adopt", L"", WS_POPUP, 0, 0, 8, 8,
+                              nullptr, nullptr, wc.hInstance, nullptr);
+    if (hw == nullptr) { log_line("adopcion: no se pudo crear la ventana oculta"); return; }
+
+    DXGI_SWAP_CHAIN_DESC sd;
+    memset(&sd, 0, sizeof(sd));
+    sd.BufferCount = 1;
+    sd.BufferDesc.Width = 8;
+    sd.BufferDesc.Height = 8;
+    sd.BufferDesc.Format = static_cast<DXGI_FORMAT>(28);   // R8G8B8A8_UNORM
+    sd.BufferUsage = 0x20u;                                // RENDER_TARGET_OUTPUT
+    sd.OutputWindow = hw;
+    sd.SampleDesc.Count = 1;
+    sd.Windowed = TRUE;
+    sd.SwapEffect = static_cast<DXGI_SWAP_EFFECT>(0);      // DISCARD
+
+    IDXGISwapChain *sc = nullptr;
+    void *dev = nullptr;
+    void *ctx = nullptr;
+    const HRESULT hr = crear(nullptr, 1 /* HARDWARE */, nullptr, 0, nullptr, 0,
+                             7 /* D3D11_SDK_VERSION */, &sd, &sc, &dev, nullptr, &ctx);
+    if (FAILED(hr) || sc == nullptr) {
+        log_num("adopcion: D3D11CreateDeviceAndSwapChain fallo, hr ", (unsigned)hr);
+        DestroyWindow(hw);
+        return;
+    }
+
+    hook_swapchain_present(sc);
+    const bool ok = (g_orig_dxgi_present != nullptr);
+    // Lo que hook_swapchain_present logueo recien (flags, buffers, waitable) es
+    // del descartable, NO del swapchain del juego. Se aclara para que nadie lea
+    // esos numeros como si fueran del juego.
+    log_line("  (los flags de arriba son del swapchain descartable, no del juego)");
+    // El descartable ya cumplio. La vtable vive en el modulo de DXGI, no en el
+    // objeto, asi que el parche sobrevive a soltarlo.
+    g_swapchain = nullptr;
+    sc->Release();
+    if (ctx != nullptr) reinterpret_cast<IUnknown *>(ctx)->Release();
+    if (dev != nullptr) reinterpret_cast<IUnknown *>(dev)->Release();
+    DestroyWindow(hw);
+    log_line(ok ? "adopcion: vtable compartida parcheada desde un swapchain propio"
+                : "adopcion: no se pudo parchear el slot");
+}
+
 // Strip FRAME_LATENCY_WAITABLE_OBJECT at creation, behind mfg-nowaitable.txt.
 //
 // The producer spends 98% of its time outside both hooks -- 2% in Present, 0%
@@ -5013,7 +5168,20 @@ static bool g_dxgi_armed = false;
 static bool g_debug = false;      // mfg-debug.txt: developer diagnostics
 
 static void arm_dxgi_recorder() {
-    if (!g_debug) return;
+    // Esto estuvo detras de mfg-debug.txt y no debia estarlo.
+    //
+    // De esta cadena cuelgan el fps Y la latencia del HUD: la factory arma el
+    // hook del swapchain, el hook cuenta presentaciones, y el bloque que
+    // escribe g_hud_fps_x10 y g_hud_lat_us solo corre si ese contador avanza.
+    // Con la bandera apagada el HUD muestra 0 FPS y "-- ms" para siempre.
+    //
+    // Se vio en Halo, donde no habia mfg-debug.txt, y se confirmo por control:
+    // GTA V y Cyberpunk tienen el archivo y el HUD anda; Halo no lo tenia y no
+    // andaba. Pero el caso que importa no es Halo: quien use esto va a tener el
+    // dll y nada mas, asi que NINGUN usuario veia fps ni latencia. El archivo de
+    // diagnostico tapaba el agujero en las dos maquinas donde se probaba.
+    //
+    // g_debug sigue gobernando el logueo verboso, que si es diagnostico.
     if (g_dxgi_armed) return;
     HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
     if (dxgi == nullptr) return;          // not a D3D game, or not loaded yet
@@ -5347,6 +5515,10 @@ static DWORD WINAPI recorder(LPVOID) {
         // D3D12 games never reach the Vulkan branches above, so this is not in
         // the else of anything: both are attempted, and whichever applies wins.
         arm_dxgi_recorder();
+        emitir_veredicto_si_toca();
+        // Y si el juego ya tenia su swapchain hecho cuando llegamos, el hook de
+        // la factory no lo va a ver nunca. Se adopta por la vtable compartida.
+        adopt_existing_swapchain();
 
         const bool down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
         if (down && !was_down) {
@@ -5961,6 +6133,162 @@ static void log_wide(const char *label, const UNICODE_STRING *s) {
 // escritura por frame se convierte en una violacion de acceso. Los juegos SI
 // descargan sl.dlss_g -- se vio en los logs de Cyberpunk -- asi que sin esto la
 // lista es mas peligrosa que el puntero que reemplazo.
+// ---------------------------------------------------------------------------
+// M1: observar que set de Streamline corre este juego, y decidir si sirve.
+//
+// El criterio esta escrito en docs/deteccion-del-set.md ANTES de este codigo.
+// Lo esencial: CUAL copia queda viva es un hecho que solo se conoce al final,
+// no al principio. Anoche la decision se tomaba dentro del hook de carga y eso
+// rompio Cyberpunk dos veces, porque ahi todavia no se sabe cual copia va a
+// sobrevivir. Asi que la primera corrida OBSERVA y escribe un veredicto; recien
+// la siguiente puede actuar, que es lo que pidio el usuario.
+//
+// Nada de esto sustituye ni parchea: solo mira.
+struct CopiaPlugin {
+    const unsigned char *base;
+    size_t largo;
+    unsigned menor;        // 2.<menor>; 0 si no se pudo leer
+    int sitios_cuenta;     // del parche de la cuenta, por copia
+    int sitios_pacer;
+    bool viva;
+};
+static CopiaPlugin g_copias[8];
+static int g_copias_n = 0;
+static unsigned long long g_primera_copia_ms = 0;
+static bool g_veredicto_escrito = false;
+
+static void copia_registrar(const unsigned char *base, size_t largo, unsigned menor,
+                            int sitios_cuenta, int sitios_pacer) {
+    if (g_copias_n >= 8) return;
+    CopiaPlugin &c = g_copias[g_copias_n++];
+    c.base = base; c.largo = largo; c.menor = menor;
+    c.sitios_cuenta = sitios_cuenta; c.sitios_pacer = sitios_pacer; c.viva = true;
+    if (g_primera_copia_ms == 0) g_primera_copia_ms = GetTickCount64();
+}
+
+static void copia_descargada(const unsigned char *base, size_t largo) {
+    for (int i = 0; i < g_copias_n; ++i) {
+        if (g_copias[i].base == base && g_copias[i].largo == largo) g_copias[i].viva = false;
+    }
+}
+
+// VERDE = 0, AMARILLO = 1, ROJO = 2. Ver docs/deteccion-del-set.md.
+static int veredicto_del_set(int *vivas_out, int *vivas_con_sitio_out) {
+    int vivas = 0, con_sitio = 0;
+    for (int i = 0; i < g_copias_n; ++i) {
+        if (!g_copias[i].viva) continue;
+        ++vivas;
+        if (g_copias[i].sitios_cuenta > 0) ++con_sitio;
+    }
+    if (vivas_out != nullptr) *vivas_out = vivas;
+    if (vivas_con_sitio_out != nullptr) *vivas_con_sitio_out = con_sitio;
+    if (con_sitio == 0) return 2;                 // ROJO: nadie vivo puede contar
+    // VERDE es el caso GTA V y exige las dos cosas: UNA sola copia mapeada en
+    // toda la corrida, y que esa copia siga viva y pueda contar.
+    //
+    // La primera version de esto miraba solo las vivas al final, y daba VERDE a
+    // un caso con TRES copias mapeadas que se descargan entre si hasta quedar
+    // una. Ese es el caso Cyberpunk: funciona, pero es el que se rompio dos
+    // veces en una noche. El criterio escrito ya decia "mas de una copia
+    // MAPEADA -> amarillo"; el codigo no lo implementaba.
+    if (g_copias_n == 1 && vivas == 1 && con_sitio == 1) return 0;
+    return 1;                                     // AMARILLO: anda, pero fragil
+}
+
+// El estado va a carpeta propia, NUNCA al lado del juego: [[ships-as-one-dll]].
+static bool ruta_de_estado(wchar_t *out, int max) {
+    wchar_t base[MAX_PATH];
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH) == 0) return false;
+    wchar_t dir[MAX_PATH];
+    int k = 0;
+    for (; base[k] != 0 && k < MAX_PATH - 32; ++k) dir[k] = base[k];
+    const wchar_t *sub = L"\\mfg-unlock";
+    for (int i = 0; sub[i] != 0; ++i) dir[k++] = sub[i];
+    dir[k] = 0;
+    CreateDirectoryW(dir, nullptr);
+    // Nombre por ejecutable: un hash simple de la ruta completa alcanza para
+    // separar juegos sin exponer rutas en el nombre del archivo.
+    wchar_t exe[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    unsigned long long h = 1469598103934665603ULL;
+    for (DWORD i = 0; i < n; ++i) { h ^= (unsigned long long)exe[i]; h *= 1099511628211ULL; }
+    int p = k;
+    const wchar_t *sep = L"\\set-";
+    for (int i = 0; sep[i] != 0; ++i) dir[p++] = sep[i];
+    for (int i = 15; i >= 0; --i) {
+        const unsigned d = (unsigned)((h >> (i * 4)) & 0xF);
+        dir[p++] = (wchar_t)(d < 10 ? (L'0' + d) : (L'a' + d - 10));
+    }
+    const wchar_t *ext = L".txt";
+    for (int i = 0; ext[i] != 0; ++i) dir[p++] = ext[i];
+    dir[p] = 0;
+    if (p >= max) return false;
+    for (int i = 0; i <= p; ++i) out[i] = dir[i];
+    return true;
+}
+
+// Se emite UNA vez, y no antes de que el set haya terminado de acomodarse.
+//
+// Cuanto hay que esperar, medido y no elegido a ojo: en Cyberpunk la segunda
+// copia aparece 60 ms despues de la primera; en el banco con --ota las TRES
+// copias estan mapeadas a los 1281 ms; en Halo el ciclo entero tarda ~1.5 s.
+//
+// Estaba en 20 s "por holgura" y eso costaba corridas enteras: el banco falla
+// seguido y una corrida que muere a los 5 s no llegaba a emitir nada, asi que el
+// fixture no se podia medir. 8 s sigue siendo cinco veces el peor asentamiento
+// visto y sobrevive a las corridas cortas.
+static void emitir_veredicto_si_toca(void) {
+    if (g_veredicto_escrito || g_copias_n == 0) return;
+    if (GetTickCount64() - g_primera_copia_ms < 8000ULL) return;
+    g_veredicto_escrito = true;
+
+    int vivas = 0, con_sitio = 0;
+    const int v = veredicto_del_set(&vivas, &con_sitio);
+    static const char *kNombre[3] = { "VERDE", "AMARILLO", "ROJO" };
+    log_line("--- veredicto del set de Streamline ---");
+    log_num("  copias vistas ", (unsigned)g_copias_n);
+    log_num("  vivas ", (unsigned)vivas);
+    log_num("  vivas con el sitio de la cuenta ", (unsigned)con_sitio);
+    for (int i = 0; i < g_copias_n; ++i) {
+        log_num("  copia 2.", (unsigned)g_copias[i].menor);
+        log_num("    sitios de cuenta ", (unsigned)g_copias[i].sitios_cuenta);
+        log_num("    sitios de pacer ", (unsigned)g_copias[i].sitios_pacer);
+        log_num("    viva (1 = si) ", (unsigned)(g_copias[i].viva ? 1 : 0));
+    }
+    char b[64] = "  VEREDICTO: ";
+    int k = 13;
+    for (const char *q = kNombre[v]; *q != 0; ++q) b[k++] = *q;
+    b[k] = 0;
+    log_line(b);
+    if (v == 2) log_line("  (rojo: este juego no puede contar; candidato a sustitucion)");
+    if (v == 1) log_line("  (amarillo: anda, pero fragil. NO se sustituye)");
+
+    wchar_t ruta[MAX_PATH];
+    if (!ruta_de_estado(ruta, MAX_PATH)) return;
+    HANDLE h = CreateFileW(ruta, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    char txt[192];
+    int t = 0;
+    const char *cab = "veredicto=";
+    for (const char *q = cab; *q != 0; ++q) txt[t++] = *q;
+    for (const char *q = kNombre[v]; *q != 0; ++q) txt[t++] = *q;
+    txt[t++] = '\n';
+    const char *l2 = "vivas=";
+    for (const char *q = l2; *q != 0; ++q) txt[t++] = *q;
+    txt[t++] = (char)('0' + (vivas > 9 ? 9 : vivas));
+    txt[t++] = '\n';
+    const char *l3 = "con_sitio=";
+    for (const char *q = l3; *q != 0; ++q) txt[t++] = *q;
+    txt[t++] = (char)('0' + (con_sitio > 9 ? 9 : con_sitio));
+    txt[t++] = '\n';
+    DWORD esc = 0;
+    WriteFile(h, txt, (DWORD)t, &esc, nullptr);
+    CloseHandle(h);
+    log_line("  estado guardado en LOCALAPPDATA\\mfg-unlock");
+}
+// ---------------------------------------------------------------------------
+
 static void sitio_drop(volatile unsigned char **lista, int *n,
                        const unsigned char *base, size_t largo) {
     int w = 0;
@@ -5982,6 +6310,7 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         sitio_drop(g_imm_sitios,  &g_imm_n,  b, largo);
         sitio_drop(g_imm2_sitios, &g_imm2_n, b, largo);
         sitio_drop(g_imm3_sitios, &g_imm3_n, b, largo);
+        copia_descargada(b, largo);
         const int ahora = g_wic_n + g_imm_n + g_imm2_n + g_imm3_n;
         if (ahora != antes) {
             log_line("modulo descargado: se retiran sus sitios parcheados");
@@ -6015,6 +6344,51 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         }
         log_line("sl.dlss_g mapped");
         log_wide("  in ", d->FullDllName);
+        // Solo se parchea lo que soportamos: 2.12 y 2.13.
+        //
+        // Hasta ahora se parcheaba cualquier copia que tuviera los sitios, y en
+        // Halo eso incluia una 2.14 que Streamline carga por su cuenta -- el
+        // juego enciende eAllowOTA y eLoadDownloadedPlugins por si mismo, no
+        // nosotros. Esa copia falla en +0x3F2E9 leyendo un nulo a +0x40, con el
+        // interposer 2.7.30 del juego en la misma lista de modulos, y lo hace
+        // igual con nuestra redireccion entregando una 2.12 correcta. Dos dumps
+        // distintos, el mismo modulo y el mismo offset.
+        //
+        // Que ese crash sea nuestro o del juego todavia no esta demostrado. Lo
+        // que si es claro es que no tenemos por que escribirle a una version
+        // que nunca validamos, y dejarla intacta separa las dos cosas: si sigue
+        // crasheando sin que la toquemos, el crash es del par que arma el juego.
+        {
+            const UNICODE_STRING *u = d->FullDllName;
+            if (u != nullptr && u->Buffer != nullptr) {
+                const int nn = (int)(u->Length / sizeof(wchar_t));
+                if (nn > 0 && nn < MAX_PATH) {
+                    wchar_t ruta[MAX_PATH];
+                    for (int i = 0; i < nn; ++i) ruta[i] = u->Buffer[i];
+                    ruta[nn] = 0;
+                    unsigned may = 0, men = 0;
+                    // Se informa la version y NO se rechaza nada.
+                    //
+                    // Aca hubo un filtro que se negaba a parchear lo que no
+                    // fuera 2.11/2.12/2.13, y el benchmark de Cyberpunk lo
+                    // desarmo: ese juego mapea su 2.11 y despues una copia OTA
+                    // 2.14; la 2.11 se descarga, y si la 2.14 quedo sin parchear
+                    // se corre entera sin sitios. Medido: 622 ventanas, mediana
+                    // 1.00 -- el 2.00 del final es el FG nativo del juego, no
+                    // nuestro.
+                    //
+                    // O sea que en los dos juegos el plugin VIVO es la copia OTA
+                    // 2.14, y parchearla es lo que hacia andar a Cyberpunk. El
+                    // crash de Halo no es "la version 2.14": es el par 2.7.30 +
+                    // 2.14 que arma Halo, porque Cyberpunk usa esa misma 2.14 y
+                    // no crashea. Castigar a la version era castigar al testigo.
+                    //
+                    // Halo se resuelve donde corresponde, en la carga: alli la
+                    // 2.14 ni llega a mapearse.
+                    log_num("  version: 2.", (unsigned long long)men);
+                }
+            }
+        }
         // Marcar nada mas: esto corre bajo el loader lock y LoadLibrary desde
         // aca falla por diseno. La carga se hace en el camino de present.
         if (g_twocopies) g_twocopies_pending = 1;
@@ -6025,6 +6399,23 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         const int n = patch_enable_cpu_pacer(reinterpret_cast<unsigned char *>(d->DllBase));
         g_outputs_patched += n;
         log_num("  CPU pacer enabled, sites: ", (unsigned)n);
+        // M1: se anota esta copia tal como quedo. No decide nada todavia.
+        {
+            unsigned may_c = 0, men_c = 0;
+            const UNICODE_STRING *u = d->FullDllName;
+            if (u != nullptr && u->Buffer != nullptr) {
+                const int nn = (int)(u->Length / sizeof(wchar_t));
+                if (nn > 0 && nn < MAX_PATH) {
+                    wchar_t rr[MAX_PATH];
+                    for (int i = 0; i < nn; ++i) rr[i] = u->Buffer[i];
+                    rr[nn] = 0;
+                    version_soportada(rr, &may_c, &men_c);
+                }
+            }
+            copia_registrar(reinterpret_cast<const unsigned char *>(d->DllBase),
+                            (size_t)d->SizeOfImage, men_c, g_wic_sitios_ultima, n);
+            g_wic_sitios_ultima = -1;
+        }
         if (g_meter_off) {
             const int mo = patch_metering_off(reinterpret_cast<unsigned char *>(d->DllBase));
             log_num("  driver flip metering switched off, sites: ", (unsigned)mo);
@@ -6178,6 +6569,452 @@ FORWARD(DWORD, VerInstallFileW,           (DWORD a, LPWSTR b, LPWSTR c, LPWSTR d
 FORWARD(DWORD, VerLanguageNameA,          (DWORD a, LPSTR b, DWORD c), (a,b,c))
 FORWARD(DWORD, VerLanguageNameW,          (DWORD a, LPWSTR b, DWORD c), (a,b,c))
 FORWARD(BOOL,  GetFileVersionInfoByHandle,(DWORD a, HANDLE b, DWORD c, LPVOID d), (a,b,c,d))
+
+// Cargar un plugin que SI se pueda parchear, elegido por lo que tiene adentro
+// y no por el juego que lo pide.
+//
+// El parche de la cuenta esta atado a la version del plugin, no al titulo. En
+// Halo eso quedo a la vista: carga un sl.dlss_g de Streamline 2.7.30, el sitio
+// de la cuenta no existe en ese tren, y el log lo decia sin que nadie lo leyera:
+//
+//     ! work item count site not unique, sites: 0
+//     PARCHE DE CUENTA: NO engancho en esta copia
+//
+// El gate si se reescribe, asi que MFG queda habilitado y la API acepta x3..x6,
+// pero el bucle sigue generando UN frame. Medido contando presentaciones: x2 da
+// 2.00, y x3 y x4 dan 2.00 tambien. No andaba mal, era el unico valor posible.
+//
+// Sitios encontrados en los builds de esta maquina:
+//
+//     2.7.10  2.7.30  2.8.11  2.8.12  2.10.0-3      0 sitios
+//     2.11.0  2.12.129  2.13.0  2.14.0             1 sitio
+//
+// Por eso forzar OTA no alcanzaba: las banderas de slInit ya estaban puestas
+// (banderas en +88 77, bits 3 y 6 en 1) y el unico build de la cache del mismo
+// tren que Halo, el 2.7.10, tampoco tiene el sitio.
+//
+// La regla de aca no nombra ningun juego ni ninguna ruta de juego: si el plugin
+// que se esta por cargar NO tiene el sitio, se busca en la cache de NGX uno que
+// SI lo tenga y se carga ese en su lugar. Si el del juego ya sirve, no se toca
+// nada -- de modo que esto no le puede cambiar el comportamiento a un juego que
+// hoy funciona, solo puede ayudar a uno que hoy no.
+static int sitios_de_cuenta(const wchar_t *ruta) {
+    HANDLE h = CreateFileW(ruta, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 16 || sz.QuadPart > (8 << 20)) {
+        CloseHandle(h);
+        return -1;
+    }
+    const DWORD n = (DWORD)sz.QuadPart;
+    unsigned char *buf = (unsigned char *)VirtualAlloc(nullptr, n, MEM_COMMIT, PAGE_READWRITE);
+    if (buf == nullptr) { CloseHandle(h); return -1; }
+    DWORD leidos = 0;
+    const BOOL ok = ReadFile(h, buf, n, &leidos, nullptr);
+    CloseHandle(h);
+    int sitios = 0;
+    if (ok && leidos == n) {
+        // La misma firma que usa patch_work_item_count, sobre el archivo en vez
+        // de sobre el modulo mapeado: mov eax,[rdx+4] / mov r8d,0xC0 / mov [rcx+4],eax
+        for (DWORD i = 0; i + 12 < n; ++i) {
+            if (buf[i] != 0x8B || buf[i+1] != 0x42 || buf[i+2] != 0x04) continue;
+            if (buf[i+3] != 0x41 || buf[i+4] != 0xB8 || buf[i+5] != 0xC0) continue;
+            if (buf[i+9] != 0x89 || buf[i+10] != 0x41 || buf[i+11] != 0x04) continue;
+            ++sitios;
+        }
+    }
+    VirtualFree(buf, 0, MEM_RELEASE);
+    return sitios;
+}
+
+// Ademas del sitio, la VERSION tiene que ser una de las que soportamos: 2.12 o
+// 2.13. Son contra las que se desarrollo todo esto -- los offsets estan
+// anotados en este mismo archivo como "0x45da en 2.13, 0x45e2 en 2.12" -- y las
+// unicas probadas en juego, GTA V y Cyberpunk.
+//
+// Este filtro se agrego despues de un crash, y el error que lo causo fue mio:
+// se eligio el build mas nuevo de la cache (2.14.0) razonando que "es lo que
+// hace la OTA de NVIDIA". Cargo, el parche de la cuenta engancho, x3..x6
+// anduvieron sesenta segundos, y despues murio adentro del plugin:
+//
+//     0xC0000005 lectura en 0x0000000000000040
+//     ...\sl_dlss_g_0\versions\134656\files\190_E658703.dll +0x3F2E9
+//     con sl.interposer 2.7.30 del juego en la misma lista de modulos
+//
+// Un nulo desreferenciado a +0x40 es la forma de un desajuste de ABI entre
+// interposer y plugin, no de un parche mal puesto. Que un build cargue y ande
+// un rato NO es que sea compatible.
+//
+// Se miro tambien elegir por cercania al interposer, porque Cyberpunk reparte
+// un interposer 2.7.1 con un plugin 2.11.1 y funciona. Pero eso valida ESE par,
+// no valida nuestros parches en 2.11: de 2.11 se comprobo una sola firma, la de
+// la cuenta, y los demas sitios no se verificaron nunca en ese tren. Un solo
+// patron de bytes no alcanza para declarar soportada una version.
+// La version se saca leyendo el archivo, NO con GetFileVersionInfo.
+//
+// Esta funcion se llama desde adentro de LdrLoadDll, con el loader lock tomado.
+// La API de version vive en version.dll, que en este proceso somos nosotros y
+// hay que resolver contra la real -- y resolverla implica un LoadLibrary. Pedir
+// una carga desde adentro del loader es exactamente como se consigue un
+// deadlock. Asi que se busca la cadena "FileVersion" del recurso VS_VERSION_INFO
+// en el archivo y se parsea el valor que la sigue: sin APIs y sin loader.
+static bool version_soportada(const wchar_t *ruta, unsigned *may_out, unsigned *men_out) {
+    if (may_out != nullptr) *may_out = 0;
+    if (men_out != nullptr) *men_out = 0;
+    HANDLE h = CreateFileW(ruta, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart <= 64 || sz.QuadPart > (8 << 20)) {
+        CloseHandle(h);
+        return false;
+    }
+    const DWORD n = (DWORD)sz.QuadPart;
+    unsigned char *buf = (unsigned char *)VirtualAlloc(nullptr, n, MEM_COMMIT, PAGE_READWRITE);
+    if (buf == nullptr) { CloseHandle(h); return false; }
+    DWORD leidos = 0;
+    const BOOL ok_read = ReadFile(h, buf, n, &leidos, nullptr);
+    CloseHandle(h);
+    bool ok = false;
+    if (ok_read && leidos == n) {
+        static const wchar_t kClave[] = L"FileVersion";
+        const int klen = 11;
+        for (DWORD i = 0; i + (DWORD)(klen * 2) + 128 < n; i += 2) {
+            const wchar_t *w = (const wchar_t *)(buf + i);
+            bool igual = true;
+            for (int k = 0; k < klen; ++k) {
+                if (w[k] != kClave[k]) { igual = false; break; }
+            }
+            if (!igual) continue;
+            // El valor viene despues, con relleno de ceros en el medio.
+            unsigned may = 0, men = 0, campo = 0, acum = 0;
+            bool en_numero = false, listo = false;
+            for (int j = klen; j < 80 && !listo; ++j) {
+                const wchar_t c = w[j];
+                if (c >= L'0' && c <= L'9') {
+                    acum = acum * 10 + (unsigned)(c - L'0');
+                    en_numero = true;
+                } else if (en_numero && (c == L',' || c == L'.' || c == L' ' || c == 0)) {
+                    if (campo == 0) may = acum; else if (campo == 1) { men = acum; listo = true; }
+                    ++campo;
+                    acum = 0;
+                    en_numero = false;
+                } else if (en_numero) {
+                    break;      // basura: no era este
+                }
+            }
+            if (campo >= 2 || listo) {
+                if (may_out != nullptr) *may_out = may;
+                if (men_out != nullptr) *men_out = men;
+                // 2.11, 2.12 y 2.13. La lista sale de evidencia en juego, no de
+            // haber visto una firma suelta: GTA V corre 2.13 y anda, Cyberpunk
+            // corre 2.11 y anda, y 2.12 es la que este archivo tiene anotada con
+            // sus offsets ("0x45da en 2.13, 0x45e2 en 2.12").
+            //
+            // Queda afuera 2.14, que es la unica sin ningun juego que la respalde
+            // y la que aparece en los dos dumps, en +0x3F2E9 leyendo un nulo a +0x40.
+            //
+            // Se probo primero con {12,13} y habria dejado a Cyberpunk sin parchear:
+            // su plugin es 2.11. Verificado sobre los archivos antes de instalar.
+            ok = (may == 2 && (men == 11 || men == 12 || men == 13));
+                break;
+            }
+        }
+    }
+    VirtualFree(buf, 0, MEM_RELEASE);
+    return ok;
+}
+
+// Se recorre la cache de mas nuevo a mas viejo y se toma el primero que tenga
+// el sitio Y una version soportada.
+static wchar_t g_plugin_cache[MAX_PATH] = {0};
+static bool g_plugin_cache_buscado = false;
+static const wchar_t *plugin_parcheable_en_cache(void) {
+    if (g_plugin_cache_buscado) return g_plugin_cache[0] != 0 ? g_plugin_cache : nullptr;
+    g_plugin_cache_buscado = true;
+
+    const wchar_t *base = L"C:\\ProgramData\\NVIDIA\\NGX\\models\\sl_dlss_g_0\\versions\\";
+    // Los ids son decimales: gana el mas largo, y a igual largo el mayor.
+    wchar_t mejor_id[64] = {0};
+    for (;;) {
+        wchar_t patron[MAX_PATH];
+        int k = 0;
+        for (; base[k] != 0 && k < MAX_PATH - 2; ++k) patron[k] = base[k];
+        patron[k++] = L'*';
+        patron[k] = 0;
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(patron, &fd);
+        if (h == INVALID_HANDLE_VALUE) return nullptr;
+        wchar_t candidato[64] = {0};
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            if (fd.cFileName[0] == L'.') continue;
+            int n = 0; while (fd.cFileName[n] != 0 && n < 63) ++n;
+            int m = 0; while (mejor_id[m] != 0) ++m;
+            // Ya descartado en una vuelta anterior: no volver a mirarlo.
+            // Se recorre de mayor a menor: ya visto = "es mayor o igual al
+            // ultimo que probe". Estaba invertido en las tres ramas, y el
+            // efecto era que despues de rechazar el build mas alto se salteaban
+            // todos los demas -- la busqueda devolvia "no hay candidato" con el
+            // 2.12 ahi sin mirar. Ids decimales: gana el mas largo, y a igual
+            // largo el mayor.
+            bool ya_visto = false;
+            if (m > 0) {
+                if (n > m) ya_visto = true;
+                else if (n < m) ya_visto = false;
+                else {
+                    ya_visto = true;   // identico al ultimo probado
+                    for (int i = 0; i < n; ++i) {
+                        if (fd.cFileName[i] != mejor_id[i]) { ya_visto = fd.cFileName[i] > mejor_id[i]; break; }
+                    }
+                }
+            }
+            if (ya_visto) continue;
+            int c = 0; while (candidato[c] != 0) ++c;
+            bool mejor = (c == 0);
+            if (!mejor) {
+                if (n > c) mejor = true;
+                else if (n == c) {
+                    for (int i = 0; i < n; ++i) {
+                        if (fd.cFileName[i] != candidato[i]) { mejor = fd.cFileName[i] > candidato[i]; break; }
+                    }
+                }
+            }
+            if (mejor) { for (int i = 0; i <= n; ++i) candidato[i] = fd.cFileName[i]; }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+        if (candidato[0] == 0) return nullptr;      // no quedan mas para probar
+
+        // El nombre del .dll adentro de files\ cambia entre builds: se busca.
+        wchar_t dir[MAX_PATH];
+        int j = 0;
+        for (; base[j] != 0 && j < MAX_PATH - 80; ++j) dir[j] = base[j];
+        for (int i = 0; candidato[i] != 0; ++i) dir[j++] = candidato[i];
+        const wchar_t *sufijo = L"\\files\\";
+        for (int i = 0; sufijo[i] != 0; ++i) dir[j++] = sufijo[i];
+        dir[j] = 0;
+        wchar_t glob[MAX_PATH];
+        int q = 0;
+        for (; dir[q] != 0 && q < MAX_PATH - 6; ++q) glob[q] = dir[q];
+        glob[q++] = L'*'; glob[q++] = L'.'; glob[q++] = L'd'; glob[q++] = L'l'; glob[q++] = L'l';
+        glob[q] = 0;
+        WIN32_FIND_DATAW fa;
+        HANDLE ha = FindFirstFileW(glob, &fa);
+        if (ha != INVALID_HANDLE_VALUE) {
+            do {
+                if (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                wchar_t ruta[MAX_PATH];
+                int r = 0;
+                for (; dir[r] != 0 && r < MAX_PATH - 64; ++r) ruta[r] = dir[r];
+                for (int i = 0; fa.cFileName[i] != 0 && r < MAX_PATH - 1; ++i) ruta[r++] = fa.cFileName[i];
+                ruta[r] = 0;
+                unsigned may = 0, men = 0;
+                const bool sop = version_soportada(ruta, &may, &men);
+                const bool tiene = (sitios_de_cuenta(ruta) >= 1);
+                if (tiene && sop) {
+                    for (int i = 0; i <= r; ++i) g_plugin_cache[i] = ruta[i];
+                    log_num("plugin: candidato aceptado, version 2.", (unsigned long long)men);
+                    FindClose(ha);
+                    return g_plugin_cache;
+                }
+                if (tiene && !sop) {
+                    // Se descarta a proposito: tiene el sitio pero no es 2.12 ni
+                    // 2.13, y una firma sola no alcanza para confiar en el tren.
+                    log_num("plugin: descartado por version, 2.", (unsigned long long)men);
+                }
+            } while (FindNextFileW(ha, &fa));
+            FindClose(ha);
+        }
+        // Ese build no sirve: se baja el techo y se prueba con el siguiente.
+        for (int i = 0; i <= 63; ++i) mejor_id[i] = candidato[i];
+    }
+}
+
+// log_wide toma un UNICODE_STRING; esto es para una ruta suelta.
+static void log_ruta(const char *etiqueta, const wchar_t *s) {
+    char b[400];
+    int k = 0;
+    for (; etiqueta[k] != 0 && k < 40; ++k) b[k] = etiqueta[k];
+    for (int i = 0; s[i] != 0 && k < 398; ++i, ++k)
+        b[k] = (s[i] < 128) ? (char)s[i] : '?';
+    b[k] = 0;
+    log_line(b);
+}
+
+static bool igual_sin_caso(const wchar_t *a, const wchar_t *b) {
+    for (int i = 0;; ++i) {
+        wchar_t x = a[i], y = b[i];
+        if (x >= L'A' && x <= L'Z') x = (wchar_t)(x + 32);
+        if (y >= L'A' && y <= L'Z') y = (wchar_t)(y + 32);
+        if (x != y) return false;
+        if (x == 0) return true;
+    }
+}
+
+// Se engancha LdrLoadDll y no LoadLibraryExW.
+//
+// El primer intento hooked kernel32!LoadLibraryExW y NO disparo nunca: el log
+// mostro "plugin: vigilando..." y despues el plugin del juego mapeandose igual,
+// sin pasar por el hook. En Windows moderno kernel32!LoadLibraryExW es un salto
+// a kernelbase, y quien llame a LoadLibraryW, a la copia de kernelbase o
+// directo al loader no toca ese stub. LdrLoadDll es el embudo por donde pasan
+// todos, sin excepcion.
+typedef NTSTATUS(NTAPI *PFN_LDRLOAD)(PWSTR, PULONG, PUNICODE_STRING, PVOID *);
+static PFN_LDRLOAD g_orig_ldrload = nullptr;
+static wchar_t g_ruta_pedida[MAX_PATH];
+// Solo se vigila la carpeta de la cache si el plugin del juego ya resulto
+// inservible y tuvimos que sustituirlo. Un juego cuyo plugin sirve -- GTA V con
+// 2.13, Cyberpunk con 2.11 -- no cambia en nada: sus cargas de la cache siguen
+// pasando de largo como hasta ahora.
+static bool g_ya_sustituimos = false;
+// Veredicto que dejo la corrida ANTERIOR de este mismo ejecutable: -1 sin dato,
+// 0 verde, 1 amarillo, 2 rojo. La sustitucion solo se permite con 2.
+//
+// Esto es lo que hace segura a la redireccion. Anoche decidia mirando el archivo
+// que se estaba por cargar, y en Cyberpunk eso se cumplia sin que yo lo viera:
+// una de sus copias no tiene el sitio, disparaba la sustitucion, y terminaba
+// cambiandole la copia OTA que si usa. Con el veredicto persistido, un juego que
+// funciona es VERDE o AMARILLO y jamas entra en esta rama.
+static int g_veredicto_previo = -1;
+static bool g_veredicto_leido = false;
+
+static void leer_veredicto_previo(void) {
+    if (g_veredicto_leido) return;
+    g_veredicto_leido = true;
+    wchar_t ruta[MAX_PATH];
+    if (!ruta_de_estado(ruta, MAX_PATH)) return;
+    HANDLE h = CreateFileW(ruta, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    char b[192];
+    DWORD leidos = 0;
+    const BOOL ok = ReadFile(h, b, sizeof(b) - 1, &leidos, nullptr);
+    CloseHandle(h);
+    if (!ok || leidos == 0) return;
+    b[leidos] = 0;
+    for (DWORD i = 0; i + 4 < leidos; ++i) {
+        if (b[i] == 'R' && b[i+1] == 'O' && b[i+2] == 'J' && b[i+3] == 'O') { g_veredicto_previo = 2; break; }
+        if (b[i] == 'V' && b[i+1] == 'E' && b[i+2] == 'R' && b[i+3] == 'D') { g_veredicto_previo = 0; break; }
+        if (b[i] == 'A' && b[i+1] == 'M' && b[i+2] == 'A' && b[i+3] == 'R') { g_veredicto_previo = 1; break; }
+    }
+}
+static UNICODE_STRING g_us_alt;
+
+static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombre,
+                                 PVOID *base) {
+    if (nombre == nullptr || nombre->Buffer == nullptr || nombre->Length == 0)
+        return g_orig_ldrload(ruta, carac, nombre, base);
+    const int n = (int)(nombre->Length / sizeof(wchar_t));
+    if (n <= 0 || n >= MAX_PATH) return g_orig_ldrload(ruta, carac, nombre, base);
+    // UNICODE_STRING no viene terminado en cero: se copia para poder mirarlo.
+    for (int i = 0; i < n; ++i) g_ruta_pedida[i] = nombre->Buffer[i];
+    g_ruta_pedida[n] = 0;
+    int corte = n;
+    while (corte > 0 && g_ruta_pedida[corte-1] != L'\\' && g_ruta_pedida[corte-1] != L'/')
+        --corte;
+    // Dos formas de nombrar al mismo plugin.
+    //
+    // La copia que trae el juego se llama sl.dlss_g.dll, pero la de la cache de
+    // NGX se llama 190_E658703.dll -- un nombre de contenido, no de modulo. Al
+    // comparar solo el nombre de archivo, la carga de la copia OTA pasaba de
+    // largo: la redireccion disparaba una sola vez, la 2.14 entraba igual, y
+    // Streamline se quedaba con ella descartando la nuestra ("sitios que quedan
+    // 0"). Se reconoce tambien por la carpeta, que es de NVIDIA y no de ningun
+    // juego en particular.
+    bool es_dlssg = igual_sin_caso(g_ruta_pedida + corte, L"sl.dlss_g.dll");
+    if (!es_dlssg) {
+        if (!g_ya_sustituimos) return g_orig_ldrload(ruta, carac, nombre, base);
+        static const wchar_t kCache[] = L"sl_dlss_g_0";
+        for (int i = 0; i + 11 <= n && !es_dlssg; ++i) {
+            bool m = true;
+            for (int k = 0; k < 11; ++k) {
+                wchar_t x = g_ruta_pedida[i + k];
+                if (x >= L'A' && x <= L'Z') x = (wchar_t)(x + 32);
+                if (x != kCache[k]) { m = false; break; }
+            }
+            es_dlssg = m;
+        }
+    }
+    if (!es_dlssg)
+        return g_orig_ldrload(ruta, carac, nombre, base);
+
+    // Sirve si tiene el sitio Y es una version soportada. Con cualquiera de las
+    // dos cosas en falta se sustituye.
+    //
+    // Al principio solo se miraba el sitio, y en Halo eso dejaba pasar la copia
+    // OTA 2.14: tiene el sitio, asi que la redireccion no la tocaba. El
+    // resultado fue el peor de los dos mundos. El log lo mostro entero:
+    //
+    //     sl.dlss_g mapped in ...134273...  version soportada: 2.12  (parcheada)
+    //     sl.dlss_g mapped in ...134656...  version NO soportada     (intacta)
+    //     modulo descargado: se retiran sus sitios parcheados
+    //       sitios que quedan 0
+    //
+    // Streamline se queda con la mas nueva y descarta la nuestra, asi que el
+    // plugin vivo termina siendo justo el que no tocamos: cero sitios, ningun
+    // control de la cuenta, DYNAMIC sin efecto y multiplicador contado 1.00.
+    //
+    // Sustituyendo tambien las versiones no soportadas, las dos cargas resuelven
+    // al mismo archivo y no queda copia sin parchear que Streamline pueda
+    // preferir.
+    leer_veredicto_previo();
+    if (g_veredicto_previo != 2) {
+        // Sin un ROJO de la corrida anterior no se sustituye NADA. Un juego que
+        // funciona nunca llega a esta rama, que es lo que faltaba anoche.
+        static bool dicho = false;
+        if (!dicho) {
+            dicho = true;
+            log_num("plugin: sin veredicto ROJO previo, no se sustituye. veredicto=",
+                    (unsigned long long)(unsigned)(g_veredicto_previo + 1));
+        }
+        return g_orig_ldrload(ruta, carac, nombre, base);
+    }
+    unsigned may = 0, men = 0;
+    const bool sop = version_soportada(g_ruta_pedida, &may, &men);
+    const int s = sitios_de_cuenta(g_ruta_pedida);
+    if (sop && s > 0) {
+        log_num("plugin: el del juego sirve, version 2.", (unsigned long long)men);
+        return g_orig_ldrload(ruta, carac, nombre, base);
+    }
+    const wchar_t *alt = plugin_parcheable_en_cache();
+    if (!sop) log_num("plugin: version no soportada en el que pide, 2.",
+                      (unsigned long long)men);
+    else      log_line("plugin: el que pide el juego no tiene el sitio de la cuenta");
+    log_ruta("  pedido:  ", g_ruta_pedida);
+    if (alt == nullptr) {
+        log_line("  y la cache de NGX no tiene ninguno que lo tenga; se carga el del juego");
+        return g_orig_ldrload(ruta, carac, nombre, base);
+    }
+    log_ruta("  cargado: ", alt);
+    int m = 0; while (alt[m] != 0) ++m;
+    g_us_alt.Buffer = const_cast<wchar_t *>(alt);
+    g_us_alt.Length = (USHORT)(m * sizeof(wchar_t));
+    g_us_alt.MaximumLength = (USHORT)((m + 1) * sizeof(wchar_t));
+    // Ruta absoluta: el search path del llamador ya no aplica.
+    g_ya_sustituimos = true;
+    const NTSTATUS st = g_orig_ldrload(nullptr, carac, &g_us_alt, base);
+    if (st < 0) {
+        log_num("  el de la cache no cargo, status ", (unsigned)st);
+        log_line("  se vuelve al del juego");
+        return g_orig_ldrload(ruta, carac, nombre, base);
+    }
+    return st;
+}
+
+static void arm_plugin_redirect(void) {
+    if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) return;
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+    if (nt == nullptr) return;
+    FARPROC p = GetProcAddress(nt, "LdrLoadDll");
+    if (p == nullptr) { log_line("plugin: no hay LdrLoadDll"); return; }
+    if (MH_CreateHook(reinterpret_cast<void *>(p), reinterpret_cast<void *>(&hk_ldrload),
+                      reinterpret_cast<void **>(&g_orig_ldrload)) == MH_OK &&
+        MH_EnableHook(reinterpret_cast<void *>(p)) == MH_OK)
+        log_line("plugin: vigilando en LdrLoadDll que sl.dlss_g tenga el sitio de la cuenta");
+    else
+        g_orig_ldrload = nullptr;
+}
 
 // Highest-numbered directory under the OTA cache, which is the build NGX picks.
 // Names are decimal ids, so "20318464" beats "20318081"; compared by length
@@ -6564,6 +7401,10 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             log_line("NGX indicator on (__NGX_SHOW_INDICATOR=1024) + snippet log");
         }
     }
+
+    // Antes de que nadie cargue plugins: si el sl.dlss_g del juego no tiene el
+    // sitio de la cuenta, se carga uno de la cache que si lo tenga.
+    arm_plugin_redirect();
 
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     auto reg = reinterpret_cast<PFN_LdrRegister>(

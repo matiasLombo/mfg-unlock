@@ -1,1 +1,0 @@
-PRESENTADOR presentadas=4271 segundos=26.003 fps=164.25

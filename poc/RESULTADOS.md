@@ -10,7 +10,44 @@ Cada veredicto dice de que corrida salio y con que binario.
 
 ## M7. Oraculo externo
 
-**NO SE PUDO PROBAR**: PresentMon necesita elevacion y no se ejecuto elevado.
+**NO SE PUDO PROBAR**: PresentMon no produce salida en esta maquina, con tres
+binarios distintos, elevado y sin elevar. Falta probar PresentMon 2.x oficial, o
+recapturar el ETL con los proveedores exactos que el propio repo documenta.
+
+El encabezado anterior decia "necesita elevacion y no se ejecuto elevado". Se
+corrigio: SI se ejecuto elevado, y falla igual. El detalle esta mas abajo.
+
+Lo medido, no supuesto:
+
+  - NVIDIA 1.9.12728.0 (FrameViewSDK): exit 1, sin stdout ni stderr, sin CSV,
+    elevado y sin elevar.
+  - AMD (build de HEAD 6af680f4, el que ya corre en esta maquina): exit 0,
+    "Started recording / Stopped recording", **cero filas**. Igual con
+    `--output_file` y con `--output_stdout` (salida de 2 bytes, solo el BOM),
+    con y sin `--process_name`, con `--v1_metrics`, con `--no_track_display`
+    (que bajo los eventos perdidos de 63.346 a 2.800, o sea la sesion ETW existe
+    y recibe), y analizando un ETL offline con `--etl_file`. Sin elevar y
+    elevado.
+  - El PresentMon que trae el banco tampoco produce CSV.
+
+Lo que descarta que sea la maquina: `logman` **sin elevar** grabo 125 MB de
+DxgKrnl + DXGI + DWM en 10 segundos. El ETW de aca entrega los eventos.
+
+Lo que faltaria, concreto:
+
+  - El issue #217 de GameTechDev/PresentMon describe este sintoma exacto
+    ("RECORDING" y ningun dato, regresion desde la 1.7.1) y cierra con
+    "This appears fixed in 2.0.0". El binario de NVIDIA cae en ese rango.
+  - Para el camino offline, `Tools/start_etl_collection.cmd` del repo lista los
+    proveedores que PresentMon necesita, y a la captura de aca le faltaban:
+
+        dxgkrnl 0x900236:5  +  0x04000000:5  +  0x208041:5
+        d3d9 0xf:6   dxgi 0xf:6   dwm 0xffff:6
+        win32k 0x8400000440c01000:4
+
+  - Alternativa sin depender del ejecutable de nadie: `PresentData/` es una
+    libreria MIT pensada para armar un consumidor ETW propio. OCAT y CapFrameX
+    la usan asi.
 
 CORRECCION. En una version anterior de este documento puse aca "ANDA" usando el
 presentador como oraculo. Eso fue correr el arco: el objetivo dice PresentMon, y
@@ -355,4 +392,89 @@ Reflex por NVAPI, un camino distinto del informe de Streamline -- que en Halo da
 
 Salvedad honesta: dxvk-nvapi espeja la lista PUBLICADA. Si NVIDIA tiene entradas
 privadas sin documentar, esto no las ve.
+
+### CORRECCION: el veredicto se sostiene, la investigacion estaba incompleta
+
+El veredicto de arriba sigue siendo cierto en lo que preguntaba: **no hay
+consulta publica que devuelva el multiplicador en curso**. Eso no cambia.
+
+Lo que estuvo mal fue dar por cerrado el eje NVAPI con eso. Solo se miraron los
+*entry points*. NVAPI tiene un segundo eje que no se miro: los **ajustes de
+driver por perfil (DRS)**, y ahi NVIDIA si expone el multiplicador, el modo y el
+target de fps, en su SDK publico (`NvApiDriverSettings.h`, repo NVIDIA/nvapi):
+
+    0x10308298  NGX_DLSSG_MODE                    "Override DLSSG mode"
+                                                  OFF=1 ON=2 AUTO=3 DYNAMIC=4
+    0x104D6667  NGX_DLSSG_MULTI_FRAME_COUNT       "Override DLSSG multi-frame count"
+                                                  MIN=1 MAX=15
+    0x10562D0F  NGX_DLSSG_DYNAMIC_MULTI_FRAME_COUNT_MAX
+    0x10CF4125  NGX_DLSSG_DYNAMIC_TARGET_FRAME_RATE
+                                                  MIN=1 MAX=0xFFFFFF AUTO=0x1000000
+
+Son de escritura, no de consulta, asi que no contradicen el "NO ANDA" de M6: no
+sirven para MEDIR. Pero abren un camino de CONTROL que no se habia mirado, y por
+eso se probo aparte, en M8.
+
+Como se encontro: buscando en repos publicos, `dxvk-nvapi` los usa por nombre en
+`src/util/util_drs.h`, y de ahi se llego al header oficial de NVIDIA.
+
+
+## M8. Overrides de DLSS-G por perfil de driver (DRS)
+
+**NO ANDA como reemplazo del parche**: sin el DLL, con `MULTI_FRAME_COUNT=4`
+escrito y guardado, el banco sigue reportando `ngx_supports: 1` y
+`"state": "not supported"`. El override no levanta el gate de arquitectura de
+Ada, que es lo unico que haria falta para no tener que parchear.
+
+POC: `poc/m8-drs/m8.cpp` (solo lectura) y `poc/m8-drs/m8w.cpp` (escritura, con
+`m8w.exe limpiar` para revertir). g++, sin SDK: se resuelven las funciones DRS
+por ID contra `nvapi64.dll` via `nvapi_QueryInterface`.
+
+### Lo que si quedo probado
+
+1. **El driver de esta maquina conoce los cuatro settings.** No es lectura de un
+   header: NvAPI devuelve sus nombres oficiales.
+
+        NvAPI_Initialize: 0   DRS_CreateSession: 0   DRS_LoadSettings: 0
+        0x10308298 -> "Override DLSSG mode"
+        0x104D6667 -> "Override DLSSG multi-frame count"
+        0x10562D0F -> "Override maximum DLSSG dynamic multi frame count"
+        0x10CF4125 -> "Override DLSSG Target Frame Rate"
+
+2. **La escritura funciona y persiste.** Se escribio en el perfil dueno del
+   ejecutable del banco ("Streamline Sample App", predefinido de NVIDIA), el
+   perfil paso de `settings=2` a `settings=4`, `nvdrsdb1.bin` cambio de tamano y
+   de fecha, y los bytes en la base muestran el registro
+   `[id][tipo 0x1002][valor]` con 2 y 4. Confirmado por dos vias independientes.
+
+3. **Ningun perfil traia estos settings puestos.** Se recorrieron los **7964**
+   perfiles del driver: 0 con valor distinto del default.
+
+   CORRECCION dentro de esta misma investigacion: primero se dijo que NVIDIA
+   repartia `MULTI_FRAME_COUNT` en ~30 perfiles, leyendo coincidencias de bytes
+   en `nvdrsdb0.bin`. Era falso: esas 30 coincidencias son el ID en tablas de
+   definicion, con valor 0. Un patron de bytes se tomo por un dato.
+
+4. **El ejecutable no se puede sacar de su perfil.** `CreateApplication` sobre un
+   perfil propio devuelve -167 (`EXECUTABLE_ALREADY_IN_USE`): los .exe conocidos
+   ya pertenecen a perfiles predefinidos de NVIDIA ("Streamline Sample App",
+   "Cyberpunk 2077" con 35 settings). Hay que escribir en el perfil dueno.
+
+### Lo que quedo sugerido y NO probado
+
+Con el gate ya levantado por el DLL y el DLL en modo AUTO (sin forzar conteo),
+ocho corridas del banco alternando el override:
+
+    DRS COUNT = 4   ->  x1.00  x1.00  x1.00  x1.00     genero 0 de 4
+    DRS COUNT = 0   ->  x2.00  x2.00  x2.00  x1.00     genero 3 de 4
+
+Sugiere que el driver **no ignora** el setting en Ada: lo lee y reacciona, pero
+pedirle un conteo que el hardware no soporta oficialmente **apaga** DLSS-G en vez
+de subirlo. Encaja con que el apagado de DLSS-G sea un chequeo de datos.
+
+NO ESTA PROBADO. Este banco engancha generacion ~1 de cada 3 corridas, y 4 contra
+4 no alcanza para separar la senal del ruido, aunque 0/4 contra 3/4 no parezca
+casualidad. Para cerrarlo harian falta mas repeticiones, y se corto antes.
+
+Estado de la maquina al terminar: los dos settings devueltos a 0.
 
