@@ -1,0 +1,23 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260908215005
+Username: MATIAS\matia
+RunAs User: MATIAS\matia
+Configuration Name: 
+Machine: MATIAS (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -NoExit -File C:\Users\matia\dev\mfg-unlock\poc\m7-oraculo\oraculo.ps1
+Process ID: 55788
+PSVersion: 5.1.26100.9278
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.9278
+BuildVersion: 10.0.26100.9278
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+elevado: True
+capturando 20 s con PresentMon 1.9.12728.0
+PresentMon exit: 1
+verdad del presentador: PRESENTADOR presentadas=4271 segundos=26.003 fps=164.25
+SIN CSV: el oraculo no capturo nada

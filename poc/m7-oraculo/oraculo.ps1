@@ -20,6 +20,9 @@
 param([int]$Segundos = 20)
 
 $aqui = $PSScriptRoot
+# Todo queda en un archivo: depender de leer la ventana elevada fue justamente
+# lo que dejo la primera corrida sin diagnostico.
+Start-Transcript -Path (Join-Path $aqui "oraculo-salida.txt") -Force | Out-Null
 $pm = "C:\Program Files\NVIDIA Corporation\FrameViewSDK\bin\PresentMon_x64.exe"
 $pres = Join-Path $aqui "presentador.exe"
 $csv = Join-Path $aqui "captura.csv"
@@ -42,8 +45,18 @@ $args = @("--timed", "$Segundos", "--process_name", "presentador.exe",
           "--output_file", $csv, "--no_console_stats",
           "--session_name", "mfgpoc", "--stop_existing_session",
           "--terminate_after_timed", "--qpc_time")
-$q = Start-Process -FilePath $pm -ArgumentList $args -Wait -PassThru -NoNewWindow
+# La salida de PresentMon a archivos: con -NoNewWindow no queda en el
+# transcript, y por eso la corrida elevada dijo "exit 1" sin decir por que.
+$pmOut = Join-Path $aqui "presentmon-stdout.txt"
+$pmErr = Join-Path $aqui "presentmon-stderr.txt"
+$q = Start-Process -FilePath $pm -ArgumentList $args -Wait -PassThru -NoNewWindow -RedirectStandardOutput $pmOut -RedirectStandardError $pmErr
 Write-Output "PresentMon exit: $($q.ExitCode)"
+foreach ($f in @($pmOut, $pmErr)) {
+    if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
+        Write-Output "--- $(Split-Path $f -Leaf):"
+        Get-Content $f | Select-Object -First 12 | ForEach-Object { Write-Output "    $_" }
+    }
+}
 
 $p.WaitForExit(60000) | Out-Null
 $linea = Get-Content $salida -ErrorAction SilentlyContinue | Where-Object { $_ -match "PRESENTADOR" }
@@ -67,3 +80,4 @@ if ($linea -match "fps=([0-9.]+)") {
     Write-Output ("VEREDICTO: oraculo {0:N2} fps contra verdad {1:N2} fps, diferencia {2:+0.0;-0.0}%" -f $fpsOraculo, $fpsVerdad, $dif)
 }
 Write-Output "csv: $csv"
+Stop-Transcript | Out-Null

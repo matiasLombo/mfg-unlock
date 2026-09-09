@@ -35,12 +35,27 @@ Sin elevar sale con **exit code 1**, sin stdout, sin stderr y sin CSV. Coincide
 con la documentacion de Microsoft: ETW en tiempo real solo lo pueden consumir
 procesos elevados, "Performance Log Users" o servicios del sistema.
 
-**Probado bien, sin el confundidor.** La primera vez se corrio sin elevar y con
-el escritorio quieto, y se concluyo "es elevacion" -- pero eso no distinguia
-elevacion de falta de datos, porque sin presentaciones PresentMon no escribe CSV
-igual. Se repitio con `presentador.exe` corriendo al lado, que presenta a 165 fps:
-mismo exit 1, misma ausencia total de salida, mismo CSV inexistente. Ahora si
-esta aislado: es elevacion.
+**CORRECCION IMPORTANTE: no era elevacion.** Durante toda la investigacion se
+supuso que el exit 1 venia de que ETW en tiempo real necesita privilegios. Se
+probo dos veces sin elevar -- una con el escritorio quieto y otra con el
+presentador corriendo, para descartar la falta de datos -- pero **nunca se probo
+elevado**.
+
+Cuando por fin se corrio elevado, el resultado fue el mismo:
+
+    elevado: True
+    capturando 20 s con PresentMon 1.9.12728.0
+    PresentMon exit: 1
+    verdad del presentador: 4271 presentaciones en 26.003 s = 164.25 fps
+    SIN CSV
+
+Asi que el bloqueo es OTRO y sigue sin identificarse. La conclusion anterior era
+una hipotesis razonable -- coincidia con la documentacion de Microsoft sobre ETW
+-- pero no estaba probada, y al probarla resulto falsa.
+
+Lo que impidio verlo antes: `Start-Process -NoNewWindow` no manda la salida del
+proceso al transcript, asi que el mensaje de error de PresentMon nunca se vio. El
+script ya lo redirige a `presentmon-stdout.txt` y `presentmon-stderr.txt`.
 
 Dos intentos elevados fallaron por causas que ya estan corregidas en la POC:
   - el primero, porque en el escritorio quieto no hay presentaciones que
