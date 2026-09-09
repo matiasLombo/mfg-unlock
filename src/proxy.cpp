@@ -2252,6 +2252,35 @@ static int    g_hi_frames_seen = 0;   // and while the high one did
 static volatile LONG g_present_count = 0;   // presents seen at the swap chain
 static long long g_pres_qpc = 0;            // when the last present went out
 static volatile LONG g_last_change_pres = 0; // present index at the last count change
+// Cuando cambio la cuenta, en reloj real, y la curva de recuperacion.
+//
+// El corte viejo era "menos de 8 presentaciones", que a 161 fps son ~50 ms --
+// la MITAD del enfriamiento de 100 ms que se quiere detectar. Con la ventana
+// mas corta que el efecto, cerca y lejos dan igual (0.94 y 0.92 medidos) y eso
+// NO prueba que cambiar la cuenta salga gratis.
+//
+// Aca se mide en milisegundos y por tramos, asi la DURACION del efecto sale del
+// dato en vez de asumirse. Si el enfriamiento es real y dura 100 ms, los tramos
+// de abajo de 100 tienen que estar peor que los de arriba, y la recuperacion
+// tiene que verse.
+// Cadencia SIN ESCALA, porque la de arriba tiene un defecto.
+//
+// "Fuera de cadencia" usa una banda ABSOLUTA de 4-8 ms, o sea que mide cuanto
+// se aleja el frame rate de ~165 fps mezclado con la irregularidad real. 4X
+// fijo sale 23.8 % en parte porque su intervalo medio (7.5 ms) roza el borde de
+// la banda, no porque sea irregular; 5X fijo sale 1.2 % porque 5.2 ms cae comodo
+// en el medio. Comparar configuraciones con distinto fps por esa banda no es
+// valido.
+//
+// Esta compara cada intervalo contra la media de SU PROPIA ventana: cuenta los
+// que se van mas de un cuarto. Es adimensional, asi que 133 y 192 present/s se
+// pueden comparar. Necesita dos pasadas por ventana, y como no se guardan los
+// intervalos se hace con la desviacion acumulada: suma y suma de cuadrados dan
+// el desvio relativo (coeficiente de variacion), que sirve igual y cuesta dos
+// sumas por presentacion.
+static double g_cv_sum = 0.0;    // suma de intervalos, ms
+static double g_cv_sq = 0.0;     // suma de cuadrados
+static int    g_cv_n = 0;
 static int g_hitch_near = 0;                 // hitches within 4 presents of one
 static int g_hitch_far = 0;                  // and the rest
 static double g_lat_sum = 0.0;               // queued presents, summed
@@ -2586,6 +2615,19 @@ static void note_rendered_frame(void) {
                                         (unsigned)(g_far_n ? (unsigned long long)g_far_bad * 1000ULL / (unsigned)g_far_n : 0));
                                 log_num("      of presents ", (unsigned)g_far_n);
                                 g_near_n = 0; g_near_bad = 0; g_far_n = 0; g_far_bad = 0;
+                            }
+                            // Cadencia sin escala: desvio relativo de los
+                            // intervalos contra la media de ESTA ventana.
+                            if (g_cv_n > 2) {
+                                const double media = g_cv_sum / (double)g_cv_n;
+                                const double var = g_cv_sq / (double)g_cv_n - media * media;
+                                if (media > 0.0 && var > 0.0) {
+                                    double sd = var;
+                                    for (int it = 0; it < 20; ++it) sd = 0.5 * (sd + var / sd);
+                                    log_num("  cadencia: desvio relativo x1000 ",
+                                            (unsigned)(sd / media * 1000.0));
+                                }
+                                g_cv_sum = 0.0; g_cv_sq = 0.0; g_cv_n = 0;
                             }
                             if (g_hitch_near + g_hitch_far > 0) {
                                 log_num("    at a count change ", (unsigned)g_hitch_near);
@@ -4896,6 +4938,9 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
                     const bool bad = (b == 0 || b >= 2);
                     if (since < 8) { ++g_near_n; if (bad) ++g_near_bad; }
                     else           { ++g_far_n;  if (bad) ++g_far_bad; }
+                    {
+                        g_cv_sum += ms; g_cv_sq += ms * ms; ++g_cv_n;
+                    }
                 }
                 if (ms > 33.0) {
                     ++g_pres_hitch;

@@ -104,16 +104,20 @@ if (Test-Path $sl) {
   $habilito = (Select-String -Path $sl -Pattern "interpolation state changed from disabled to enabled" -SimpleMatch).Count
   Write-Output "sl.log: 'window not focused' x$sinfoco ; interpolacion habilitada x$habilito"
 }
-# El ratio que reporta DLSS-G, que NO depende de nuestro contador de
-# presentaciones. En cinco corridas buenas los dos coincidieron (4.02-4.07 contra
-# 3.91-3.97); cuando el nuestro se rompe, este sigue siendo correcto.
+# OJO: esta linea NO es de DLSS-G y NO es independiente. "presented fps" en
+# nuestro log se calcula como frames_renderizados * (cuenta que pedimos): no
+# cuenta una sola presentacion. Dice 4.00x porque pedimos 4x, haya generado o
+# no. Se dejo porque sirve para ver QUE se pidio, pero no confirma nada.
+# El unico instrumento que observa presentaciones de verdad es el contador del
+# swapchain ("counted multiplier"), y para saber si la corrida vale hay que
+# mirar ESE mas "interpolation state changed" en sl.log.
 $ml = Join-Path $dir "mfg-unlock.log"
 if (Test-Path $ml) {
   $pp = Select-String -Path $ml -Pattern "presented fps x10 (\d+)" -AllMatches | ForEach-Object { $_.Matches } | ForEach-Object { [int]$_.Groups[1].Value } | Sort-Object
   $rr = Select-String -Path $ml -Pattern "rendered fps x10 (\d+)" -AllMatches | ForEach-Object { $_.Matches } | ForEach-Object { [int]$_.Groups[1].Value } | Sort-Object
   if ($pp.Count -gt 0 -and $rr.Count -gt 0) {
     $pm = $pp[[int]($pp.Count/2)]; $rm = $rr[[int]($rr.Count/2)]
-    if ($rm -gt 0) { Write-Output ("DLSS-G: presentados {0:N1} / renderizados {1:N1} = {2:N2}x" -f ($pm/10), ($rm/10), ($pm/$rm)) }
+    if ($rm -gt 0) { Write-Output ("CIRCULAR (no es DLSS-G, es lo que pedimos): {0:N1} / {1:N1} = {2:N2}x" -f ($pm/10), ($rm/10), ($pm/$rm)) }
   }
   # NO se rechaza por esto. La linea "interpolation state changed" viene de una
   # memoria sobre el BANCO y no aparece en la version de Streamline de Cyberpunk:

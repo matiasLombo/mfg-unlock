@@ -1,5 +1,17 @@
 # Medir fluidez y stuttering: que sirve, que no, y que quedo descartado
 
+> **DOS CORRECCIONES de [[dynamic-medido-bien]] (docs/dynamic-medido-bien.md).**
+> (1) Todo lo que abajo se compara por "fuera de cadencia" usa una banda
+> ABSOLUTA de 4-8 ms, que mide en parte la distancia a 165 fps: las
+> comparaciones entre configuraciones con distinto fps no valen, incluido
+> "DYNAMIC 30 veces peor" y "Present tarda 40 % contra 11 %", que a tasas
+> comparables dan 1.8x y ninguna diferencia.
+> (2) La linea que el runner reportaba como "DLSS-G: presentados/renderizados"
+> NO era de DLSS-G ni independiente: se calcula como frames renderizados por la
+> cuenta que pedimos, o sea que confirma nuestra propia peticion. Donde abajo
+> diga que dos instrumentos coincidieron, habia uno solo.
+
+
 Escrito el 2026-09-09 despues de medirlo en Cyberpunk con el set sustituido.
 
 ## El estado del arte, y por que no nos alcanza

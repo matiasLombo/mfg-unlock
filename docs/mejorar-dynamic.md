@@ -1,5 +1,15 @@
 # Como mejorar DYNAMIC: la matematica del fraccional y donde esta el muro
 
+> **CORREGIDO por [[dynamic-medido-bien]] (docs/dynamic-medido-bien.md).** La
+> seccion "La causa, medida" de abajo atribuye 24-25 % del tiempo al
+> enfriamiento de 100 ms: eso quedo REFUTADO -- la curva de recuperacion tras un
+> cambio de cuenta es plana. Y la cifra de cadencia que la sostenia venia de una
+> metrica con banda absoluta que confundia media con dispersion. El costo real
+> medido de DYNAMIC es 1.8x de dispersion en los intervalos, no un enfriamiento.
+> Lo que sigue en pie es el conteo de cambios de cuenta (~3/s contra 0), la
+> imposibilidad de modular el byte bajo la reserva, y la teoria.
+
+
 Investigado el 2026-09-09 con la benchmark de Cyberpunk (set sustituido, con
 consentimiento) y con la teoria establecida del problema.
 
