@@ -111,8 +111,52 @@ Pendiente.
 
 ## M5. DwmGetCompositionTimingInfo
 
-Pendiente.
+**NO ANDA**: la app presento 120 frames y todos los contadores de DWM se movieron
++1. No sigue a la aplicacion.
+
+    presentadas por la app (verdad): 120
+      cFrame            +1
+      cRefresh          +1
+      cDXPresent        +1
+      cFramesDisplayed  +0
+
+La llamada funciona (hr=0) y no necesita privilegios, pero mide composicion del
+escritorio, no presentaciones por proceso. Descartado para contar frames de una
+aplicacion.
+
+POC: `poc/m5-dwm/m5.cpp`, g++ con -ldwmapi. Corrida del 2026-09-08, 120
+presentaciones con vsync en FLIP_DISCARD.
+
 
 ## M6. NVAPI: consulta publica del multiplicador
 
-Pendiente.
+**NO ANDA**: no existe. En la tabla publica de entry points de NVAPI, 152
+entradas, no hay ninguna consulta del multiplicador de frame generation en curso.
+
+Como se respondio, sin buscar opiniones: `nvapi64.dll` de esta maquina (574.032
+bytes, 2026-08-22) **no contiene los nombres** de las funciones -- NVAPI resuelve
+por ID y los strings estan afuera, asi que leer el binario no sirve. Se leyo
+entonces la tabla de interfaces que dxvk-nvapi mantiene, que es el espejo publico
+de la lista de NVIDIA (`src/nvapi_interface.cpp`, 152 entradas).
+
+Lo unico cercano:
+
+    NvAPI_NGX_GetDriverFeatureSupport   soporte del driver, no el multiplicador
+    NvAPI_NGX_GetNGXOverrideState       estado del override
+    NvAPI_NGX_SetNGXOverrideState       lo mismo, escribiendo
+
+Ninguna devuelve cuantos frames se estan generando ahora.
+
+Coherente con lo que ya se sabia: el indicador de NVIDIA no consulta nada, es una
+opcion de depuracion de NGX (`DLSSGIndicator`) que dibuja desde adentro de la
+tuberia.
+
+**Hallazgo lateral que puede servir para la latencia**: `NvAPI_D3D_GetLatency` SI
+es publico, junto con `NvAPI_D3D_GetSleepStatus`, `NvAPI_D3D_SetLatencyMarker`,
+`NvAPI_D3D_SetSleepMode` y `NvAPI_D3D_Sleep`. Es el informe de latencia de
+Reflex por NVAPI, un camino distinto del informe de Streamline -- que en Halo da
+0 en 316 ventanas. NO PROBADO todavia; seria una POC nueva.
+
+Salvedad honesta: dxvk-nvapi espeja la lista PUBLICADA. Si NVIDIA tiene entradas
+privadas sin documentar, esto no las ve.
+
