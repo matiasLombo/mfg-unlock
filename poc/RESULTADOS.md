@@ -31,7 +31,33 @@ POC: `poc/m7-oraculo/correr.ps1`. Corrida del 2026-09-08, sin elevar.
 
 ## M1. slDLSSGGetState observado, no consultado
 
-Pendiente.
+**NO SE PUDO PROBAR**: en el banco nadie llama a `slDLSSGGetState`, asi que no hay
+llamadas que observar. Haria falta un proceso que si la llame -- Cyberpunk lo
+hace, su propio `sl.log` avisa sobre esas llamadas.
+
+Lo que SI quedo probado, que no es poco: **el mecanismo esta armado y engancha
+bien**. La POC, cargada en el sample del banco:
+
+    dll real cargado (convive, no reemplaza)      OK
+    sl.interposer mapeado                          OK
+    slGetFeatureFunction enganchado                OK
+    testigo: Present enganchado por la vtable      OK
+    slDLSSGGetState entregado al llamador          NUNCA aparecio
+    llamadas observadas                            0
+    estado.suma                                    0
+
+Lo unico que falta es un anfitrion que pida la funcion. El sample no la pide.
+
+Detalle de metodo que costo una corrida: la primera version REEMPLAZABA al dll
+del banco y el sample terminaba en STATUS INVALID a los 4 segundos. La segunda
+carga al dll real por `M1_DLL_REAL` y convive; ahi el banco corrio entero.
+
+Que haria falta para cerrarlo: correr esta misma POC en un proceso que consulte
+el estado. No se hizo porque exige un juego real, y este objetivo no manda al
+usuario a abrir juegos.
+
+POC: `poc/m1-observado/m1.cpp`, g++ con MinHook, m1.dll de 107.981 bytes.
+Corrida del 2026-09-08 sobre `bundled-2.12.0`, 25 s.
 
 ## M2. Vtable del swapchain via swapchain propio
 
@@ -63,10 +89,16 @@ Halo -- con ReShade como dxgi.dll, DLSS Enabler, renodx y UE4SS encadenados -- n
 hay una sola linea de swapchain en todo el log. Este metodo no tiene esa
 dependencia.
 
-Limite NO probado todavia: la POC crea sus dos swapchains con la misma llamada y
-en el mismo proceso. Falta ver si la vtable sigue siendo la misma cuando otro
-overlay devuelve un objeto ENVUELTO -- un proxy con vtable propia. Ese es el caso
-de Halo y esta POC no lo reproduce.
+**Ampliado, y el limite que estaba marcado quedo cubierto en parte.** El mismo
+metodo se probo despues dentro del sample del banco, que es una aplicacion real
+de Streamline con DLSS-G andando -- no un caso de juguete. Ahi el hook por vtable
+conto **4288 presentaciones, unas 480 cada 2 segundos, ~240 fps sostenidos**
+durante toda la corrida (ver la POC de M1, que lo usa como testigo).
+
+Asi que el metodo funciona con Streamline en el medio. Lo que sigue SIN probar es
+el caso de Halo, con ReShade como `dxgi.dll`, DLSS Enabler, renodx y UE4SS
+encadenados: ahi puede haber un proxy con vtable propia y esta POC no lo
+reproduce.
 
 POC: `poc/m2-vtable/m2.cpp`, compilado con g++
 (`g++ -std=c++17 -O2 -o m2.exe m2.cpp -ld3d11 -ldxgi -luser32 -lole32`).
