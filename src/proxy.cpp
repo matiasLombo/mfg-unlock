@@ -4910,8 +4910,25 @@ static void hook_frame_latency(void *sc) {
     sc2->Release();
 }
 
+// Recuerda de que vtable salio el enganche, para poder cambiarse al swapchain
+// REAL del juego si aparece despues.
+static void **g_vt_enganchada = nullptr;
+
 static void hook_swapchain_present(void *sc) {
-    if (sc == nullptr || g_orig_dxgi_present != nullptr) return;
+    if (sc == nullptr) return;
+    void **vt_nueva = *reinterpret_cast<void ***>(sc);
+    if (g_orig_dxgi_present != nullptr) {
+        // Ya hay un enganche. Solo vale rehacerlo si esta vtable es OTRA: es el
+        // caso de la adopcion ganandole la carrera al juego.
+        //
+        // Medido en Cyberpunk: la adopcion creo su descartable a los 6,5 s y el
+        // juego creo el suyo a los 10,6 s. Con el enganche ya puesto, el
+        // swapchain real nunca se capturaba, y los dos contadores leian 45 por
+        // ventana -- la tasa RENDERIZADA -- mientras DLSS-G presentaba 232 fps.
+        // El multiplicador contado daba 1.02 con la generacion andando a 4x.
+        if (vt_nueva == g_vt_enganchada) return;
+        log_line("recorder: aparecio otro swapchain con vtable distinta; se engancha tambien");
+    }
     void **vt = *reinterpret_cast<void ***>(sc);
     // The slot, not the bytes. This used to call MH_CreateHook on vt[8], which
     // detours the Present implementation itself -- the one thing this project
@@ -4925,7 +4942,9 @@ static void hook_swapchain_present(void *sc) {
     // 1.10x would be indistinguishable from a correct answer.
     DWORD prot = 0;
     if (!VirtualProtect(&vt[8], sizeof(void *), PAGE_READWRITE, &prot)) return;
-    g_orig_dxgi_present = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
+    if (g_orig_dxgi_present == nullptr)
+        g_orig_dxgi_present = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
+    g_vt_enganchada = vt;
     g_swapchain = reinterpret_cast<IDXGISwapChain *>(sc);
     hook_frame_latency(sc);
     // What the swap chain was created with, and whether the app takes the
@@ -7300,6 +7319,35 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     int corte = n;
     while (corte > 0 && g_ruta_pedida[corte-1] != L'\\' && g_ruta_pedida[corte-1] != L'/')
         --corte;
+    // DIAGNOSTICO: que rutas de Streamline llegan siquiera a este gancho.
+    //
+    // En Halo la copia OTA se mapea igual aunque la interceptamos por carpeta.
+    // Hay dos explicaciones posibles y no se puede elegir entre ellas sin dato:
+    // que el gancho la vea y algo falle despues, o que NGX no la cargue con
+    // LoadLibrary sino mapeandola directo, en cuyo caso nunca pasa por aca.
+    // Esta linea distingue una de la otra. Acotada a 12 para no inundar el log.
+    {
+        static int vistas = 0;
+        // "sl." y no solo "s": la primera version filtraba por la inicial y el
+        // cupo se lleno con Shell32, sspicli y steam_api64 ANTES de que
+        // Streamline cargara a los 9,8 s. El diagnostico salio vacio por el
+        // filtro, no por el fenomeno.
+        bool interesa = (g_ruta_pedida[corte] == L's' || g_ruta_pedida[corte] == L'S') &&
+                        (g_ruta_pedida[corte+1] == L'l' || g_ruta_pedida[corte+1] == L'L') &&
+                        (g_ruta_pedida[corte+2] == L'.');
+        if (!interesa) {
+            for (int i = 0; i + 10 <= n; ++i) {
+                if ((g_ruta_pedida[i] == L'N' || g_ruta_pedida[i] == L'n') &&
+                    (g_ruta_pedida[i+1] == L'G' || g_ruta_pedida[i+1] == L'g') &&
+                    (g_ruta_pedida[i+2] == L'X' || g_ruta_pedida[i+2] == L'x')) { interesa = true; break; }
+            }
+        }
+        if (interesa && vistas < 30) {
+            ++vistas;
+            log_ruta("gancho ve: ", g_ruta_pedida);
+        }
+    }
+
     // Se reconoce el modulo por su nombre de archivo, y ademas por la carpeta
     // de la cache de NGX: alli los archivos NO se llaman sl.<algo>.dll sino
     // 190_E658703.dll -- un nombre de contenido. Comparando solo el nombre, la
@@ -7314,15 +7362,36 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     // vive aparte porque no sale de la cache.
     const bool es_interposer = igual_sin_caso(g_ruta_pedida + corte, L"sl.interposer.dll");
     if (es_interposer) idx = -2;
+    // Se normaliza antes de comparar: minusculas y todas las barras iguales.
+    //
+    // La version anterior no podia matchear NUNCA, por dos motivos a la vez, y
+    // eso explica que la copia OTA se colara siempre:
+    //   1. el patron tiene 15 caracteres y el bucle comparaba 16, asi que
+    //      siempre metia el terminador en la comparacion;
+    //   2. la ruta real llega con barras NORMALES en esa parte
+    //      -- C:\ProgramData/NVIDIA/NGX/models/sl_dlss_g_0/... --
+    //      contra un patron escrito con barras invertidas.
+    //
+    // Se vio con una linea de diagnostico: el gancho SI recibe esa ruta. La
+    // hipotesis de que NGX la mapeaba fuera del cargador era falsa.
     bool en_cache = false;
     if (idx < 0) {
+        wchar_t norm[MAX_PATH];
+        int nn2 = 0;
+        for (; nn2 < n && nn2 < MAX_PATH - 1; ++nn2) {
+            wchar_t c = g_ruta_pedida[nn2];
+            if (c == L'/') c = L'\\';
+            if (c >= L'A' && c <= L'Z') c = (wchar_t)(c + 32);
+            norm[nn2] = c;
+        }
+        norm[nn2] = 0;
         static const wchar_t kCache[] = L"\\ngx\\models\\sl_";
-        for (int i = 0; i + 16 <= n && !en_cache; ++i) {
+        int largo = 0;
+        while (kCache[largo] != 0) ++largo;
+        for (int i = 0; i + largo <= nn2 && !en_cache; ++i) {
             bool m = true;
-            for (int k = 0; k < 16; ++k) {
-                wchar_t x = g_ruta_pedida[i + k];
-                if (x >= L'A' && x <= L'Z') x = (wchar_t)(x + 32);
-                if (x != kCache[k]) { m = false; break; }
+            for (int k = 0; k < largo; ++k) {
+                if (norm[i + k] != kCache[k]) { m = false; break; }
             }
             en_cache = m;
         }

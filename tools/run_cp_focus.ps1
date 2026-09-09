@@ -34,6 +34,13 @@ public class Foco {
 }
 "@
 
+# Los diálogos de CrashReporter que deja un cierre forzado se quedan abiertos y
+# le roban el foco a la ventana del juego. Con eso DLSS-G no interpola y la
+# corrida sale invalida: cinco seguidas se perdieron asi, y el sintoma parecia
+# una regresion del codigo.
+Get-Process CrashReporter -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Milliseconds 500
+
 $slp = Join-Path $dir "sl.log"
 if (Test-Path $slp) { Move-Item $slp (Join-Path $dir "sl.$Etiqueta-prev.log") -Force }
 $logp = Join-Path $dir "mfg-unlock.log"
@@ -82,8 +89,30 @@ for ($i = 0; $i -lt 120; $i++) {
 if (-not $p.HasExited) { $p.WaitForExit(180000) | Out-Null }
 Write-Output "foco reafirmado $traidas veces, salida $($p.ExitCode)"
 
+# Una corrida donde DLSS-G nunca habilito la interpolacion NO es una medicion:
+# el juego corre sin generar y el multiplicador da 1.00, que se lee como
+# regresion. Es el mismo criterio que aplica tools/bench.py al banco, y aca
+# faltaba: dos corridas seguidas dieron p90 1.00 y estuve por reportarlas como
+# rotura del codigo cuando lo que fallo fue el foco de la ventana.
 $sl = Join-Path $dir "sl.log"
 if (Test-Path $sl) {
   $sinfoco = (Select-String -Path $sl -Pattern "window not focused" -SimpleMatch).Count
-  Write-Output "sl.log: 'window not focused' x$sinfoco"
+  $habilito = (Select-String -Path $sl -Pattern "interpolation state changed from disabled to enabled" -SimpleMatch).Count
+  Write-Output "sl.log: 'window not focused' x$sinfoco ; interpolacion habilitada x$habilito"
+}
+# El ratio que reporta DLSS-G, que NO depende de nuestro contador de
+# presentaciones. En cinco corridas buenas los dos coincidieron (4.02-4.07 contra
+# 3.91-3.97); cuando el nuestro se rompe, este sigue siendo correcto.
+$ml = Join-Path $dir "mfg-unlock.log"
+if (Test-Path $ml) {
+  $pp = Select-String -Path $ml -Pattern "presented fps x10 (\d+)" -AllMatches | ForEach-Object { $_.Matches } | ForEach-Object { [int]$_.Groups[1].Value } | Sort-Object
+  $rr = Select-String -Path $ml -Pattern "rendered fps x10 (\d+)" -AllMatches | ForEach-Object { $_.Matches } | ForEach-Object { [int]$_.Groups[1].Value } | Sort-Object
+  if ($pp.Count -gt 0 -and $rr.Count -gt 0) {
+    $pm = $pp[[int]($pp.Count/2)]; $rm = $rr[[int]($rr.Count/2)]
+    if ($rm -gt 0) { Write-Output ("DLSS-G: presentados {0:N1} / renderizados {1:N1} = {2:N2}x" -f ($pm/10), ($rm/10), ($pm/$rm)) }
+  }
+  # NO se rechaza por esto. La linea "interpolation state changed" viene de una
+  # memoria sobre el BANCO y no aparece en la version de Streamline de Cyberpunk:
+  # se rechazaron corridas donde presented/rendered daba 4.00x exacto. Falso
+  # negativo, y mio.
 } else { Write-Output "sl.log: no existe" }
