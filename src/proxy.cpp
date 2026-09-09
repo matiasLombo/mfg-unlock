@@ -2884,6 +2884,7 @@ static LONG g_dyn_asked_n = 0;
 // binario, que es la unica forma de comparar dos controladores sin cambiar
 // tambien el codigo debajo.
 static bool g_usar_deuda = true;
+static bool g_latch_reparto = false;   // mfg-latch.txt, ver fractional_tick
 // Salida recortada en el ultimo tick: mientras lo este, el sesgo no aprende.
 // Sin esto el sesgo aprende de un tramo donde la entrega estaba limitada por el
 // techo y no por el modelo, que es como llego a 1.25.
@@ -3470,7 +3471,28 @@ static void fractional_tick(void) {
         const int kBlocks = g_blocks > 0 ? g_blocks : 32;
         const double cycle_secs = kBlockSecs * (double)kBlocks;
         bool cycle_wrapped = false;
-        if (sa_clock >= cycle_secs) { sa_clock -= cycle_secs; cycle_wrapped = true; }
+        // Donde ARRANCA la corrida de bloques altos dentro del ciclo.
+        //
+        // Antes empezaba siempre en el bloque 0, asi que la cadencia llevaba una
+        // periodicidad fija del largo del ciclo (0.768 s). En la literatura de
+        // PWM eso es un tono, y la familia que lo rompe sin tocar el promedio se
+        // llama random pulse position modulation: mueve DONDE cae el pulso, no
+        // cuantos flancos tiene. Aca sale gratis -- la corrida sigue siendo
+        // contigua (envuelve por el final del ciclo), asi que siguen siendo
+        // exactamente 2 cambios de cuenta por ciclo, que es lo que hace barata
+        // la alternancia frente a repartir parejo.
+        //
+        // NO se espera que se note: el jitter medido es ~0.55 ms contra un
+        // umbral reportado de ~8 ms. Se hace porque el tono fijo no tiene por
+        // que estar ahi.
+        static int sa_offset = 0;
+        static unsigned sa_rng = 0x9E3779B9u;
+        if (sa_clock >= cycle_secs) {
+            sa_clock -= cycle_secs;
+            cycle_wrapped = true;
+            sa_rng ^= sa_rng << 13; sa_rng ^= sa_rng >> 17; sa_rng ^= sa_rng << 5;
+            sa_offset = (int)(sa_rng % (unsigned)(kBlocks > 0 ? kBlocks : 1));
+        }
         const int sa_pos_block = (int)(sa_clock / kBlockSecs);
         static int sa_pos = 0;
 
@@ -3692,7 +3714,23 @@ static void fractional_tick(void) {
                 const double salto = frac > last_req ? frac - last_req : last_req - frac;
                 last_req = frac;
                 request_changed = hi_blocks >= 0 && salto > 0.5;
-                if (hi_blocks >= 0 && salto <= 0.5) hi_blocks = -2;   // recalcular sin reiniciar
+                // Latchear el reparto hasta el fin del ciclo: SIN RESOLVER.
+                //
+                // La idea es recuperar los 2 cambios de cuenta por ciclo que el
+                // diseno da y DYNAMIC rompe. Medido con n=3 por brazo: los
+                // cambios bajaron de 347 a 295 -- mucho menos de lo esperado --
+                // y la precision del objetivo dio 83 % contra 77 % de ventanas
+                // dentro de +-5 %.
+                //
+                // Pero POR CORRIDA fue [88, 80, 82] contra [77, 82, 73]: los
+                // rangos SE SOLAPAN. Con tres muestras eso no decide nada, y la
+                // primera version de este comentario presentaba la media como si
+                // fuera un resultado. Haria falta n=8 por brazo.
+                //
+                // Queda detras de mfg-latch.txt, apagado, para poder correr el
+                // A/B con un solo binario. El default es el comportamiento que
+                // viene andando, no el cambio sin probar.
+                if (hi_blocks >= 0 && salto <= 0.5 && !g_latch_reparto) hi_blocks = -2;
             }
         }
         if (request_changed) {
@@ -3801,8 +3839,9 @@ static void fractional_tick(void) {
             if (want < 0) want = 0;
             if (want > lo + 1) want = lo + 1;
         } else {
+            const int rel = (sa_pos_block - sa_offset + kBlocks) % kBlocks;
             want = g_nullalt ? lo + 1
-                 : ((sa_pos_block < hi_blocks) ? lo + 1 : lo);
+                 : ((rel < hi_blocks) ? lo + 1 : lo);
         }
         sa_pos = (sa_pos + 1) % (kBlocks * g_slowalt_len);
         // Zero is kept as zero here, not clamped to one. Below 2.0x the API
@@ -7742,6 +7781,8 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 }
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
+            g_latch_reparto = flag_file(L"mfg-latch.txt");
+            if (g_latch_reparto) log_line("fractional: reparto latcheado al ciclo (mfg-latch.txt)");
             if (flag_file(L"mfg-sin-deuda.txt")) { g_usar_deuda = false; log_line("dynamic: integrador de deuda APAGADO (mfg-sin-deuda.txt)"); }
             g_optsv3 = flag_file(L"mfg-optsv3.txt");
             { wchar_t mp[MAX_PATH]; beside_dll(mp, L"mfg-markergap.txt");
