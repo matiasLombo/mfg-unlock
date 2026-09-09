@@ -2884,6 +2884,7 @@ static LONG g_dyn_asked_n = 0;
 // binario, que es la unica forma de comparar dos controladores sin cambiar
 // tambien el codigo debajo.
 static bool g_usar_deuda = true;
+static bool g_dyn_diag = false;        // mfg-dyndiag.txt: diagnostico por cambio de ratio
 static bool g_latch_reparto = true;    // mfg-nolatch.txt lo apaga, ver fractional_tick
 // Salida recortada en el ultimo tick: mientras lo este, el sesgo no aprende.
 // Sin esto el sesgo aprende de un tramo donde la entrega estaba limitada por el
@@ -3129,6 +3130,28 @@ static void dyn_apply(double base_fps) {
     }
     g_dyn_said = 0;
     g_opt_pending = 1;
+    // Diagnostico de alta frecuencia: APAGADO salvo que se pida.
+    //
+    // log_line abre y cierra el archivo POR LINEA -- a proposito, para que el
+    // log se pueda leer en vivo ([[log-must-stay-readable-live]]). Este bloque
+    // son 9 lineas y corre en cada cambio de ratio: medido en Cyberpunk, 1020
+    // cambios en 130 s, o sea ~70 aperturas de archivo por segundo en RAFAGAS
+    // de 9, y todo eso en el hilo de render -- dyn_apply se llama desde
+    // note_rendered_frame. Los modos fijos hacen cero.
+    //
+    // El usuario que instala solo el dll, que son todos ([[ships-as-one-dll]]),
+    // pagaba esto sin saberlo: g_log siempre apunta a mfg-unlock.log al lado
+    // del dll, y este bloque no respetaba mfg-quiet.txt.
+    //
+    // Que esa clase de escritura en este hilo hace dano ya se vio hoy: agregar
+    // 12 lineas por ventana en el camino del cambio de cuenta hizo que DLSS-G
+    // no enganchara en 4 de 4 corridas mientras los modos fijos validaban a la
+    // primera.
+    //
+    // Se enciende con mfg-dyndiag.txt, que es lo que hay que poner para
+    // diagnosticar el controlador. Las lineas de baja frecuencia -- arranque,
+    // parches, veredicto -- no se tocan.
+    if (!g_dyn_diag) return;
     log_num("dynamic: ratio now x100 ", (unsigned)next);
     log_num("  from base ", (unsigned)(base_fps + 0.5));
     // Por que pide lo que pide. En Cyberpunk pidio 5.97 con base 40 y objetivo
@@ -3866,7 +3889,7 @@ static void fractional_tick(void) {
             // Twice per cycle at most, so cheap -- and the only direct evidence
             // that the count moved. The plugin logs a count only when the
             // enabled/disabled state changes, so its log cannot answer this.
-            log_num("slowalt: API count now ", (unsigned)api);
+            if (g_dyn_diag) log_num("slowalt: API count now ", (unsigned)api);
             g_last_change_pres = g_present_count;
         }
         // Rendered frames and elapsed time, split by which count was in force.
@@ -7789,6 +7812,8 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 }
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
+            g_dyn_diag = flag_file(L"mfg-dyndiag.txt");
+            if (g_dyn_diag) log_line("dynamic: diagnostico por cambio de ratio ENCENDIDO (mfg-dyndiag.txt)");
             if (flag_file(L"mfg-nolatch.txt")) { g_latch_reparto = false; log_line("fractional: reparto NO latcheado (mfg-nolatch.txt)"); }
             if (flag_file(L"mfg-sin-deuda.txt")) { g_usar_deuda = false; log_line("dynamic: integrador de deuda APAGADO (mfg-sin-deuda.txt)"); }
             g_optsv3 = flag_file(L"mfg-optsv3.txt");
