@@ -3784,11 +3784,13 @@ static bool   g_sat_on = true;
 static double g_sat_pres = 0.0;      // las presentadas mas altas vistas aca
 static double g_sat_ratio_max = 0.0; // techo de ratio, 0 = sin limite
 static double g_sat_prev_asked = 0.0, g_sat_prev_pres = 0.0;
+static bool   g_sat_quieto = false;   // ya se encontro el piso: no tantear mas
 
 static void sat_reset(const char *por_que) {
     if (g_sat_ratio_max > 0.0) log_line(por_que);
     g_sat_pres = 0.0;
     g_sat_ratio_max = 0.0;
+    g_sat_quieto = false;
     g_sat_prev_asked = 0.0;
     g_sat_prev_pres = 0.0;
 }
@@ -3838,7 +3840,7 @@ static void dyn_control(double base_fps, double presented_fps) {
             log_num("  el ratio se limita a x100 ",
                     (unsigned)(g_sat_ratio_max * 100.0 + 0.5));
             log_num("  se venia pidiendo x100 ", (unsigned)(asked_avg * 100.0 + 0.5));
-        } else if (g_sat_ratio_max > 0.0) {
+        } else if (g_sat_ratio_max > 0.0 && !g_sat_quieto) {
             // Ya con techo: se tantea hacia abajo mientras las presentadas
             // aguanten, y se vuelve un escalon si se caen. El paso es la banda
             // muerta del controlador, asi que cada tanteo es una escritura y no
@@ -3850,11 +3852,27 @@ static void dyn_control(double base_fps, double presented_fps) {
                             (unsigned)(g_sat_ratio_max * 100.0 + 0.5));
                 }
             } else if (presented_fps < g_sat_pres * 0.97) {
-                g_sat_ratio_max += 0.20;
-                log_num("sat: se fue muy abajo, ratio x100 ",
+                // Un paso atras, del MISMO tamano, y se para.
+                //
+                // La primera version subia 0.20 y bajaba 0.10. Con las
+                // presentadas alternando por ruido, cada par de ventanas dejaba
+                // un neto de +0.10 y el techo trepaba en vez de bajar. Medido en
+                // GTA V: 4.34 -> 4.24 -> 4.44 -> 4.34 -> 4.54 -> 4.74 -> ... 49
+                // bajadas contra 27 subidas y el techo terminando en 5.24, o sea
+                // de vuelta en el peor punto de la tabla y con la latencia en
+                // 71 ms. Un trinquete: la correccion mas grande que el tanteo
+                // convierte el ruido en deriva.
+                //
+                // Simetrico ya no deriva, pero seguiria oscilando alrededor del
+                // punto de quiebre y cada oscilacion es una escritura de
+                // opciones. Asi que ademas se congela: el primer paso que duele
+                // define el piso de este punto de operacion, y no se toca mas
+                // hasta que la base cambie -- que es cuando sat_reset olvida
+                // todo, porque ahi el techo es otro.
+                g_sat_ratio_max += 0.10;
+                g_sat_quieto = true;
+                log_num("sat: piso encontrado, ratio queda en x100 ",
                         (unsigned)(g_sat_ratio_max * 100.0 + 0.5));
-                // Y se deja de bajar: este es el piso util de este punto.
-                g_sat_pres = presented_fps;
             }
         }
         g_sat_prev_asked = asked_avg;
