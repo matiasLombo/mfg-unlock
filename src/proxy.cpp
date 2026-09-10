@@ -1282,6 +1282,67 @@ static void sitio_write(volatile unsigned char **lista, int n, unsigned char v) 
 }
 static volatile unsigned char *g_wic_sitios[kMaxSitios] = { nullptr, nullptr, nullptr, nullptr };
 static int g_wic_n = 0;
+
+// Poner y sacar el parche del byte segun el modo.
+//
+// El parche reemplaza `mov eax,[rdx+4]` (8B 42 04) por `push imm8 / pop rax`,
+// y ese inmediato es el limite del bucle de sub-frames. Mientras esta puesto
+// hay DOS canales fijando la misma cantidad -- ese byte y la cuenta que el
+// plugin recibe por slDLSSGSetOptions, con la que dimensiona sus ranuras -- y
+// cuando se desfasan las dos direcciones rompen: el byte por encima recorre una
+// ranura sin inicializar y crashea ([nulo+0x40] en +0x3ED6F, del dump de
+// UE4SS); por debajo detiene la presentacion.
+//
+// Medido en el banco con el parche DESACTIVADO de entrada:
+//
+//     6X entero      6.00  genera
+//     CUSTOM 2.50x   1.00  no genera
+//
+// O sea: los enteros no lo necesitan y los fraccionarios no pueden sin el. Con
+// el parche fuera en modos enteros queda un solo canal y el desfasaje no puede
+// existir.
+//
+// Se escribe sobre codigo del plugin con el juego corriendo. Los tres bytes se
+// escriben de atras hacia adelante para que el opcode quede ultimo: asi ningun
+// hilo puede leer una instruccion a medio formar.
+static volatile LONG g_wic_puesto = 1;   // el parche arranca aplicado
+static void wic_parche(bool poner) {
+    if ((g_wic_puesto != 0) == poner) return;
+    for (int i = 0; i < g_wic_n; ++i) {
+        volatile unsigned char *imm = g_wic_sitios[i];
+        if (imm == nullptr) continue;
+        unsigned char *q = (unsigned char *)(imm - 1);   // el opcode
+        DWORD old = 0;
+        if (!VirtualProtect(q, 3, PAGE_EXECUTE_READWRITE, &old)) continue;
+        if (poner) {
+            q[2] = 0x58;                 // pop rax
+            // La semilla es lo que el plugin TIENE, no 1.
+            //
+            // Al reponer el parche el plugin viene corriendo con su propia
+            // cuenta -- la del modo entero que se acaba de dejar. Sembrar 1 deja
+            // el bound sin relacion con la reserva viva, y en Halo eso crasheo
+            // al pasar de 6X a DYNAMIC: +0x3ED6F, lectura de [nulo+0x40], la
+            // ranura sin inicializar de siempre.
+            //
+            // g_last_seen_generated es la cuenta que el juego/plugin declaro
+            // por la API, que es la que dimensiono la reserva.
+            {
+                const LONG suya = g_last_seen_generated;
+                q[1] = (unsigned char)((suya >= 1 && suya <= 5) ? suya : 1);
+            }
+            q[0] = 0x6A;                 // push imm8   <- opcode al final
+        } else {
+            q[2] = 0x04;
+            q[1] = 0x42;
+            q[0] = 0x8B;                 // mov eax,[rdx+4]
+        }
+        VirtualProtect(q, 3, old, &old);
+    }
+    g_wic_puesto = poner ? 1 : 0;
+    log_line(poner ? "wic: parche PUESTO (modo fraccional)"
+                   : "wic: parche SACADO (modo entero, manda la API)");
+}
+
 static bool g_wic_mode = false;                         // mfg-wic.txt
 
 // The count in the work item, rather than the comparison that reads it.
@@ -2264,7 +2325,12 @@ static void set_count_now(LONG n) {
         if (g_wic_n > 0) {
             if (n < 0) n = 0;
             if (n > 5) n = 5;
-            sitio_write(g_wic_sitios, g_wic_n, (unsigned char)n);
+            // Solo si el parche esta PUESTO. Con el parche sacado esa
+            // direccion ya no es un inmediato: es el byte 0x42 de
+            // mov eax,[rdx+4], y escribirle corrompe la instruccion del plugin.
+            // Medido: con el parche sacado por modo, cero ventanas de medicion.
+            if (g_wic_puesto != 0)
+                sitio_write(g_wic_sitios, g_wic_n, (unsigned char)n);
             // The pacer waits on its own copy. Without this it keeps waiting
             // for the ceiling the API was told, which is the whole throughput
             // loss above 2.0x.
@@ -3292,6 +3358,9 @@ static void fractional_tick(void) {
     static LONG was_sel = -1;
     if (g_force_sel != was_sel) {
         was_sel = g_force_sel;
+        // Un solo canal por modo: en enteros manda la API, en fraccionales el
+        // byte. Ver wic_parche.
+        if (g_wic_n > 0) wic_parche(sel_is_frac());
         g_frac_acc = 0.0;
         g_token_fps = 0.0;        // the previous mode's readings say nothing
         g_token_dt = 0.0;
