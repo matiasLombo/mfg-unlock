@@ -2648,7 +2648,16 @@ static int patch_subframe_count(unsigned char *base) {
         const int wic_sitios = patch_work_item_count(text, len);
         g_wic_sitios_ultima = wic_sitios;
         g_vio_alguna_copia = true;
-        if (wic_sitios == 0) g_wic_ok = false;
+        // Refleja ESTA copia, no la peor que se haya visto nunca.
+        //
+        // Antes solo se apagaba. Una copia que no nos interesa -- el sl.dlss_g
+        // 2.7 del propio Halo -- lo dejaba en falso para el resto de la corrida
+        // aunque la copia que de verdad corre hubiera enganchado antes y volviera
+        // a enganchar despues. El log de Halo lo muestra entero: sites 1, sites
+        // 0, y despues sites 1 otra vez, con el freno activo hasta el final.
+        //
+        // Un estado que solo sabe empeorar no es un estado, es una cicatriz.
+        g_wic_ok = wic_sitios > 0;
         log_line(wic_sitios > 0
                  ? "  PARCHE DE CUENTA: engancho en esta copia"
                  : "  PARCHE DE CUENTA: NO engancho en esta copia");
@@ -9099,7 +9108,25 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     // mapeado, la carga que sigue tiene que devolver esa copia y no una nueva.
     // En GTA V el interposer se mapea a los 16.7 s y no esta cargado antes, asi
     // que ahi si se sustituye y el juego queda con el set 2.12 completo.
-    const bool ya_esta = GetModuleHandleW(g_ruta_pedida + corte) != nullptr;
+    //
+    // La guarda vale SOLO para el interposer. Aplicarla a todos fue el defecto.
+    //
+    // Existe porque el interposer llega por import estatico: ya esta mapeado
+    // cuando vemos el pedido, y redirigirlo a otra ruta mapea una segunda copia.
+    // Pero un plugin es otra cosa: que ya haya uno mapeado NO quiere decir que el
+    // que estan pidiendo sea el mismo archivo.
+    //
+    // En Halo eso dejaba entrar el sl.dlss_g 2.7 PROPIO DEL JUEGO despues de
+    // nuestro 2.12, con este log:
+    //
+    //   sl.dlss_g mapped  in ...\sdk\2.12\sl.dlss_g.dll   2.12   sites: 1
+    //   base: ya mapeado, no se duplica: sl.dlss_g.dll
+    //   sl.dlss_g mapped  in ...Halo...\ThirdParty\...      2.7    sites: 0
+    //
+    // Y esa copia sin sitios apagaba g_wic_ok para toda la corrida. De ahi salia
+    // el freno, la cadencia sin byte y el congelamiento en CUSTOM y DYNAMIC.
+    const bool ya_esta = idx == -2 &&
+                         GetModuleHandleW(g_ruta_pedida + corte) != nullptr;
     if (ya_esta) {
         static int dicho_ya = 0;
         if (dicho_ya < 12) {
