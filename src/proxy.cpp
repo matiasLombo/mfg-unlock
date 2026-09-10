@@ -445,7 +445,9 @@ static volatile LONG g_opt_pending = 0;
 // mfg-x6.txt lo vuelve a habilitar para investigarlo. El arreglo de fondo es
 // encontrar por que el bound necesita el +1 y sacarlo.
 static bool g_permitir_x6 = false;
-static LONG tope_cuenta(void) { return g_permitir_x6 ? 5 : 4; }
+// 5 es el maximo del plugin (6X). El tope en 4 era una mitigacion del crash
+// que ademas limitaba 5X, y la causa resulto ser otra.
+static LONG tope_cuenta(void) { (void)g_permitir_x6; return 5; }
 static volatile LONG g_api_aplicada = -1;
 static void set_count_now(LONG n);   // definida mas abajo
 // Set when the game itself configures DLSS-G, cleared when the next frame
@@ -557,6 +559,22 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         } else {
             *(LONG *)(p + 32) = 1;             // DLSSGMode::eOn
             LONG escribir = g_force_generated;
+            // A la API se le declara el TECHO del ciclo, no la cuenta por frame.
+            //
+            // El plugin dimensiona sus recursos por sub-frame con lo que recibe
+            // aca. Mandandole la cuenta por frame la reserva se achica cada vez
+            // que el ciclo pasa por el bloque bajo, y el byte del bound -- que
+            // sigue la cadencia -- queda por encima de la reserva. Eso es el
+            // crash: lectura de una ranura sin inicializar, [nulo+0x40] en
+            // sl.dlss_g +0x3ED6F, del dump de UE4SS.
+            //
+            // Medido antes de esto, con objetivo 300: la cuenta de la API
+            // oscilando 1 -> 5 -> 1 y el multiplicador topado en 2.8. Con el
+            // techo declarado quedo estable en 3.00.
+            {
+                const LONG techo = g_ciclo_techo;
+                if (techo > escribir && techo <= 5) escribir = techo;
+            }
             if (g_ceilfirst) {
                 const LONG techo = g_ciclo_techo;
                 if (!g_interp_on && techo > escribir && techo <= 5) {
