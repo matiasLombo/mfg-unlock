@@ -467,6 +467,12 @@ static unsigned char g_vp_copy[64];
 static volatile LONG g_opt_have = 0;
 static volatile LONG g_opt_thread = 0;
 static volatile LONG g_opt_pending = 0;
+// Lo que el JUEGO pide, que no es lo mismo que lo que pedimos nosotros.
+//
+// g_juego_quiere: su ultimo modo, 0 = eOff, 1 = eOn, -1 = todavia no lo vimos.
+// g_juego_pidio_on: si alguna vez lo vimos pedir eOn en esta corrida.
+static volatile LONG g_juego_quiere = -1;
+static volatile LONG g_juego_pidio_on = 0;
 // La cuenta que el plugin tiene REALMENTE aplicada, no la que queremos.
 //
 // bound y reserva tienen que moverse juntos: bound = API + 1 anda, bound mayor
@@ -906,9 +912,51 @@ static float g_saved_target = 0.0f;
 // log_line opens and closes the file on every call.
 static int g_dyn_said = 0;
 
+// Cuando el juego apaga la generacion, no se le pelea.
+//
+// Esto es el congelamiento del menu de pausa, y es nuestro. GTA V escribe eOff
+// al pausar -- unas 170 veces por segundo, una por frame -- y nosotros
+// reescribiamos eOn con nuestra cuenta en cada una, sin mirar nunca que habia
+// pedido. Medido con el juego pausado, ventanas de 45 frames renderizados:
+//
+//   rend/s  presentadas/renderizada
+//   1991.7                    0.14
+//     55.4                    5.96
+//   1009.2                    0.31
+//     55.6                    5.98
+//
+// El bucle alterna entre 6X limpio y rafagas de mil a dos mil fps que no
+// presentan nada. Eso en pantalla es la imagen congelada. Pasa en TODOS los
+// modos, 2X incluido, que es lo que descarta los parches de techo y deja como
+// unica causa comun el eOn forzado.
+//
+// Y explica los eDLSSGStatusFailReflexNotDetectedAtRuntime: con la generacion
+// apagada el juego deja de emitir los marcadores de Reflex, asi que forzarla
+// encendida ahi pide interpolar sin los datos que hacen falta.
+//
+// No es apagar nada nuestro. Durante el juego el multiplicador sigue entero; lo
+// que se deja de hacer es forzar generacion donde el juego no la pidio.
+//
+// La guarda de que alguna vez lo hayamos visto pedir eOn importa: hay juegos que
+// no llaman nunca con eOn -- en Halo no aparece una sola linea de "the game
+// itself last asked for" en toda la corrida -- y ahi respetar el eOff seria no
+// generar jamas. Sin esa evidencia se mantiene el comportamiento de antes.
+static bool juego_apago_la_generacion(void) {
+    return g_juego_pidio_on != 0 && g_juego_quiere == 0;
+}
+
 static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     *savedMode = *(LONG *)(p + 32);
     *savedCount = *(LONG *)(p + 36);
+    if (juego_apago_la_generacion()) {
+        static LONG dicho = -1;
+        if (dicho != g_force_sel) {
+            dicho = g_force_sel;
+            log_num("override: el juego apago la generacion, no se le pelea; seleccion ",
+                    (unsigned)g_force_sel);
+        }
+        return;                                // se deja tal cual la dejo el juego
+    }
     const LONG kTope = tope_cuenta();
     g_target_written = false;
     const LONG sel = g_force_sel;
@@ -1311,6 +1359,13 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
         // what decides whether this call is worth capturing again.
         raw_mode = *(LONG *)(p + 32);
         raw_cnt = *n;
+        if (raw_mode == 0 || raw_mode == 1) {
+            if (raw_mode == 1) g_juego_pidio_on = 1;
+            if (g_juego_quiere != raw_mode) {
+                g_juego_quiere = raw_mode;
+                log_num("el juego pide generacion (0 no, 1 si) ", (unsigned)raw_mode);
+            }
+        }
         g_opts_version = (LONG)*(unsigned long long *)(p + 24);
         static bool said_ver = false;
         if (!said_ver) {
@@ -1377,6 +1432,9 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
 // hook and only on the thread the game itself used.
 static void apply_override_now(void) {
     if (g_opt_pending == 0) return;
+    // Lo mismo que en force_into: si el juego la apago, el reenvio la volveria a
+    // encender por la puerta de atras.
+    if (juego_apago_la_generacion()) return;
     // The game already spoke for this frame; ours would be the repeated call.
     if (g_game_set_this_frame != 0) return;
     // Says which precondition is missing instead of returning quietly. Three
