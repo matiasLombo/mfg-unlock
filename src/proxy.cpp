@@ -353,9 +353,16 @@ static PFN_slGetFeatureFunction g_orig_getfeaturefn = nullptr;
 typedef unsigned (*PFN_slInit)(void *, unsigned long long);
 static PFN_slInit g_orig_slinit = nullptr;
 static bool g_ota = false;              // mfg-ota.txt
-// mfg-snippet.txt: cargar nvngx_dlssg desde nuestra carpeta en vez del que
-// trae el juego. Ver buscar_snippet.
-static bool g_snippet_on = false;
+// La base propia va ENCENDIDA. mfg-sinbase.txt la apaga.
+//
+// Estaba al reves -- detras de mfg-snippet.txt -- y eso es justo lo que rompio
+// GTA V: sin el archivo, el juego caia a sus propios binarios y a la semantica
+// vieja, en silencio. Un usuario que solo tiene el dll no puede depender de
+// acordarse de poner un txt en cada juego.
+//
+// Si la carpeta no tiene los archivos, no se sustituye nada igual: el respaldo
+// es la ausencia de la base, no la ausencia de un flag.
+static bool g_snippet_on = true;
 // mfg-sllog.txt esta presente: ademas del log, se sube el nivel en Preferences.
 static bool g_sllog_on = false;
 // Probado en el sample del banco, que como Halo no pedia OTA: banderas 133 ->
@@ -521,6 +528,51 @@ static volatile LONG g_snippet_cargado = 0;
 
 static bool cuenta_es_multiplicador(void) {
     return g_snippet_cargado != 0;
+}
+
+// Que build de snippet quedo cargado, decidido por su CONTENIDO.
+//
+// Atarlo a un flag estaba mal por partida doble: el banco corre el snippet nuevo
+// y no tiene ningun txt, asi que usaba la matematica vieja y el fraccional
+// quedaba clavado -- pedido 2.55, entregado 2.00, mediana y p90 y max iguales.
+//
+// La build de julio decide su maximo por arquitectura con este patron:
+//
+//   41 B8 03 00 00 00    mov   r8d, 3
+//   81 FF <imm32>        cmp   edi, 0x1b0
+//   44 0F 4C C3          cmovl r8d, ebx
+//
+// En esa, numFramesToGenerate cuenta los GENERADOS. En las que no lo tienen,
+// cuenta el MULTIPLICADOR. Se mira el modulo real mapeado, asi que da igual si
+// llego por nuestra base, por la cache o por la carpeta del juego.
+static void detectar_semantica(unsigned char *base) {
+    auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+    auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+    auto *sec = IMAGE_FIRST_SECTION(nt);
+    unsigned char *text = nullptr; size_t len = 0;
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        const char *n = reinterpret_cast<const char *>(sec[i].Name);
+        if (n[0]=='.'&&n[1]=='t'&&n[2]=='e'&&n[3]=='x'&&n[4]=='t') {
+            text = base + sec[i].VirtualAddress; len = sec[i].Misc.VirtualSize; break;
+        }
+    }
+    if (text == nullptr) return;
+    bool julio = false;
+    for (size_t i = 0; i + 16 <= len && !julio; ++i) {
+        if (text[i] != 0x41 || text[i+1] != 0xB8 || text[i+2] != 3) continue;
+        if (text[i+3] || text[i+4] || text[i+5]) continue;
+        if (text[i+6] != 0x81 || text[i+7] != 0xFF) continue;
+        if (text[i+12] != 0x44 || text[i+13] != 0x0F ||
+            text[i+14] != 0x4C || text[i+15] != 0xC3) continue;
+        julio = true;
+    }
+    const LONG antes = g_snippet_cargado;
+    g_snippet_cargado = julio ? 0 : 1;
+    if (antes != g_snippet_cargado)
+        log_line(julio ? "semantica: la cuenta son los GENERADOS (snippet con tope 3)"
+                       : "semantica: la cuenta es el MULTIPLICADOR");
 }
 
 static volatile unsigned char *g_seis_sitios[4] = { nullptr, nullptr, nullptr, nullptr };
@@ -931,8 +983,25 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
                 // la reserva quieta pero clavo el multiplicador en 6.00 --
                 // objetivo 150, entregadas 174. El desfasaje lo resuelve el
                 // recorte del byte contra la reserva viva, no fijar la reserva.
-                const LONG techo = g_ciclo_techo;
-                if (techo > escribir && techo <= ((g_seis || cuenta_es_multiplicador()) ? 6 : 5)) escribir = techo;
+                //
+                // Todo esto vale mientras la cuenta de la API sea la RESERVA y
+                // el byte por frame sea la generacion. Con nuestro snippet eso
+                // ya no es asi: la cuenta ES el multiplicador y es lo que se
+                // entrega. Subirla al techo del ciclo clava el ratio ahi.
+                //
+                // Medido: pedido 2.55x, la cadencia alternando 2 y 3 como
+                // corresponde, y entregado 3.00 en las 27 ventanas -- mediana,
+                // p90 y maximo iguales, que es la firma de un valor constante y
+                // no de una media. La cuenta a la API era 3 en las 27. El byte
+                // tambien era 3 en las 27, porque lo escribe set_count_now con
+                // g_api_aplicada pegado a la llamada.
+                //
+                // Asi que con la semantica nueva no se sube nada: se declara la
+                // cuenta del bloque y el fraccional sale de alternarla.
+                if (!cuenta_es_multiplicador()) {
+                    const LONG techo = g_ciclo_techo;
+                    if (techo > escribir && techo <= (g_seis ? 6 : 5)) escribir = techo;
+                }
             }
             if (g_ceilfirst) {
                 const LONG techo = g_ciclo_techo;
@@ -1387,6 +1456,23 @@ static void apply_override_now(void) {
             return;
         }
         last_mode = m; last_count = c; have_last = 1;
+    }
+    // Bajando la cuenta, el byte va PRIMERO; subiendola, despues.
+    //
+    // La tabla medida no tiene transitorio seguro: el byte por encima de la
+    // reserva escribe en una ranura que nadie hizo y crashea, por debajo detiene
+    // la presentacion. Cuando la cuenta no se movia daba igual el orden. Ahora
+    // se mueve dos veces por ciclo, y en el instante entre la llamada y la
+    // escritura del byte los dos numeros no coinciden.
+    //
+    // De los dos desajustes el peligroso es el primero, y solo aparece al BAJAR:
+    // la reserva se achica mientras el byte todavia pide lo de antes. Bajando el
+    // byte antes de la llamada, nunca hay un momento con el byte por encima. Al
+    // subir el orden correcto es el contrario, y ya es el que hay: la linea de
+    // abajo lo sube recien cuando el plugin reservo.
+    if (cuenta_es_multiplicador()) {
+        const LONG ap = g_api_aplicada, quiere = g_force_generated;
+        if (ap >= 1 && quiere >= 1 && quiere < ap) set_count_now(quiere);
     }
     g_orig_setoptions(g_vp_copy, options_for_call(g_opt_copy));
     // El byte del bound se escribe ACA, pegado a la llamada.
@@ -3892,9 +3978,20 @@ static void fractional_tick(void) {
     // multiplied by it comes to. Closing a loop over the presented rate was
     // solving a problem this does not have -- and it could not win anyway,
     // since generation cannot lower a base that is already above the target.
-    double per_frame = (double)g_dyn_target / 100.0 - 1.0;
+    // Con NUESTRO snippet la cuenta es el multiplicador, no los generados.
+    //
+    // Sin esto la cadencia de un 2.55x alterna entre 1 y 2 -- que con este
+    // snippet significa alternar 1X y 2X -- y el promedio se clava en 2.00.
+    // Medido en GTA V: pedido 2.51..2.75, entregado 2.00, error mediana 27%.
+    // Tiene que alternar entre 2 y 3.
+    //
+    // Es el mismo desfasaje que dejo 2X sin generar y que hizo que el modo 6
+    // pidiera 5. Este era el ultimo lugar donde faltaba. Ver
+    // cuenta_es_multiplicador.
+    const double kBase = cuenta_es_multiplicador() ? 0.0 : 1.0;
+    double per_frame = (double)g_dyn_target / 100.0 - kBase;
     if (per_frame < 0.0) per_frame = 0.0;
-    if (per_frame > 5.0) per_frame = 5.0;
+    if (per_frame > 6.0) per_frame = 6.0;
 
     // The shape of a whole period, decided once, rather than a value decided
     // per frame and then held back.
@@ -4543,7 +4640,17 @@ static void fractional_tick(void) {
         }
         cyc_gen += (double)api;
         ++cyc_frames;
-        set_count_now(api);
+        // Con la semantica nueva el byte NO lleva la cadencia: la lleva la
+        // cuenta de la API, y el byte solo tiene que ir en el mismo escalon.
+        //
+        // Escribirlo aca lo adelantaba: la cadencia decide el bloque en el
+        // frame N y la llamada a la API recien sale en el Present siguiente, asi
+        // que entre medio quedaba un frame con el byte en el valor nuevo y la
+        // reserva en el viejo -- justo el desajuste que la tabla dice que no
+        // tiene transitorio seguro. Lo escribe set_count_now con g_api_aplicada,
+        // pegado a la llamada, que es el unico momento en que los dos numeros
+        // son el mismo.
+        if (!cuenta_es_multiplicador()) set_count_now(api);
         return;
     }
 
@@ -4602,7 +4709,14 @@ static void fractional_tick(void) {
     // cadence will use. (Pinning it at the declared maximum of 5 also avoids
     // the crash, but asks the plugin to do five frames of work for a ratio that
     // needs one or two.)
-    const LONG ceil_n = (LONG)(per_frame + 0.999);
+    // El techo del ratio. `per_frame` son GENERADOS (ratio - 1), que es lo que
+    // el snippet del juego espera. Con el nuestro la cuenta es el MULTIPLICADOR,
+    // asi que hay que declarar uno mas -- si no, un 2.55x pide 2 y entrega 2X.
+    // Es el mismo desfasaje que dejo 2X sin generar. Ver cuenta_es_multiplicador.
+    // per_frame ya viene en la escala correcta (ver kBase arriba), asi que el
+    // techo del ratio es directamente su parte entera hacia arriba.
+    const double para_techo = per_frame;
+    const LONG ceil_n = (LONG)(para_techo + 0.999);
     // Varying the API count at runtime crashes, in every arrangement tried:
     // per frame, in blocks of eight, and in blocks with the loop bound clamped
     // to what the plugin had actually applied so the two could never be out of
@@ -4611,6 +4725,21 @@ static void fractional_tick(void) {
     {
         const LONG t = (g_seis || cuenta_es_multiplicador()) ? 6 : 5;
         g_force_generated = ceil_n < 1 ? 1 : (ceil_n > t ? t : ceil_n);
+    }
+    // Dicho una vez, porque si no es una mentira silenciosa.
+    //
+    // Esta rama declara el techo y deja la fraccion al byte. Con nuestro snippet
+    // el byte ya no modula nada, asi que entrega el techo entero: 2.55x sale
+    // 3.00. No se arregla aca -- cambiar la cuenta por frame es una llamada a
+    // slDLSSGSetOptions por frame y 100 ms de enfriamiento cada una, que es
+    // generacion apagada. El fraccional necesita bloques, o sea g_slowalt, que
+    // viene encendido salvo que mfg-noslowalt.txt lo apague.
+    if (cuenta_es_multiplicador() && g_dyn_target % 100 != 0) {
+        static bool dicho = false;
+        if (!dicho) {
+            dicho = true;
+            log_line("frac: sin slowalt el ratio queda en el entero de arriba");
+        }
     }
 
     // Reported rarely: this runs on the render thread and log_line opens the
@@ -7857,6 +7986,7 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
     if (is_ota) g_ota_mapped = true;
     const bool shadow = !is_ota && g_ota_mapped;
     const bool live = !shadow;
+    detectar_semantica(reinterpret_cast<unsigned char *>(d->DllBase));
     const int n = patch_gates(reinterpret_cast<unsigned char *>(d->DllBase));
     if (n > 0) ++g_gates;
     log_num("  gates rewritten: ", (unsigned)n);
@@ -8191,8 +8321,40 @@ static void carpeta_de_cache(const wchar_t *modulo, wchar_t *out) {
     out[k++] = L'_'; out[k++] = L'0'; out[k] = 0;
 }
 
+// La ruta de un modulo en NUESTRA carpeta: LOCALAPPDATA\mfg-unlock\sdk\2.<v>.
+//
+// Es la misma carpeta de donde ya salia el interposer. Que TODO salga de ahi es
+// lo que da una base unica: hoy los nueve sl.* salen de la cache de NGX, que la
+// maneja NVIDIA y cambia sola por OTA, y el snippet salia de la carpeta del
+// juego -- distinto en cada uno. Eso fue exactamente la causa del crash de Halo:
+// su nvngx_dlssg de julio clava el maximo en 3 y el de GTA V no.
+//
+// Verificado antes de conectarlo: el sl.dlss_g del SDK 2.12 tiene los cuatro
+// sitios que parcheamos, en el MISMO RVA (0x47333) que el de la cache.
+static bool ruta_en_nuestro_sdk(const wchar_t *modulo, unsigned menor, wchar_t *out) {
+    // Sin buffer intermedio: esto corre dentro de hk_ldrload, BAJO EL LOADER
+    // LOCK, donde la pila es poca. Un wchar_t[MAX_PATH] local aca son 520 bytes
+    // y desbordaron la pila de GTA V -- 0xC00000FD en ntdll, el juego ni abrio.
+    // Ya habia pasado antes con el marco de 3288 bytes de hk_ldrload.
+    // Se escribe directo sobre el buffer del llamador.
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", out, MAX_PATH - 80);
+    if (n == 0 || n >= MAX_PATH - 80) return false;
+    int k = (int)n;
+    const wchar_t *sub = L"\\mfg-unlock\\sdk\\2.";
+    for (int i = 0; sub[i] != 0; ++i) out[k++] = sub[i];
+    if (menor >= 10) out[k++] = (wchar_t)(L'0' + (menor / 10));
+    out[k++] = (wchar_t)(L'0' + (menor % 10));
+    out[k++] = L'\\';
+    for (int i = 0; modulo[i] != 0 && k < MAX_PATH - 1; ++i) out[k++] = modulo[i];
+    out[k] = 0;
+    return GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES;
+}
+
 // Busca en la cache un archivo del modulo pedido cuya version sea 2.<menor>.
 static bool buscar_en_cache(const wchar_t *modulo, unsigned menor, wchar_t *out) {
+    // Nuestra carpeta manda. La cache de NGX queda de respaldo: si el archivo
+    // no esta, nada cambia respecto de antes.
+    if (ruta_en_nuestro_sdk(modulo, menor, out)) return true;
     wchar_t carpeta[64];
     carpeta_de_cache(modulo, carpeta);
     wchar_t patron[MAX_PATH];
@@ -8291,10 +8453,13 @@ static wchar_t g_set_inter[MAX_PATH] = {0};
 static wchar_t g_snippet_base[MAX_PATH] = {0};
 
 static bool buscar_snippet(wchar_t *out) {
-    wchar_t base[MAX_PATH];
-    if (GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH) == 0) return false;
-    int k = 0;
-    for (; base[k] != 0 && k < MAX_PATH - 64; ++k) out[k] = base[k];
+    // El del SDK primero, que es la misma base que los sl.*. La carpeta
+    // snippet\ queda de respaldo para copias puestas a mano.
+    if (ruta_en_nuestro_sdk(L"nvngx_dlssg.dll", 12, out)) return true;
+    // Sin buffer intermedio, por la misma razon: loader lock, pila corta.
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", out, MAX_PATH - 64);
+    if (n == 0 || n >= MAX_PATH - 64) return false;
+    int k = (int)n;
     const wchar_t *cola = L"\\mfg-unlock\\snippet\\nvngx_dlssg.dll";
     for (int i = 0; cola[i] != 0; ++i) out[k++] = cola[i];
     out[k] = 0;
@@ -8628,8 +8793,9 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     if (idx == -3) {
         log_ruta("snippet: pedido  ", g_ruta_pedida);
         log_ruta("  se carga el nuestro: ", g_snippet_base);
-        // Desde aca, la cuenta es el multiplicador. Ver cuenta_es_multiplicador.
-        g_snippet_cargado = 1;
+        // La semantica NO se decide aca: la decide detectar_semantica mirando el
+        // binario que quedo mapeado. Cargarlo desde nuestra carpeta y que sea de
+        // una build u otra son cosas distintas.
         int m = 0; while (g_snippet_base[m] != 0) ++m;
         g_us_alt.Buffer = g_snippet_base;
         g_us_alt.Length = (USHORT)(m * sizeof(wchar_t));
@@ -8641,6 +8807,41 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
             return g_orig_ldrload(ruta, carac, nombre, base);
         }
         return st3;
+    }
+
+    // Base propia: si el modulo esta en NUESTRA carpeta, se usa ese y punto.
+    //
+    // El veredicto ROJO existe como salvaguarda para no cambiarle los binarios a
+    // un juego que anda. Pero con base unificada el objetivo es el contrario:
+    // que TODOS corran lo mismo, para que un arreglo valga en los tres y no haya
+    // que descubrir por juego que binario le toco. La causa del crash de Halo
+    // fue exactamente eso.
+    //
+    // Solo actua si el archivo existe: sin la carpeta poblada, nada cambia.
+    // El interposer NO entra en la base por defecto.
+    //
+    // Es el modulo contra el que el juego enlaza y el que arma el swapchain.
+    // Sustituirlo siempre rompio el banco: 3 de 3 corridas sin independent flip
+    // ("SetMaximumFrameLatency changed from 0 to 1" y nada mas), cuando esta
+    // misma manana enganchaba al primer intento. Los plugins y el snippet si
+    // van; el interposer sigue el camino viejo, con veredicto y consentimiento.
+    if (g_snippet_on && idx != -2) {
+        static wchar_t propio[MAX_PATH];
+        const wchar_t *nom = g_set[idx].nombre;
+        if (ruta_en_nuestro_sdk(nom, 12, propio)) {
+            log_ruta("base: pedido  ", g_ruta_pedida);
+            log_ruta("  se carga el nuestro: ", propio);
+            int m = 0; while (propio[m] != 0) ++m;
+            g_us_alt.Buffer = propio;
+            g_us_alt.Length = (USHORT)(m * sizeof(wchar_t));
+            g_us_alt.MaximumLength = (USHORT)((m + 1) * sizeof(wchar_t));
+            g_ya_sustituimos = true;
+            const NTSTATUS stb = g_orig_ldrload(nullptr, carac, &g_us_alt, base);
+            if (stb >= 0) return stb;
+            log_num("  no cargo, status ", (unsigned)stb);
+            log_line("  se vuelve al del juego");
+            return g_orig_ldrload(ruta, carac, nombre, base);
+        }
     }
 
     leer_veredicto_previo();
@@ -9124,9 +9325,10 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                             (unsigned)g_force_generated);
                 }
             }
-            g_snippet_on = flag_file(L"mfg-snippet.txt");
-            if (g_snippet_on)
-                log_line("snippet: se cargara el nuestro si esta (mfg-snippet.txt)");
+            if (flag_file(L"mfg-sinbase.txt")) {
+                g_snippet_on = false;
+                log_line("base: DESACTIVADA a mano (mfg-sinbase.txt)");
+            }
             // mfg-mfcmax.txt: sube la constante del snippet. Experimental.
             if (flag_file(L"mfg-mfcmax.txt")) {
                 g_mfcmax = 5;
