@@ -3754,6 +3754,45 @@ static bool g_latch_reparto = true;    // mfg-nolatch.txt lo apaga, ver fraction
 // Sin esto el sesgo aprende de un tramo donde la entrega estaba limitada por el
 // techo y no por el modelo, que es como llego a 1.25.
 static bool g_dyn_recortado = false;
+// Saturacion: el ratio mas barato que sostiene las presentadas que ya se logran.
+//
+// Arriba de cierto punto, subir el multiplicador NO compra frames. La base se
+// derrumba en la misma proporcion y el producto queda quieto. Medido en GTA V,
+// agrupando 355 ventanas de juego real por el ratio que entregaron:
+//
+//   ratio  ventanas   base   presentado   latencia
+//    3.5      50      45.5      161.1      47.4 ms
+//    4.0      61      41.9      165.1      50.3 ms
+//    4.5      76      35.6      162.6      61.8 ms
+//    5.0     147      32.6      161.2      66.7 ms
+//
+// De 3.5x a 5.0x las presentadas no se mueven -- 161 contra 161 -- y la latencia
+// sube 19 ms. El controlador paso 147 de esas 355 ventanas en 5.0x, o sea en el
+// peor punto de la tabla, cobrando 19 ms por cero frames.
+//
+// Y no era un defecto de la aritmetica: hacia lo que se le pidio. Ve 161 contra
+// un objetivo de 165, concluye que le falta, y empuja. Lo que no sabia es que
+// por esa via ya no hay nada que ganar.
+//
+// Esto es lo que un entero no puede hacer y un fraccional si: el punto optimo es
+// el ratio mas bajo que llega al techo, y ese punto se mueve con la base -- 3.94
+// con base 41.9, 3.63 con base 45.5. Un entero obliga a redondear para arriba y
+// pagar la latencia entera.
+//
+// mfg-sinsat.txt lo apaga, para poder comparar.
+static bool   g_sat_on = true;
+static double g_sat_pres = 0.0;      // las presentadas mas altas vistas aca
+static double g_sat_ratio_max = 0.0; // techo de ratio, 0 = sin limite
+static double g_sat_prev_asked = 0.0, g_sat_prev_pres = 0.0;
+
+static void sat_reset(const char *por_que) {
+    if (g_sat_ratio_max > 0.0) log_line(por_que);
+    g_sat_pres = 0.0;
+    g_sat_ratio_max = 0.0;
+    g_sat_prev_asked = 0.0;
+    g_sat_prev_pres = 0.0;
+}
+
 static void dyn_control(double base_fps, double presented_fps) {
     if (g_force_sel != kSelDynFuture) return;
     if (base_fps <= 1.0 || presented_fps <= 1.0) return;
@@ -3770,7 +3809,12 @@ static void dyn_control(double base_fps, double presented_fps) {
     // la ventana posterior a un escalon ensuciaba la ganancia: la mediana quedo
     // en 143 igual y el resultado en 64% contra 66%, o sea nada. El sesgo
     // residual de +2% no viene de ahi y sigue sin explicacion.
-    if (!stable) return;
+    if (!stable) {
+        // Lo aprendido vale para ESTE punto de operacion. Si la base dio un
+        // escalon, el techo de presentadas es otro y hay que volver a medirlo.
+        sat_reset("sat: la base cambio, se olvida el techo");
+        return;
+    }
     if (g_dyn_recortado) return;   // salida recortada: el error no es del modelo
     if (asked_avg < 2.0) return;
     const double delivered = presented_fps / base_fps;
@@ -3781,6 +3825,41 @@ static void dyn_control(double base_fps, double presented_fps) {
     log_num("dynbias: asked x100 ", (unsigned)(asked_avg * 100.0 + 0.5));
     log_num("  delivered x100 ", (unsigned)(delivered * 100.0 + 0.5));
     log_num("  at base ", (unsigned)(base_fps + 0.5));
+    if (g_sat_on) {
+        if (presented_fps > g_sat_pres) g_sat_pres = presented_fps;
+        // Subir el ratio y no cobrar frames: eso es el techo, y el ratio de la
+        // ventana anterior ya lo alcanzaba.
+        if (g_sat_ratio_max <= 0.0 && g_sat_prev_asked > 0.0 &&
+            asked_avg > g_sat_prev_asked + 0.15 &&
+            presented_fps < g_sat_prev_pres * 1.02) {
+            g_sat_ratio_max = g_sat_prev_asked;
+            log_num("sat: techo detectado, presentadas x10 ",
+                    (unsigned)(g_sat_pres * 10.0 + 0.5));
+            log_num("  el ratio se limita a x100 ",
+                    (unsigned)(g_sat_ratio_max * 100.0 + 0.5));
+            log_num("  se venia pidiendo x100 ", (unsigned)(asked_avg * 100.0 + 0.5));
+        } else if (g_sat_ratio_max > 0.0) {
+            // Ya con techo: se tantea hacia abajo mientras las presentadas
+            // aguanten, y se vuelve un escalon si se caen. El paso es la banda
+            // muerta del controlador, asi que cada tanteo es una escritura y no
+            // una rafaga.
+            if (presented_fps >= g_sat_pres * 0.98) {
+                if (g_sat_ratio_max > 2.10) {
+                    g_sat_ratio_max -= 0.10;
+                    log_num("sat: mas barato, ratio x100 ",
+                            (unsigned)(g_sat_ratio_max * 100.0 + 0.5));
+                }
+            } else if (presented_fps < g_sat_pres * 0.97) {
+                g_sat_ratio_max += 0.20;
+                log_num("sat: se fue muy abajo, ratio x100 ",
+                        (unsigned)(g_sat_ratio_max * 100.0 + 0.5));
+                // Y se deja de bajar: este es el piso util de este punto.
+                g_sat_pres = presented_fps;
+            }
+        }
+        g_sat_prev_asked = asked_avg;
+        g_sat_prev_pres = presented_fps;
+    }
     const double inst = asked_avg / delivered;
     const int bk = dyn_bucket(asked_avg);
     g_dyn_bias[bk] += (inst - g_dyn_bias[bk]) * 0.25;
@@ -3966,6 +4045,20 @@ static void dyn_apply(double base_fps) {
             if (debt > lim2) debt = lim2;
             if (debt < -lim2) debt = -lim2;
         }
+    }
+    // El techo medido, antes que el estructural.
+    //
+    // Pedir mas que esto no entrega un frame mas: solo baja la base y sube la
+    // latencia. Es el unico lugar donde el controlador puede saberlo, porque es
+    // el unico que ve lo entregado contra lo pedido.
+    if (g_sat_on && g_sat_ratio_max >= 2.0 && want > g_sat_ratio_max) {
+        static LONG dicho = -1;
+        const LONG q = (LONG)(g_sat_ratio_max * 100.0 + 0.5);
+        if (dicho != q) {
+            dicho = q;
+            log_num("dynamic: recortado al techo medido, ratio x100 ", (unsigned)q);
+        }
+        want = g_sat_ratio_max;
     }
     if (want > 6.0) {
         static bool said_hi = false;
@@ -9629,6 +9722,10 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                     }
                     CloseHandle(bh);
                 }
+            }
+            if (flag_file(L"mfg-sinsat.txt")) {
+                g_sat_on = false;
+                log_line("sat: deteccion de techo DESACTIVADA (mfg-sinsat.txt)");
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
             if (flag_file(L"mfg-sinseis.txt")) {
