@@ -467,6 +467,18 @@ static unsigned char g_vp_copy[64];
 static volatile LONG g_opt_have = 0;
 static volatile LONG g_opt_thread = 0;
 static volatile LONG g_opt_pending = 0;
+// El juego apago la generacion por su cuenta desde nuestro ultimo envio.
+//
+// Sin esto el override no vuelve nunca. Medido en GTA V, sesion de 244 s con
+// 6X elegido: "override applied now, selection 6" UNA vez a los 167 s, y 484
+// veces "same options as last time, not re-sending". A los 180 s el juego
+// escribio eOff -- que es lo que hace al entrar al menu de pausa -- y no volvio
+// a encenderla hasta los 317 s. En el medio nosotros no reafirmamos nada,
+// porque el deduplicador compara contra LO ULTIMO QUE ESCRIBIMOS NOSOTROS y no
+// se entera de que el juego piso el estado.
+//
+// Ese es el "no vuelve despues del menu".
+static volatile LONG g_juego_apago = 0;
 // La cuenta que el plugin tiene REALMENTE aplicada, no la que queremos.
 //
 // bound y reserva tienen que moverse juntos: bound = API + 1 anda, bound mayor
@@ -1311,6 +1323,19 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
         // what decides whether this call is worth capturing again.
         raw_mode = *(LONG *)(p + 32);
         raw_cnt = *n;
+        // eOff del juego con un modo nuestro que genera: hay que reafirmar.
+        //
+        // No se reafirma aca mismo. Esta llamada es del juego y estamos adentro
+        // de ella; escribir ahora seria pelearle en su propio hilo. Se marca, y
+        // el camino de Present manda la nuestra despues.
+        if (raw_mode == 0 && g_force_sel >= 2) {
+            if (g_juego_apago == 0) {
+                log_num("el juego apago la generacion; se reafirmara la seleccion ",
+                        (unsigned)g_force_sel);
+            }
+            g_juego_apago = 1;
+            g_opt_pending = 1;
+        }
         g_opts_version = (LONG)*(unsigned long long *)(p + 24);
         static bool said_ver = false;
         if (!said_ver) {
@@ -1469,10 +1494,19 @@ static void apply_override_now(void) {
         static int have_last = 0;
         const LONG m = *(LONG *)(g_opt_copy + 32);
         const LONG c = *(LONG *)(g_opt_copy + 36);
-        if (have_last && m == last_mode && c == last_count) {
+        // El dedup vale mientras NADIE MAS toque el estado. Si el juego escribio
+        // eOff desde nuestro ultimo envio, "iguales a las de la vez pasada" es
+        // cierto y a la vez irrelevante: las de la vez pasada ya no son las que
+        // estan puestas.
+        if (have_last && m == last_mode && c == last_count && g_juego_apago == 0) {
             log_num("override: same options as last time, not re-sending; selection ",
                     (unsigned)g_force_sel);
             return;
+        }
+        if (g_juego_apago != 0) {
+            g_juego_apago = 0;
+            log_num("override: reafirmando despues de un eOff del juego, seleccion ",
+                    (unsigned)g_force_sel);
         }
         last_mode = m; last_count = c; have_last = 1;
     }
@@ -9427,10 +9461,17 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             }
             if (g_seis) {
                 log_line("tope: 6X activo");
-                // El archivo de settings se lee ANTES que este flag, asi que un
-                // modo fijo restaurado de disco ya aplico el mapeo viejo (v-1) y
-                // la cuenta quedaba una abajo: con mode 6 se pedia 5 y se
-                // entregaba 5X. Se recalcula aca, que es cuando el flag existe.
+                // OJO: este recalculo NO corre. El log lo muestra --
+                // "tope: 6X activo" sale ANTES de "settings: restored mode 6" --
+                // asi que g_force_sel todavia vale 0 y la condicion es falsa.
+                // El comentario anterior afirmaba el orden contrario y estaba
+                // mal.
+                //
+                // No se mueve de lugar porque no hace falta: la cuenta la
+                // corrige el escritor que mira cuenta_es_multiplicador() una vez
+                // que el snippet mapeo, que es cuando la respuesta existe. En la
+                // sesion de GTA V la cuenta pedida llego a 6 por ese camino.
+                // Queda como red, y con el aviso puesto.
                 if (g_force_sel >= 2 && g_force_sel <= kSelMaxFixed) {
                     g_force_generated = g_force_sel;
                     g_opt_pending = 1;
