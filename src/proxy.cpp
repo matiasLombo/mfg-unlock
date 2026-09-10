@@ -1130,7 +1130,44 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
                     log_num("  queda ", (unsigned)(escribir > kTope ? kTope : escribir));
                 }
             }
-            *(LONG *)(p + 36) = escribir > kTope ? kTope : escribir;
+            {
+                const LONG queda = escribir > kTope ? kTope : escribir;
+                // El invariante, en el unico lugar por el que pasa todo.
+                //
+                // Con la semantica de multiplicador una cuenta menor a 2 es 1X:
+                // la generacion queda encendida y no produce un solo frame. Eso
+                // no es un modo, es un defecto, y hasta ahora pasaba EN SILENCIO
+                // -- en Halo fueron 26 escrituras de cuenta 1 sin una linea que
+                // lo dijera, y hubo que deducirlo comparando modos.
+                //
+                // Se corrige Y se deja constancia, ahora que se sabe de donde
+                // viene: es la semilla. La seleccion de DYNAMIC/CUSTOM pone
+                // g_force_generated = 1 al restaurar los ajustes, que era 2X con
+                // la semantica vieja y es 1X con la nueva -- y ahi la semantica
+                // todavia no se sabe, porque el snippet no mapeo. El banco lo
+                // muestra: a los 3.3 s cuenta 1 con g_dyn_target ya en 255, y la
+                // cadencia recien toma el control a los 4.9 s. Segundo y medio
+                // pidiendo 1X. En Halo no se recuperaba nunca.
+                //
+                // 2 es el piso de cualquier modo que genere. La linea queda
+                // igual: si esto aparece seguido, el culpable es otro y hay que
+                // ir a buscarlo.
+                if (cuenta_es_multiplicador() && queda < 2 && g_force_sel >= 2) {
+                    escribir = 2;
+                    static LONG dicho = -1;
+                    if (dicho != queda) {
+                        dicho = queda;
+                        log_num("INVARIANTE ROTO: cuenta ", (unsigned)queda);
+                        log_line("  con la semantica de multiplicador eso es 1X: no genera nada");
+                        log_num("  seleccion ", (unsigned)g_force_sel);
+                        log_num("  g_force_generated ", (unsigned)g_force_generated);
+                        log_num("  g_dyn_target x100 ", (unsigned)g_dyn_target);
+                        log_num("  kTope ", (unsigned)kTope);
+                        log_line("  se escribe 2, que es el piso de un modo que genera");
+                    }
+                }
+                *(LONG *)(p + 36) = escribir > kTope ? kTope : escribir;
+            }
         }
     } else if (false) {
         // eDynamic, with our own frame-rate target.
@@ -4083,7 +4120,19 @@ static void fractional_tick(void) {
     // 2.0 es el mismo piso que el controlador aplica despues a su propia salida,
     // asi que no inventa un valor: arranca donde el iba a terminar de todas
     // formas, y desde ahi mide.
-    if (per_frame < 2.0 && g_dyn_target < 100 &&
+    //
+    // La condicion NO puede mirar g_dyn_target. La primera version decia
+    // "g_dyn_target < 100" porque en GTA V y en el banco el objetivo arranca en
+    // 0 -- pero Halo tiene "target 600" guardado en su mfg-settings.txt, la
+    // condicion daba falso, y el piso no disparo una sola vez mientras la cuenta
+    // quedaba clavada en 1. Una condicion derivada del estado de UN juego, en
+    // codigo que no tiene ramas por juego. Es la misma clase de error que
+    // atarse a un flag en vez de mirar el contenido.
+    //
+    // Lo que decide es el invariante: con la semantica de multiplicador, una
+    // cuenta menor a 2 es 1X, o sea nada generado, y eso nunca es lo que un modo
+    // que genera quiso pedir.
+    if (per_frame < 2.0 &&
         (g_force_sel == kSelDynamic || g_force_sel == kSelDynFuture)) {
         static bool dicho = false;
         if (!dicho) {
@@ -5258,8 +5307,23 @@ static void settings_load(void) {
                 // and the controller cannot measure a base rate without it
                 // running. It waited for itself. One generated frame is the
                 // seed; the controller moves off it on the first measurement.
+                // La semilla es 2, no 1.
+                //
+                // Con la semantica vieja 1 era un frame generado, o sea 2X. Con
+                // la nueva es 1X: generacion encendida produciendo nada. Y aca
+                // la semantica todavia NO se sabe -- el snippet no mapeo -- asi
+                // que no se puede preguntar: hay que elegir el valor que no
+                // rompe en ninguna de las dos.
+                //
+                // 2 es ese valor. Con la semantica nueva es 2X, el piso de
+                // cualquier modo que genere. Con la vieja son dos frames
+                // generados, o sea 3X: un escalon mas alto de lo ideal durante
+                // la primera ventana, que el controlador baja en la primera
+                // medicion. Arrancar de mas se corrige solo; arrancar en 1X no,
+                // porque sin generacion no hay base que medir y el controlador
+                // se espera a si mismo. Eso fue Halo entero.
                 if (v == kSelDynamic || v == kSelDynFuture)
-                    g_force_generated = 1;
+                    g_force_generated = 2;
             }
         } else if (is_tgt && v >= 0 && v <= kMaxCustom) {
             // Un ajuste guardado por una version anterior puede traer 150. Se
