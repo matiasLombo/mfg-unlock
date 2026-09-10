@@ -124,6 +124,12 @@ static bool g_hud_on = false;            // lo enciende el casillero del panel
 static bool g_hud_open = false;          // si la ventana esta creada y mostrada
 // Los alimenta el hook de present y la sonda de Reflex.
 static volatile LONG g_hud_fps_x10 = 0;
+// La base, para poder mostrar "base/presentadas" en vez de un numero solo.
+//
+// Un "342 FPS" no dice nada por si mismo: no se sabe si son 57 x6 o 171 x2, que
+// se ven y se sienten distinto. Los dos numeros juntos son el multiplicador a
+// simple vista, sin tener que abrir el panel.
+static volatile LONG g_hud_base_x10 = 0;
 static volatile LONG g_hud_lat_us = 0;
 
 // The multiplier, times a hundred: 150 is 1.5x. A multiplier and not a target
@@ -934,6 +940,18 @@ static void hud_build(void) {
 
     char line[64];
     int k = 0;
+    // "57/342 FPS": la base y lo que sale a pantalla.
+    //
+    // La barra se dibuja solo si hay base medida. Reflex tarda unas ventanas en
+    // dar una, y "0/342" se leeria como que la generacion no esta andando
+    // justo cuando si lo esta.
+    const int base = (int)((g_hud_base_x10 + 5) / 10);
+    if (base > 0) {
+        if (base >= 100) line[k++] = (char)(48 + (base / 100) % 10);
+        if (base >= 10)  line[k++] = (char)(48 + (base / 10) % 10);
+        line[k++] = (char)(48 + base % 10);
+        line[k++] = 47;                                              // '/'
+    }
     const int fps = (int)((g_hud_fps_x10 + 5) / 10);
     if (fps >= 100) line[k++] = (char)(48 + (fps / 100) % 10);
     if (fps >= 10)  line[k++] = (char)(48 + (fps / 10) % 10);

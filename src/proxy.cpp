@@ -3367,6 +3367,16 @@ static void note_rendered_frame(void) {
                         // separan y despues no se sabe cual creer.
                         if (win_elapsed > 0.0)
                             g_hud_fps_x10 = (LONG)(dp * 10.0 / win_elapsed + 0.5);
+                        // La base del HUD sale de Reflex, no de nuestro gate.
+                        //
+                        // g_rendered_fps cuenta el gate de frames, que dispara
+                        // varias veces por frame renderizado -- en Cyberpunk da
+                        // 113 donde la base real es 39. Ese numero en pantalla
+                        // seria una mentira prolija. g_rfx_base es la que el
+                        // propio Reflex reporta, y es la que este archivo ya
+                        // trata como honesta unas lineas mas abajo.
+                        if (g_rfx_base > 1.0)
+                            g_hud_base_x10 = (LONG)(g_rfx_base * 10.0 + 0.5);
                         // El controlador de DYNAMIC come de aca por la misma
                         // razon: la base y lo presentado ya estan medidos con
                         // el instrumento honesto, y una segunda cuenta propia
