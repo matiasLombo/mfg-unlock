@@ -363,6 +363,13 @@ static bool g_ota = false;              // mfg-ota.txt
 // Si la carpeta no tiene los archivos, no se sustituye nada igual: el respaldo
 // es la ausencia de la base, no la ausencia de un flag.
 static bool g_snippet_on = true;
+// El interposer entra en la base como todos. mfg-sininterposer.txt lo saca.
+//
+// Estuvo excluido porque el banco fallaba 5 de 5 con el sustituido, y lo exclui
+// sin leer POR QUE fallaba -- que es para lo que existe el banco. El motivo real
+// es que se mapean DOS interposers, no que el modulo este mal: el del banco y el
+// nuestro son byte a byte el mismo archivo.
+static bool g_inter_fuera = false;
 // mfg-sllog.txt esta presente: ademas del log, se sube el nivel en Preferences.
 static bool g_sllog_on = false;
 // Probado en el sample del banco, que como Halo no pedia OTA: banderas 133 ->
@@ -8661,6 +8668,7 @@ static void leer_veredicto_previo(void) {
     }
 }
 static UNICODE_STRING g_us_alt;
+static LONG g_inter_pedidos = 0;
 
 // El trabajo pesado NO se inline en el hook.
 //
@@ -8707,6 +8715,17 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     // vive aparte porque no sale de la cache.
     const bool es_interposer = igual_sin_caso(g_ruta_pedida + corte, L"sl.interposer.dll");
     if (es_interposer) idx = -2;
+    // Diagnostico: CADA pedido del interposer, y si ya hay uno mapeado.
+    //
+    // El banco fallo 5 de 5 con el interposer sustituido y en loaded-modules
+    // aparecian DOS: el del sample y el nuestro. Pero en el log habia una sola
+    // linea de redireccion, asi que la segunda copia entro por un camino que
+    // este gancho no vio. Esto dice cuantos pedidos hay y en que orden.
+    if (es_interposer) {
+        ++g_inter_pedidos;
+        log_num("interposer: pedido numero ", (unsigned)g_inter_pedidos);
+        log_ruta("  ruta pedida: ", g_ruta_pedida);
+    }
     // -3 marca al snippet de NGX. Sale de nuestra carpeta, igual que el
     // interposer. Ver buscar_snippet.
     if (g_snippet_on && igual_sin_caso(g_ruta_pedida + corte, L"nvngx_dlssg.dll")) {
@@ -8825,9 +8844,49 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     // ("SetMaximumFrameLatency changed from 0 to 1" y nada mas), cuando esta
     // misma manana enganchaba al primer intento. Los plugins y el snippet si
     // van; el interposer sigue el camino viejo, con veredicto y consentimiento.
-    if (g_snippet_on && idx != -2) {
+    //
+    // El interposer entra como todos, pero NUNCA se redirige un modulo que ya
+    // esta mapeado.
+    //
+    // Ahi estaba el defecto, y no en el modulo. El banco fallaba 5 de 5 con el
+    // interposer sustituido y en loaded-modules.json aparecian DOS -- el del
+    // sample y el nuestro -- con una sola linea de redireccion en el log. La
+    // pista que faltaba la dio este mismo gancho al preguntarlo:
+    //
+    //   interposer: pedido numero 1
+    //     ya mapeado (GetModuleHandle) 1
+    //
+    // O sea que cuando vemos el pedido el modulo YA esta en el proceso: el
+    // sample lo importa estaticamente y el cargador lo resolvio antes. Ese
+    // pedido es una segunda carga del mismo nombre, que normalmente devuelve la
+    // copia que ya esta. Cambiandole la ruta deja de ser el mismo modulo para el
+    // cargador y se mapea una segunda copia.
+    //
+    // Con dos interposers el juego presenta por uno y los hooks de los plugins
+    // viven en el otro: SetMaximumFrameLatency se queda en 1, no hay independent
+    // flip y no hay una sola ventana de medicion -- aunque la interpolacion
+    // "cambie de estado", porque los plugins estan vivos en la copia equivocada.
+    // Es [[two-plugin-copies]] otra vez, un nivel mas arriba.
+    //
+    // Los dos archivos son byte a byte el mismo (mismo sha256, 647808 bytes),
+    // asi que sustituirlo nunca fue el problema: la ruta lo era.
+    //
+    // La guarda vale para TODOS los modulos, no solo el interposer. Si ya esta
+    // mapeado, la carga que sigue tiene que devolver esa copia y no una nueva.
+    // En GTA V el interposer se mapea a los 16.7 s y no esta cargado antes, asi
+    // que ahi si se sustituye y el juego queda con el set 2.12 completo.
+    const bool ya_esta = GetModuleHandleW(g_ruta_pedida + corte) != nullptr;
+    if (ya_esta) {
+        static int dicho_ya = 0;
+        if (dicho_ya < 12) {
+            ++dicho_ya;
+            log_ruta("base: ya mapeado, no se duplica: ", g_ruta_pedida + corte);
+        }
+        return g_orig_ldrload(ruta, carac, nombre, base);
+    }
+    if (g_snippet_on && (idx != -2 || !g_inter_fuera)) {
         static wchar_t propio[MAX_PATH];
-        const wchar_t *nom = g_set[idx].nombre;
+        const wchar_t *nom = (idx == -2) ? L"sl.interposer.dll" : g_set[idx].nombre;
         if (ruta_en_nuestro_sdk(nom, 12, propio)) {
             log_ruta("base: pedido  ", g_ruta_pedida);
             log_ruta("  se carga el nuestro: ", propio);
@@ -9324,6 +9383,10 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                     log_num("  cuenta recalculada para el modo fijo ",
                             (unsigned)g_force_generated);
                 }
+            }
+            if (flag_file(L"mfg-sininterposer.txt")) {
+                g_inter_fuera = true;
+                log_line("base: el interposer queda AFUERA (mfg-sininterposer.txt)");
             }
             if (flag_file(L"mfg-sinbase.txt")) {
                 g_snippet_on = false;
