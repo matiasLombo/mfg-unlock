@@ -205,8 +205,88 @@ static bool flag_file(const wchar_t *name) {
 // cuenta alternando, asi que la dll andaba y solo habia dejado de escribir.
 // Revertido sin diagnosticar del todo: el cambio no compraba nada medido y
 // rompia leer el log con el juego abierto, que es como se diagnostica todo aca.
+// Rafaga: juntar el volcado de una ventana en UNA sola apertura de archivo.
+//
+// log_line abre y cierra el archivo por linea a proposito, para que el log se
+// pueda leer en vivo ([[log-must-stay-readable-live]]). El costo se paga por
+// APERTURA, no por linea, y al cerrar cada ventana de medicion se escriben unas
+// sesenta seguidas -- histogramas, sondas, las dos bases -- en el hilo de
+// render.
+//
+// Medido en una sesion de GTA V de 726 s: 63611 lineas, 88 por segundo de media
+// y picos de 360. A base 40 son mas de dos aperturas por frame renderizado.
+//
+// Entre begin y end las lineas se acumulan y salen en una sola escritura. No se
+// pierde una sola linea ni cambia el formato, y el archivo sigue siendo legible
+// en vivo: una escritura por ventana es aproximadamente una por segundo. Si el
+// buffer se llena se vuelca solo, asi que el peor caso es el de antes y no
+// perder texto.
+// El buffer es de UN hilo: el que abrio la rafaga.
+//
+// log_line lo llama cualquier hilo del proceso, incluido el que corre bajo el
+// loader lock. Sin esta atadura, dos hilos harian read-modify-write sobre
+// g_burst_n a la vez y el indice podria pasarse del buffer. El volcado de la
+// ventana es del hilo de render y es el unico que necesita la rafaga; los
+// demas siguen por el camino de siempre, una apertura por linea.
+static char  g_burst[16384];
+static int   g_burst_n = 0;
+static bool  g_burst_on = false;
+static LONG  g_burst_hilo = 0;
+static void  log_flush(void);
+
+static void log_burst_begin(void) {
+    g_burst_hilo = (LONG)GetCurrentThreadId();
+    g_burst_on = true;
+}
+static void log_burst_end(void) {
+    log_flush();
+    g_burst_on = false;
+    g_burst_hilo = 0;
+}
+
+static void log_escribir(const char *bytes, int len) {
+    if (g_log[0] == 0) return;
+    HANDLE h = CreateFileW(g_log, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD n = 0;
+    SetFilePointer(h, 0, nullptr, FILE_END);
+    WriteFile(h, bytes, (DWORD)len, &n, nullptr);
+    CloseHandle(h);
+}
+
+static void log_flush(void) {
+    if (g_burst_n <= 0) return;
+    log_escribir(g_burst, g_burst_n);
+    g_burst_n = 0;
+}
+
 static void log_line(const char *text) {
     if (g_log[0] == 0) return;
+    // El camino de rafaga arma la linea en el buffer y no toca el disco.
+    if (g_burst_on && (LONG)GetCurrentThreadId() == g_burst_hilo) {
+        static ULONGLONG tb = 0;
+        if (tb == 0) tb = GetTickCount64();
+        const unsigned long long ms = GetTickCount64() - tb;
+        char ts[24];
+        int k = 0, d[12], nd = 0;
+        unsigned long long v = ms;
+        ts[k++] = '[';
+        if (v == 0) d[nd++] = 0;
+        while (v > 0 && nd < 12) { d[nd++] = (int)(v % 10); v /= 10; }
+        while (nd > 0) ts[k++] = (char)('0' + d[--nd]);
+        ts[k++] = 'm'; ts[k++] = 's'; ts[k++] = ']'; ts[k++] = ' ';
+        int len = 0;
+        while (text[len] != 0) ++len;
+        if (g_burst_n + k + len + 2 > (int)sizeof(g_burst)) log_flush();
+        if (k + len + 2 <= (int)sizeof(g_burst)) {
+            for (int i = 0; i < k; ++i) g_burst[g_burst_n++] = ts[i];
+            for (int i = 0; i < len; ++i) g_burst[g_burst_n++] = text[i];
+            g_burst[g_burst_n++] = '\r';
+            g_burst[g_burst_n++] = '\n';
+        }
+        return;
+    }
     HANDLE h = CreateFileW(g_log, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -3265,6 +3345,8 @@ static void note_rendered_frame(void) {
                 g_rendered_fps = (double)g_win_frames / g_win_time;
                 g_win_frames = 0;
                 g_win_time = 0.0;
+                // Todo el volcado de la ventana en una sola apertura.
+                log_burst_begin();
                 // Silenced by mfg-quiet.txt. log_line opens, seeks, writes and
                 // closes the file for every line, on the render thread, and the
                 // alternating arm emits more lines than the integer one -- so
@@ -3551,6 +3633,7 @@ static void note_rendered_frame(void) {
                     }
                 }
             }
+            log_burst_end();
         }
         // 2 ms to 200 ms. Outside that it is a load screen, a breakpoint or a
         // wrapped counter, and feeding it to the average would move the
