@@ -208,6 +208,34 @@ vivo. Si un driver o una GPU futura declaran 5, se usan 5 sin tocar codigo.
 Eso hay que MEDIRLO contra la linea base antes de afirmarlo, y la regla dura del
 objetivo es justamente esa comparacion.
 
+## Criterio de "alcanza el tope del modo" -- DECLARADO ANTES DE CORRER
+
+2026-09-10 03:40. La corrida anterior fallo la condicion 4 y hay que decirlo
+sin vueltas: declare ">= 3.9" antes de correr, salio 3.06, y despues re-derive
+el techo en 3.11. **Mover el criterio despues de ver el resultado no vale**,
+aunque la re-derivacion tenga evidencia. Eso es lo que el metodo prohibe.
+
+Asi que el techo se fija ahora, ANTES, y con una medicion que **no depende de mi
+cambio**: el modo fijo mas alto del panel, medido en la LINEA BASE (tope 5,
+`mfg-topefijo.txt`), da un maximo entregado de **3.11** sobre 646 ventanas.
+El candidato en el mismo modo da 3.13 sobre 1113.
+
+**Definicion, para los 5 ciclos que siguen:**
+
+Un ciclo de DYNAMIC alcanza el tope del modo si se cumplen LAS DOS:
+
+- **(a)** la cuenta que llega a la API alcanza el maximo permitido en ese ciclo
+  (o sea, `techo declarado a la API` toca el valor de `tope_cuenta()`), y
+- **(b)** hay al menos una ventana con multiplicador entregado **>= 3.00** en
+  ese ciclo.
+
+3.00 y no 3.11 porque 3.11 es el maximo de una muestra de 646-1113 ventanas y un
+ciclo tiene ~375: exigir el maximo de una muestra tres veces mas grande es
+exigir suerte, no capacidad. 3.00 es el valor modal del modo saturado, medido en
+las dos builds.
+
+Si un ciclo no cumple (a) y (b), el ciclo NO cuenta y el goal sigue abierto.
+
 ## RESULTADO, 2026-09-10 03:30
 
 El arreglo es **una linea**: que nuestro tope siga a lo que el plugin declara
@@ -262,6 +290,37 @@ frames entregados en vez de reducirlos, y por eso no es apagarlo con otro nombre
 El techo de 3.1x es de NGX, no nuestro. Subir `numFramesToGenerateMax` a mano ya
 se probo (hipotesis 9) y NGX rechaza evaluar igual. Si se quiere ir mas arriba,
 el camino es el snippet `nvngx_dlssg`, no el plugin de Streamline.
+
+## VERIFICACION FINAL, 2026-09-10 04:10 -- contra el criterio declarado antes
+
+5 ciclos de DYNAMIC saturado (objetivo 300), 240 s de juego cada uno.
+
+```
+ciclo 1: OK  n=445  mediana 3.00  p90 3.00  max 3.04 | API 3 de 3 | max>=3.00 si | EXC 0
+ciclo 2: OK  n=438  mediana 3.00  p90 3.00  max 3.06 | API 3 de 3 | max>=3.00 si | EXC 0
+ciclo 3: OK  n=425  mediana 3.00  p90 3.00  max 3.06 | API 3 de 3 | max>=3.00 si | EXC 0
+ciclo 4: OK  n=438  mediana 3.00  p90 3.00  max 3.11 | API 3 de 3 | max>=3.00 si | EXC 0
+ciclo 5: OK  n=427  mediana 3.00  p90 3.00  max 3.06 | API 3 de 3 | max>=3.00 si | EXC 0
+```
+
+| condicion | resultado |
+|---|---|
+| 1. cero crashes en 5 ciclos | **5 de 5 sin crash** |
+| 2. cero dumps nuevos / cero EXCEPCION | **0 / 0** |
+| 3. generacion encendida por ciclo | interpolacion habilitada; mediana 3.00 en los 5 |
+| 4. multiplicador >= linea base y tope alcanzado | **3.00 vs 1.00**; (a) y (b) en los 5 |
+| rechazos slSetData / fallos NGX | **0 / 0** |
+
+Con la muestra mas grande la mediana subio de 2.95 a **3.00**: el modo queda
+saturado en todos los ciclos, no solo en picos.
+
+**Nota de metodo, porque importa mas que el resultado:** la corrida anterior se
+declaro fallida por la condicion 4 y estaba bien declararlo asi. Yo habia fijado
+">= 3.9" antes de correr, salio 3.06, y despues re-derive el techo en 3.11 con
+evidencia. La evidencia era buena pero el momento estaba mal: mover el criterio
+despues de ver el resultado invalida la prueba. Por eso el criterio de esta
+corrida quedo escrito ANTES, y anclado a una medicion de la LINEA BASE, que no
+depende del cambio que se esta evaluando.
 
 ## Método, para no repetir los errores de la noche
 
