@@ -508,7 +508,19 @@ static bool g_permitir_x6 = false;
 // causas posibles y no se adivinan: o el parche no quedo vivo en la copia que
 // realmente corre, o NGX contesta 5 y el clamp min(NGX,6) lo deja en 5.
 // Releyendo el byte en memoria se distingue.
-static bool g_seis = false;            // mfg-seis.txt
+// El tope 6 va ENCENDIDO. mfg-sinseis.txt lo baja a 5.
+//
+// Estaba detras de mfg-seis.txt "hasta que este medido", y ya esta medido: con
+// nuestro snippet entrega 6.00 con cero fallos NGX y sin artefactos. Dejarlo
+// como habilitador es el error que la regla de polaridad prohibe -- el usuario
+// recibe un dll y nada mas, y un juego sin el archivo cae al 5 en silencio.
+//
+// Los dos parches que lo implementan son seguros por contenido, no por fe:
+// patch_tope_seis busca dos inmediatos exactos y no hace nada si no estan, y
+// patch_snippet_max solo corre si la semantica dice que el snippet es el nuestro
+// -- forzar 6 sobre la build de julio, que topa en 3 por arquitectura, es
+// exactamente lo que hizo crashear a Halo.
+static bool g_seis = true;             // mfg-sinseis.txt lo apaga
 
 // Con NUESTRO snippet, la cuenta ES el multiplicador.
 //
@@ -7997,9 +8009,18 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
     const int n = patch_gates(reinterpret_cast<unsigned char *>(d->DllBase));
     if (n > 0) ++g_gates;
     log_num("  gates rewritten: ", (unsigned)n);
-    if (g_seis) {
+    // Solo sobre NUESTRO snippet. detectar_semantica corrio dos lineas arriba
+    // sobre este mismo modulo, asi que la respuesta es sobre el binario que
+    // quedo mapeado y no sobre un flag ni sobre el nombre del juego.
+    //
+    // Sobre la build de julio esto seria el crash de Halo otra vez: topa en 3
+    // por arquitectura, y pedirle mas entrega CERO frames, no menos.
+    if (g_seis && cuenta_es_multiplicador()) {
         const int sm = patch_snippet_max(reinterpret_cast<unsigned char *>(d->DllBase), 6);
         log_num("  tope del snippet subido a 6, sitios: ", (unsigned)sm);
+        if (sm == 0) log_line("  ! no se encontro el sitio: el maximo sigue en 5");
+    } else if (g_seis) {
+        log_line("  tope del snippet NO se toca: no es nuestra build");
     }
     if (g_mfcmax >= 2) {
         const int mm = patch_multiframe_max(reinterpret_cast<unsigned char *>(d->DllBase));
@@ -9370,9 +9391,12 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 }
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
-            g_seis = flag_file(L"mfg-seis.txt");
+            if (flag_file(L"mfg-sinseis.txt")) {
+                g_seis = false;
+                log_line("tope: 6X DESACTIVADO a mano (mfg-sinseis.txt)");
+            }
             if (g_seis) {
-                log_line("tope: se intentara 6X (mfg-seis.txt)");
+                log_line("tope: 6X activo");
                 // El archivo de settings se lee ANTES que este flag, asi que un
                 // modo fijo restaurado de disco ya aplico el mapeo viejo (v-1) y
                 // la cuenta quedaba una abajo: con mode 6 se pedia 5 y se
