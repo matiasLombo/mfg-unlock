@@ -353,6 +353,9 @@ static PFN_slGetFeatureFunction g_orig_getfeaturefn = nullptr;
 typedef unsigned (*PFN_slInit)(void *, unsigned long long);
 static PFN_slInit g_orig_slinit = nullptr;
 static bool g_ota = false;              // mfg-ota.txt
+// mfg-snippet.txt: cargar nvngx_dlssg desde nuestra carpeta en vez del que
+// trae el juego. Ver buscar_snippet.
+static bool g_snippet_on = false;
 // mfg-sllog.txt esta presente: ademas del log, se sube el nivel en Preferences.
 static bool g_sllog_on = false;
 // Probado en el sample del banco, que como Halo no pedia OTA: banderas 133 ->
@@ -485,6 +488,43 @@ static volatile LONG g_opt_pending = 0;
 static bool g_permitir_x6 = false;
 // 5 es el maximo del plugin (6X). El tope en 4 era una mitigacion del crash
 // que ademas limitaba 5X, y la causa resulto ser otra.
+// Las direcciones que se parchearon para subir el tope, para releerlas despues.
+//
+// Hace falta porque el parche engancho (2 sitios) y el campo siguio en 5. Dos
+// causas posibles y no se adivinan: o el parche no quedo vivo en la copia que
+// realmente corre, o NGX contesta 5 y el clamp min(NGX,6) lo deja en 5.
+// Releyendo el byte en memoria se distingue.
+static bool g_seis = false;            // mfg-seis.txt
+
+// Con NUESTRO snippet, la cuenta ES el multiplicador.
+//
+// Medido en Halo, mismo dll, misma sesion:
+//
+//   snippet del juego   cuenta 1 -> 2X        (la cuenta son los GENERADOS)
+//   snippet nuestro     cuenta 1 -> 1.2x      (la cuenta es el MULTIPLICADOR)
+//                       cuenta 5 -> 5.0x
+//
+// La semantica de numFramesToGenerate cambio entre builds. Por eso el mapeo
+// `modo v -> cuenta v-1` dejaba 2X sin generar y hacia que el modo 6 pidiera 5.
+//
+// Se decide por el flag leido AQUI y no por g_snippet_on: ese se llena en el
+// bloque de flags, que corre DESPUES de restaurar los settings, y el modo fijo
+// ya quedaba mapeado con el valor viejo. Leerlo bajo demanda saca el orden de
+// la ecuacion. El archivo se mira una sola vez.
+// Se enciende cuando el redirect del snippet REALMENTE ocurrio.
+//
+// Se probo decidirlo leyendo mfg-snippet.txt y no funciono: la primera consulta
+// llega antes de que g_log tenga la ruta del dll, flag_file mira una ruta
+// relativa y contesta que no. Un hecho observado -- la carga redirigida -- no
+// tiene ese problema.
+static volatile LONG g_snippet_cargado = 0;
+
+static bool cuenta_es_multiplicador(void) {
+    return g_snippet_cargado != 0;
+}
+
+static volatile unsigned char *g_seis_sitios[4] = { nullptr, nullptr, nullptr, nullptr };
+static int g_seis_n = 0;
 static volatile LONG g_max_declarado = 0;   // 0 = todavia no se leyo
 // mfg-topefijo.txt: vuelve al tope de 5 de antes, para poder MEDIR la linea
 // base sin recompilar. Diagnostico local, nunca el arreglo: sin el archivo el
@@ -498,7 +538,14 @@ static LONG tope_cuenta(void) {
     // venia. Ver leer_max_generados: pedir por encima de esto no entrega mas
     // frames, entrega CERO -- NGX rechaza la evaluacion entera.
     const LONG d = g_max_declarado;
-    return (d >= 1 && d <= 5) ? d : 5;
+    // Hasta 6: el array de sub-frames tiene SEIS ranuras, asi que 6X es el
+    // maximo estructural. El 5 de antes era un clamp nuestro y era el que
+    // topaba una vez que el snippet y el plugin ya reportaban 6.
+    // Sin mfg-seis.txt esto se comporta como siempre. El 6 es experimental y
+    // dejarlo incondicional fue un error: rompio 2X sin que sacar el flag lo
+    // devolviera.
+    const LONG techo = (g_seis || cuenta_es_multiplicador()) ? 6 : 5;
+    return (d >= 1 && d <= techo) ? d : 5;
 }
 // Base del sl.dlss_g que estamos parcheando, para poder leerle campos.
 static const unsigned char *g_dlssg_base = nullptr;
@@ -718,12 +765,27 @@ static void leer_max_generados(void) {
     // Rango de cordura: si ahi no hay un numero chico, el offset no es el que
     // creemos y hacerle caso seria peor que ignorarlo.
     if (v < 1 || v > 8) return;
+    // CADA cambio, con marca de tiempo. El plugin inicializa el campo en 5:
+    //
+    //     0x4fccd  mov dword ptr [rdi + 0x45e4], 5
+    //
+    // y en runtime se lee 3. Ese es el UNICO escritor que aparece en un escaneo
+    // estatico de sl.dlss_g, asi que algo de afuera lo baja -- casi seguro una
+    // consulta de capacidad de NGX escribiendo por puntero, que el escaneo no
+    // ve. Saber CUANDO cambia dice quien: se contrasta el instante contra el
+    // sl.log verbose y se ve que llamada ocurrio justo antes.
+    //
+    // Importa: si el 3 lo pone una consulta de capacidad de la GPU, es el techo
+    // de Ada y no hay nada que subir. Si lo pone una tabla o una comprobacion
+    // de version, si lo hay.
     if (g_max_declarado != v) {
-        static LONG dicho = -1;
-        if (dicho != v) {
-            dicho = v;
-            log_num("max: el plugin declara numFramesToGenerateMax ", (unsigned)v);
+        log_num("max: numFramesToGenerateMax CAMBIO a ", (unsigned)v);
+        // Los bytes parcheados, tal como estan AHORA en memoria.
+        for (int q = 0; q < g_seis_n; ++q) {
+            if (g_seis_sitios[q] == nullptr) continue;
+            log_num("  sitio del tope, byte vivo ", (unsigned)*g_seis_sitios[q]);
         }
+        log_num("  venia de ", (unsigned)g_max_declarado);
         g_max_declarado = v;
     }
 }
@@ -870,11 +932,11 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
                 // objetivo 150, entregadas 174. El desfasaje lo resuelve el
                 // recorte del byte contra la reserva viva, no fijar la reserva.
                 const LONG techo = g_ciclo_techo;
-                if (techo > escribir && techo <= 5) escribir = techo;
+                if (techo > escribir && techo <= ((g_seis || cuenta_es_multiplicador()) ? 6 : 5)) escribir = techo;
             }
             if (g_ceilfirst) {
                 const LONG techo = g_ciclo_techo;
-                if (!g_interp_on && techo > escribir && techo <= 5) {
+                if (!g_interp_on && techo > escribir && techo <= ((g_seis || cuenta_es_multiplicador()) ? 6 : 5)) {
                     escribir = techo;
                     static bool dicho = false;
                     if (!dicho) {
@@ -920,6 +982,18 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
                     escribir = tope;
                 }
             }
+            // Lo que realmente se escribe, y contra que se recorta.
+            {
+                static LONG dicho_e = -1, dicho_t = -1, dicho_g = -1;
+                if (dicho_e != escribir || dicho_t != kTope || dicho_g != g_force_generated) {
+                    dicho_e = escribir; dicho_t = kTope; dicho_g = g_force_generated;
+                    log_num("force_into: g_force_generated ", (unsigned)g_force_generated);
+                    log_num("  escribir ", (unsigned)escribir);
+                    log_num("  kTope ", (unsigned)kTope);
+                    log_num("  g_max_declarado ", (unsigned)g_max_declarado);
+                    log_num("  queda ", (unsigned)(escribir > kTope ? kTope : escribir));
+                }
+            }
             *(LONG *)(p + 36) = escribir > kTope ? kTope : escribir;
         }
     } else if (false) {
@@ -945,7 +1019,15 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         // a version 5 copy in options_for_call.
     } else if (sel >= 2) {
         *(LONG *)(p + 32) = 1;                 // DLSSGMode::eOn
-        { const LONG c = sel - 1; *(LONG *)(p + 36) = c > kTope ? kTope : c; }   // 2x -> 1
+        // La rama de modos fijos calcula la cuenta de `sel` y NO mira
+        // g_force_generated. Ese fue el escritor que faltaba: con nuestro
+        // snippet la cuenta es el multiplicador, no los generados, y este
+        // `sel - 1` dejaba 2X pidiendo 1 -- o sea nada.
+        // Ver cuenta_es_multiplicador.
+        {
+            const LONG c = cuenta_es_multiplicador() ? sel : sel - 1;
+            *(LONG *)(p + 36) = c > kTope ? kTope : c;
+        }
     }
 }
 
@@ -1188,7 +1270,9 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
             g_cap_vp = viewport;
         }
     }
+    leer_max_generados();      // antes de la llamada
     const unsigned r = g_orig_setoptions(viewport, options_for_call(options));
+    leer_max_generados();      // y despues: si la llamada lo cambia, se ve
     if (p != nullptr && memcmp(p + 8, kDlssgOptionsGuid, 16) == 0) {
         g_api_aplicada = *(LONG *)(p + 36);
         set_count_now(g_api_aplicada);
@@ -2693,7 +2777,7 @@ static void set_count_now(LONG n) {
         // is n + 1.
         if (g_wic_n > 0) {
             if (n < 0) n = 0;
-            if (n > 5) n = 5;
+            { const LONG t6 = (g_seis || cuenta_es_multiplicador()) ? 6 : 5; if (n > t6) n = t6; }
             // Solo si el parche esta PUESTO. Con el parche sacado esa
             // direccion ya no es un inmediato: es el byte 0x42 de
             // mov eax,[rdx+4], y escribirle corrompe la instruccion del plugin.
@@ -2722,7 +2806,7 @@ static void set_count_now(LONG n) {
     }
     if (g_imm_n == 0) return;
     if (n < 0) n = 0;                    // zero is legal: the loop is skipped
-    if (n > 5) n = 5;                    // the plugin's own ceiling
+    { const LONG t6 = (g_seis || cuenta_es_multiplicador()) ? 6 : 5; if (n > t6) n = t6; }                    // the plugin's own ceiling
     // The guard first, so a frame can never see a raised bound with the old
     // gate still shut, or the reverse.
     sitio_write(g_imm2_sitios, g_imm2_n, (unsigned char)loop_bound_for(n));
@@ -2956,6 +3040,10 @@ static void note_rendered_frame(void) {
                 const LONG p4168 = sonda_4168();
                 log_num("  [global+0x4168] ", (unsigned)p4168);
                 log_num("  techo declarado a la API ", (unsigned)g_api_aplicada);
+                // Las tres variables juntas, para no descartar de a una.
+                log_num("  g_force_sel ", (unsigned)g_force_sel);
+                log_num("  g_force_generated ", (unsigned)g_force_generated);
+                log_num("  cuenta_es_multiplicador ", (unsigned)(cuenta_es_multiplicador() ? 1 : 0));
                 log_num("  byte vivo (la cadencia) ", (unsigned)g_count_live);
             }
                 // Las dos bases, lado a lado, una vez por ventana. La de
@@ -4520,7 +4608,10 @@ static void fractional_tick(void) {
     // to what the plugin had actually applied so the two could never be out of
     // step. All three end in 0xC0000005. The count is fixed for the life of the
     // run at the ceiling of the ratio.
-    g_force_generated = ceil_n < 1 ? 1 : (ceil_n > 5 ? 5 : ceil_n);
+    {
+        const LONG t = (g_seis || cuenta_es_multiplicador()) ? 6 : 5;
+        g_force_generated = ceil_n < 1 ? 1 : (ceil_n > t ? t : ceil_n);
+    }
 
     // Reported rarely: this runs on the render thread and log_line opens the
     // file per line.
@@ -4686,6 +4777,21 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
         ++g_token_calls;
         if (same) return r;
         ++g_frames_gated;
+    }
+    // La cuenta del modo fijo, corregida sin depender del orden de arranque.
+    //
+    // El mapeo modo->cuenta se aplica al restaurar los settings, a los 0 ms,
+    // cuando todavia no se sabe si cargamos nuestro snippet -- y con el nuestro
+    // la cuenta ES el multiplicador, no los generados. Recalcularlo en el
+    // bloque de flags no alcanzo (ordenes distintos en cada juego). Aca se
+    // compara cada frame y se corrige si hace falta: cuesta una comparacion y
+    // es cierto siempre.
+    if (cuenta_es_multiplicador() && g_force_sel >= 2 && g_force_sel <= kSelMaxFixed &&
+        g_force_generated != g_force_sel) {
+        log_num("cuenta: el modo fijo pedia ", (unsigned)g_force_generated);
+        log_num("  con nuestro snippet corresponde ", (unsigned)g_force_sel);
+        g_force_generated = g_force_sel;
+        g_opt_pending = 1;
     }
     // Una vez por frame: el plugin lo puede recalcular al cambiar de modo.
     leer_max_generados();
@@ -4903,7 +5009,18 @@ static void settings_load(void) {
         if (is_mode) {
             if (v >= 0 && v < kPanRows) {
                 g_force_sel = v;
-                g_force_generated = (v >= 2 && v <= kSelMaxFixed) ? v - 1 : 0;
+                // La cuenta ES el multiplicador, no los generados.
+                //
+                // Medido en Halo: cuenta 3 entrega 3.00x y cuenta 5 entrega
+                // 5.0x. Con el `- 1`, el modo 6 mandaba 5 y entregaba 5X, y el
+                // modo 4 mandaba 3 y entregaba 3.11x -- que anoche atribui a un
+                // tope del snippet y era esto.
+                //
+                // Detras de mfg-seis.txt hasta medirlo: si la relacion no fuera
+                // esta, cambiarla desplazaria TODOS los modos y seria peor que
+                // el problema que arregla.
+                g_force_generated = (v >= 2 && v <= kSelMaxFixed)
+                                        ? (cuenta_es_multiplicador() ? v : v - 1) : 0;
                 // DYNAMIC has to start somewhere. Restored from disk it landed
                 // on zero generated frames, which asks the plugin to turn
                 // generation on and produce none -- so DLSS-G never started,
@@ -5167,6 +5284,245 @@ static int patch_preset_b(unsigned char *base) {
 // the immediate to 0 makes the comparison read "arch >= 0", true everywhere, so
 // whichever way the compiler phrased the predicate -- jl, setae, cmovl, all of
 // which appear across snippet builds -- the Blackwell branch is the one taken.
+// El techo de MFG, en su origen: la constante que el snippet le contesta a NGX.
+//
+// El plugin no inventa el maximo, se lo pregunta al snippet:
+//
+//   sl.dlss_g 0x57c97  lea   rdx, 'DLSSG.MultiFrameCountMax'
+//             0x57c9e  call  [GetParameterInt]
+//             0x57cca  mov   edx, 5
+//             0x57cd1  cmovb edx, ecx        ; [ctx+0x45e4] = min(NGX, 5)
+//
+// Y el snippet lo decide por arquitectura:
+//
+//   nvngx_dlssg 0x26572  mov   ebx, 1
+//               0x26577  mov   r8d, 3        ; <- ESTE
+//               0x2657d  cmp   edi, 0x1b0    ; 0x1b0 = Blackwell
+//               0x26583  cmovl r8d, ebx      ; arch < 0x1b0 -> 1
+//               0x26587  lea   rdx, 'DLSSG.MultiFrameCountMax'
+//               0x26595  call  [SetParameterInt]
+//
+// O sea `max = (arch >= 0x1B0) ? 3 : 1`. En Ada (0x190) de fabrica seria 1 --
+// el 2X nativo -- y llega a 3 porque patch_gates ya reescribe ese `cmp` a cero
+// y Ada toma el camino de Blackwell.
+//
+// **El 3 no es una capacidad medida de la GPU: es una constante por
+// arquitectura**, y ya la estamos moviendo de 1 a 3. Subirla a 5 es el unico
+// punto de la cadena que puede dar mas: forzar el campo del PLUGIN ya se probo
+// y NGX rechaza igual (hipotesis 9 en docs/objetivo-halo-6x.md), porque el que
+// valida despues es el snippet.
+//
+// No se sabe si el snippet aguanta 5. Puede que 3 refleje recursos que si
+// existen. Por eso va detras de mfg-mfcmax.txt hasta que este medido: si sale
+// mal, el dll que se envia no cambia.
+//
+// El patron evita el inmediato del `cmp`, que patch_gates ya puede haber puesto
+// en cero: se ancla en `mov r8d, 3` + `81 FF` (cmp edi, imm32, sea cual sea) +
+// `cmovl r8d, ebx`.
+static int g_mfcmax = 0;          // 0 = no tocar; si no, el valor a escribir
+
+// El tope que el snippet REPORTA, subido.
+//
+// Medido: con los dos cincos del plugin ya en 6, el campo seguia leyendo 5 y
+// los bytes parcheados leian 6 en memoria. O sea que el 5 lo pone NGX, y el
+// clamp min(NGX,6) lo deja pasar tal cual.
+//
+// El snippet lo decide por arquitectura, igual que la build de julio pero con
+// otro numero:
+//
+//   0x16872  cmp  ebp, 0x1b0     ; 81 FD B0 01 00 00
+//   0x16878  jl   ...            ; 0F 8C rel32   -> Ada: edi = 1
+//   0x1687e  mov  edi, 5         ; BF 05 00 00 00           <- ESTE
+//   0x1691f  mov  r8d, edi       ; -> DLSSG.MultiFrameCountMax
+//
+// patch_gates ya reescribe ese `cmp` a cero, y por eso Ada toma la rama de
+// Blackwell y llega a 5. Subir el inmediato a 6 sube el techo reportado.
+//
+// El inmediato del `cmp` puede estar ya en cero cuando esto corre, asi que el
+// patron no se ancla en 0x1b0: `81 FD` + imm32 + `0F 8C` + rel32 + `BF 05...`.
+static int patch_snippet_max(unsigned char *base, int valor) {
+    if (valor < 2 || valor > 8) return 0;
+    auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    auto *sec = IMAGE_FIRST_SECTION(nt);
+    unsigned char *text = nullptr;
+    size_t len = 0;
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        const char *n = reinterpret_cast<const char *>(sec[i].Name);
+        if (n[0] == '.' && n[1] == 't' && n[2] == 'e' && n[3] == 'x' && n[4] == 't') {
+            text = base + sec[i].VirtualAddress;
+            len = sec[i].Misc.VirtualSize;
+            break;
+        }
+    }
+    if (text == nullptr) return 0;
+    int hits = 0;
+    for (size_t i = 0; i + 17 <= len; ++i) {
+        if (text[i] != 0x81 || text[i+1] != 0xFD) continue;      // cmp ebp, imm32
+        if (text[i+6] != 0x0F || text[i+7] != 0x8C) continue;    // jl rel32
+        if (text[i+12] != 0xBF || text[i+13] != 5 ||
+            text[i+14] || text[i+15] || text[i+16]) continue;    // mov edi, 5
+        DWORD old = 0;
+        if (!VirtualProtect(text + i + 13, 1, PAGE_EXECUTE_READWRITE, &old)) continue;
+        text[i + 13] = (unsigned char)valor;
+        VirtualProtect(text + i + 13, 1, old, &old);
+        ++hits;
+    }
+    // El TERCER techo, y el que realmente rechazaba el 6.
+    //
+    // Los dos de arriba (el que reporta el snippet y los del plugin) se
+    // subieron y 6X seguia sin generar: el runtime lo dijo 4254 veces,
+    //
+    //   [EndpointCoreInputs::ComputeAndValidateTimeFactor:416]
+    //   Error: input MultiFrameCount 6 is greater than the maximum
+    //   supported count (5)
+    //
+    // El 5 de ese mensaje es %d, o sea una variable, y sale de un inmediato en
+    // la funcion que valida los factores de tiempo:
+    //
+    //   0x618fa  mov  esi, 5          ; BE 05 00 00 00
+    //   0x619d7  mov  r8d, [rbx+0x4f8] ; lo pedido
+    //   0x619de  cmp  r8d, esi
+    //   0x619e1  jbe  ok
+    //
+    // `BE 05 00 00 00` aparece UNA sola vez en todo .text, asi que el patron no
+    // necesita anclas alrededor.
+    //
+    // Ojo: este no declara una capacidad, calcula donde cae cada sub-frame en
+    // el tiempo. Subirlo puede dar interpolacion mal ubicada en vez de un
+    // rechazo limpio. Se mide mirando la imagen, no solo el contador.
+    for (size_t i = 0; i + 5 <= len; ++i) {
+        if (text[i] != 0xBE || text[i+1] != 5 ||
+            text[i+2] || text[i+3] || text[i+4]) continue;
+        DWORD old = 0;
+        if (!VirtualProtect(text + i + 1, 1, PAGE_EXECUTE_READWRITE, &old)) continue;
+        text[i + 1] = (unsigned char)valor;
+        VirtualProtect(text + i + 1, 1, old, &old);
+        ++hits;
+        break;                      // es unico; no seguir barriendo
+    }
+    return hits;
+}
+
+static int patch_multiframe_max(unsigned char *base) {
+    if (g_mfcmax < 2 || g_mfcmax > 8) return 0;
+    auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    auto *sec = IMAGE_FIRST_SECTION(nt);
+    unsigned char *text = nullptr;
+    size_t len = 0;
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        const char *n = reinterpret_cast<const char *>(sec[i].Name);
+        if (n[0] == '.' && n[1] == 't' && n[2] == 'e' && n[3] == 'x' && n[4] == 't') {
+            text = base + sec[i].VirtualAddress;
+            len = sec[i].Misc.VirtualSize;
+            break;
+        }
+    }
+    if (text == nullptr) return 0;
+    int hits = 0;
+    for (size_t i = 0; i + 16 <= len; ++i) {
+        if (text[i] != 0x41 || text[i+1] != 0xB8) continue;        // mov r8d, imm32
+        if (text[i+2] != 3 || text[i+3] || text[i+4] || text[i+5]) continue;
+        if (text[i+6] != 0x81 || text[i+7] != 0xFF) continue;      // cmp edi, imm32
+        if (text[i+12] != 0x44 || text[i+13] != 0x0F ||
+            text[i+14] != 0x4C || text[i+15] != 0xC3) continue;    // cmovl r8d, ebx
+        DWORD old = 0;
+        if (!VirtualProtect(text + i + 2, 1, PAGE_EXECUTE_READWRITE, &old)) continue;
+        text[i + 2] = (unsigned char)g_mfcmax;
+        VirtualProtect(text + i + 2, 1, old, &old);
+        ++hits;
+    }
+    return hits;
+}
+
+// Los dos cincos del plugin, que son lo unico que impide 6X.
+//
+// El array de sub-frames tiene SEIS ranuras -- una por frame real y cinco
+// generados -- asi que 6X es el maximo estructural. Lo que topa antes son dos
+// inmediatos en sl.dlss_g:
+//
+//   0x4fccd  mov   dword ptr [rdi+0x45e4], 5   ; el default del constructor
+//   0x57cca  mov   edx, 5                      ; y el clamp
+//   0x57cd1  cmovb edx, ecx                    ; [ctx+0x45e4] = min(NGX, 5)
+//
+// El 5 que se lee en runtime es ESE default, no una respuesta de NGX. Nuestro
+// snippet solo acepta 1..4 para DLSSG.MultiFrameCountMax y fuera de ese rango
+// no lo setea:
+//
+//   nvngx_dlssg 0x168e7  lea eax, [rbx-1]
+//               0x168ea  cmp eax, 3
+//               0x168ed  ja  ...               ; no lo setea
+//
+// Y aun sin que NGX lo fije, la evaluacion a 5 sub-frames corre sin un solo
+// 0xbad00005. O sea que el maximo reportado es consultivo, no un limite duro:
+// lo que manda es lo que el plugin se permite pedir.
+//
+// Se cambian los dos a la vez. Uno solo no alcanza: subir el clamp sin el
+// default deja el default gobernando cuando NGX no contesta, que es justo el
+// caso de esta build.
+//
+// Detras de mfg-seis.txt hasta que este medido. El intento anterior de subir un
+// tope termino en 4346 fallos NGX y pantalla negra -- ese forzaba 5 sobre un
+// binario que soportaba 3; este fuerza 6 sobre uno que ya entrega 5 limpio y
+// con 6 ranuras reales detras. Es mejor apuesta, no una certeza.
+// g_seis se declara arriba, junto a g_seis_sitios.
+
+static int patch_tope_seis(unsigned char *base) {
+    if (!g_seis) return 0;
+    auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    auto *sec = IMAGE_FIRST_SECTION(nt);
+    unsigned char *text = nullptr;
+    size_t len = 0;
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        const char *n = reinterpret_cast<const char *>(sec[i].Name);
+        if (n[0] == '.' && n[1] == 't' && n[2] == 'e' && n[3] == 'x' && n[4] == 't') {
+            text = base + sec[i].VirtualAddress;
+            len = sec[i].Misc.VirtualSize;
+            break;
+        }
+    }
+    if (text == nullptr) return 0;
+    int hits = 0;
+    for (size_t i = 0; i + 10 <= len; ++i) {
+        // 1) el default: C7 87 E4 45 00 00 05 00 00 00
+        //    mov dword ptr [rdi+0x45e4], 5
+        if (text[i] == 0xC7 && (text[i+1] & 0xF8) == 0x80 &&
+            text[i+2] == 0xE4 && text[i+3] == 0x45 && !text[i+4] && !text[i+5] &&
+            text[i+6] == 5 && !text[i+7] && !text[i+8] && !text[i+9]) {
+            DWORD old = 0;
+            if (VirtualProtect(text + i + 6, 1, PAGE_EXECUTE_READWRITE, &old)) {
+                text[i + 6] = 6;
+                VirtualProtect(text + i + 6, 1, old, &old);
+                if (g_seis_n < 4) g_seis_sitios[g_seis_n++] = text + i + 6;
+                ++hits;
+            }
+            continue;
+        }
+        // 2) el clamp: BA 05 00 00 00 / 3B CA / 0F 42 D1
+        //    mov edx, 5 ; cmp ecx, edx ; cmovb edx, ecx
+        if (text[i] == 0xBA && text[i+1] == 5 && !text[i+2] && !text[i+3] && !text[i+4] &&
+            text[i+5] == 0x3B && text[i+6] == 0xCA &&
+            text[i+7] == 0x0F && text[i+8] == 0x42 && text[i+9] == 0xD1) {
+            DWORD old = 0;
+            if (VirtualProtect(text + i + 1, 1, PAGE_EXECUTE_READWRITE, &old)) {
+                text[i + 1] = 6;
+                VirtualProtect(text + i + 1, 1, old, &old);
+                if (g_seis_n < 4) g_seis_sitios[g_seis_n++] = text + i + 1;
+                ++hits;
+            }
+        }
+    }
+    return hits;
+}
+
 static int patch_gates(unsigned char *base) {
     auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
@@ -6266,7 +6622,11 @@ static DWORD WINAPI recorder(LPVOID) {
                             dragging = true;
                         } else if (g_ov_hot >= 0 && g_ov_hot < kPanRows && row_ok) {
                             g_force_sel = g_ov_hot;
-                            g_force_generated = g_ov_hot >= 2 ? g_ov_hot - 1 : 0;
+                            // Con nuestro snippet la cuenta ES el
+                            // multiplicador. Ver cuenta_es_multiplicador.
+                            g_force_generated = g_ov_hot >= 2
+                                ? (cuenta_es_multiplicador() ? g_ov_hot : g_ov_hot - 1)
+                                : 0;
                             arm_frametoken_hook();
                             g_opt_pending = 1;
                             g_override_said = false;
@@ -7405,6 +7765,11 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         if (g_twocopies) g_twocopies_pending = 1;
         {
             g_dlssg_base = reinterpret_cast<const unsigned char *>(d->DllBase);
+            if (g_seis) {
+                const int t6 = patch_tope_seis(reinterpret_cast<unsigned char *>(d->DllBase));
+                log_num("  tope del plugin subido a 6, sitios: ", (unsigned)t6);
+                if (t6 < 2) log_line("  ! faltan sitios: uno solo no alcanza");
+            }
             const int sc = patch_subframe_count(reinterpret_cast<unsigned char *>(d->DllBase));
             log_num("  sub-frame count made writable, sites: ", (unsigned)sc);
         }
@@ -7495,6 +7860,15 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
     const int n = patch_gates(reinterpret_cast<unsigned char *>(d->DllBase));
     if (n > 0) ++g_gates;
     log_num("  gates rewritten: ", (unsigned)n);
+    if (g_seis) {
+        const int sm = patch_snippet_max(reinterpret_cast<unsigned char *>(d->DllBase), 6);
+        log_num("  tope del snippet subido a 6, sitios: ", (unsigned)sm);
+    }
+    if (g_mfcmax >= 2) {
+        const int mm = patch_multiframe_max(reinterpret_cast<unsigned char *>(d->DllBase));
+        log_num("  MultiFrameCountMax forzado, sitios: ", (unsigned)mm);
+        log_num("    valor ", (unsigned)g_mfcmax);
+    }
     if (g_preset_b) {
         const int pb = patch_preset_b(reinterpret_cast<unsigned char *>(d->DllBase));
         log_num("  interpolation preset B (UIR) forced, sites: ", (unsigned)pb);
@@ -7881,6 +8255,52 @@ static bool buscar_en_cache(const wchar_t *modulo, unsigned menor, wchar_t *out)
 // Nunca se escribe al lado del juego.
 static wchar_t g_set_inter[MAX_PATH] = {0};
 
+// El snippet de NGX, desde NUESTRA carpeta.
+//
+// Hasta ahora unificabamos una sola mitad. Los nueve `sl.*` se sustituyen y el
+// interposer sale de LOCALAPPDATA\mfg-unlock\sdk\2.<v>, pero `nvngx_dlssg`
+// -- el snippet que hace el trabajo -- lo elegia NGX, y cada juego trae el
+// suyo. Estabamos parados sobre una base distinta en cada juego.
+//
+// Lo que eso costo, medido:
+//
+//   snippet                 tamano     version      tope
+//   Halo (carpeta del juego) 7597104   --           max = 3
+//   Cyberpunk                7607336   --           max = 3
+//   GTA V                    7453808   --           sin tope
+//   banco                    7519856   310.7.129    sin tope
+//
+// La build de julio clava el maximo por arquitectura:
+//
+//   nvngx_dlssg 0x26577  mov   r8d, 3
+//               0x2657d  cmp   edi, 0x1b0        ; Blackwell
+//               0x26583  cmovl r8d, ebx          ; Ada -> 1
+//               0x26587  lea   rdx, 'DLSSG.MultiFrameCountMax'
+//
+// Por eso Halo topaba en 3.00x y el banco entregaba 5.00x en la MISMA GPU. No
+// era un limite del hardware: era que juego decidia con que binario corriamos.
+//
+// Subir esa constante a mano ya se probo: la cuenta sube a 5.13x pero NGX falla
+// 4346 veces con 0xbad00005 y la imagen parpadea en negro. La build de julio no
+// puede hacerlo aunque se le diga que si.
+//
+// Asi que se hace lo mismo que con el interposer: una copia nuestra, en una
+// carpeta nuestra, y todos los juegos cargan esa. Si el archivo no esta, no se
+// toca nada y el juego usa el suyo -- o sea que un usuario sin la carpeta no
+// nota ninguna diferencia.
+static wchar_t g_snippet_base[MAX_PATH] = {0};
+
+static bool buscar_snippet(wchar_t *out) {
+    wchar_t base[MAX_PATH];
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH) == 0) return false;
+    int k = 0;
+    for (; base[k] != 0 && k < MAX_PATH - 64; ++k) out[k] = base[k];
+    const wchar_t *cola = L"\\mfg-unlock\\snippet\\nvngx_dlssg.dll";
+    for (int i = 0; cola[i] != 0; ++i) out[k++] = cola[i];
+    out[k] = 0;
+    return GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES;
+}
+
 static bool version_es(const wchar_t *ruta, unsigned v) {
     unsigned may = 0, men = 0;
     version_soportada(ruta, &may, &men);
@@ -8122,6 +8542,12 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     // vive aparte porque no sale de la cache.
     const bool es_interposer = igual_sin_caso(g_ruta_pedida + corte, L"sl.interposer.dll");
     if (es_interposer) idx = -2;
+    // -3 marca al snippet de NGX. Sale de nuestra carpeta, igual que el
+    // interposer. Ver buscar_snippet.
+    if (g_snippet_on && igual_sin_caso(g_ruta_pedida + corte, L"nvngx_dlssg.dll")) {
+        if (g_snippet_base[0] == 0) buscar_snippet(g_snippet_base);
+        if (g_snippet_base[0] != 0) idx = -3;
+    }
     // Se normaliza antes de comparar: minusculas y todas las barras iguales.
     //
     // La version anterior no podia matchear NUNCA, por dos motivos a la vez, y
@@ -8194,6 +8620,28 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
         }
     }
     if (idx == -1) return g_orig_ldrload(ruta, carac, nombre, base);
+
+    // El snippet va por su propio camino: no depende del veredicto del set, que
+    // es sobre los sl.* del juego. Y no hace falta consentimiento porque no se
+    // reemplaza nada del juego -- se carga un archivo nuestro en vez del suyo,
+    // igual que el interposer.
+    if (idx == -3) {
+        log_ruta("snippet: pedido  ", g_ruta_pedida);
+        log_ruta("  se carga el nuestro: ", g_snippet_base);
+        // Desde aca, la cuenta es el multiplicador. Ver cuenta_es_multiplicador.
+        g_snippet_cargado = 1;
+        int m = 0; while (g_snippet_base[m] != 0) ++m;
+        g_us_alt.Buffer = g_snippet_base;
+        g_us_alt.Length = (USHORT)(m * sizeof(wchar_t));
+        g_us_alt.MaximumLength = (USHORT)((m + 1) * sizeof(wchar_t));
+        const NTSTATUS st3 = g_orig_ldrload(nullptr, carac, &g_us_alt, base);
+        if (st3 < 0) {
+            log_num("  no cargo, status ", (unsigned)st3);
+            log_line("  se vuelve al del juego");
+            return g_orig_ldrload(ruta, carac, nombre, base);
+        }
+        return st3;
+    }
 
     leer_veredicto_previo();
     if (g_veredicto_previo == 2 && g_consentimiento != 1) {
@@ -8662,6 +9110,28 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 }
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
+            g_seis = flag_file(L"mfg-seis.txt");
+            if (g_seis) {
+                log_line("tope: se intentara 6X (mfg-seis.txt)");
+                // El archivo de settings se lee ANTES que este flag, asi que un
+                // modo fijo restaurado de disco ya aplico el mapeo viejo (v-1) y
+                // la cuenta quedaba una abajo: con mode 6 se pedia 5 y se
+                // entregaba 5X. Se recalcula aca, que es cuando el flag existe.
+                if (g_force_sel >= 2 && g_force_sel <= kSelMaxFixed) {
+                    g_force_generated = g_force_sel;
+                    g_opt_pending = 1;
+                    log_num("  cuenta recalculada para el modo fijo ",
+                            (unsigned)g_force_generated);
+                }
+            }
+            g_snippet_on = flag_file(L"mfg-snippet.txt");
+            if (g_snippet_on)
+                log_line("snippet: se cargara el nuestro si esta (mfg-snippet.txt)");
+            // mfg-mfcmax.txt: sube la constante del snippet. Experimental.
+            if (flag_file(L"mfg-mfcmax.txt")) {
+                g_mfcmax = 5;
+                log_line("MultiFrameCountMax: se intentara subir a 5 (mfg-mfcmax.txt)");
+            }
             g_tope_fijo = flag_file(L"mfg-topefijo.txt");
             if (g_tope_fijo) log_line("tope fijo en 5 (mfg-topefijo.txt): es la LINEA BASE, crashea");
             g_permitir_x6 = flag_file(L"mfg-x6.txt");

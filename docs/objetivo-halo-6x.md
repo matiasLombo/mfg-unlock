@@ -322,6 +322,128 @@ despues de ver el resultado invalida la prueba. Por eso el criterio de esta
 corrida quedo escrito ANTES, y anclado a una medicion de la LINEA BASE, que no
 depende del cambio que se esta evaluando.
 
+## EL TECHO NO ES DE LA GPU -- 2026-09-10 09:45
+
+El banco, con la MISMA 4070 Ti, entrego **5.00x sostenido**:
+
+```
+max: numFramesToGenerateMax CAMBIO a 5
+multiplicador contado: mediana 5.00  p90 5.00  max 5.02 (n=27)
+NGX evaluate failed: 0
+```
+
+O sea que 5X funciona en este hardware. Lo que cambia es **que snippet
+`nvngx_dlssg` corre cada uno**:
+
+| | tamano | fecha | max | entrega |
+|---|---|---|---|---|
+| banco | 7 519 856 | 22-jun | **5** | **5.00x** |
+| Halo | 7 597 104 | 23-jul | **3** | 3.00x |
+
+Y en la build de julio el valor es una constante por arquitectura:
+
+```asm
+nvngx_dlssg 0x26572  mov   ebx, 1
+            0x26577  mov   r8d, 3          ; <- la constante
+            0x2657d  cmp   edi, 0x1b0      ; 0x1b0 = Blackwell
+            0x26583  cmovl r8d, ebx        ; arch < 0x1b0 -> 1
+            0x26587  lea   rdx, 'DLSSG.MultiFrameCountMax'
+            0x26595  call  [SetParameterInt]
+```
+
+La build de junio no tiene ese patron: calcula el valor de otra forma y llega a
+5. **NVIDIA bajo el techo entre junio y julio**, y lo dejo clavado por arquitectura.
+
+**Correccion a lo que afirme antes:** dije que 3.1x era el techo real de la GPU,
+apoyandome en que el 4X fijo de la linea base tambien topaba en 3.11. Eso era
+cierto para el snippet de Halo y FALSO como afirmacion sobre la GPU. El banco lo
+desmiente con 5.00x en el mismo equipo.
+
+### El parche
+
+`patch_multiframe_max` sube ese inmediato de 3 a 5, en el mismo modulo donde ya
+reescribimos los gates de arquitectura. Detras de `mfg-mfcmax.txt` hasta que
+este medido en Halo.
+
+No se puede validar en el banco: el banco ya corre el snippet de junio, que da 5
+sin parche. La prueba tiene que ser en Halo.
+
+## LO QUE REALMENTE LO ARREGLO, 2026-09-10
+
+**Cada juego corria sobre un `nvngx_dlssg` distinto.** Esa era la causa, y no
+aparecio en nueve hipotesis porque yo miraba el plugin y el bound, nunca que
+binario estaba abajo.
+
+| snippet | tamano | tope |
+|---|---|---|
+| Halo (carpeta del juego, jul) | 7 597 104 | **max = 3** |
+| Cyberpunk | 7 607 336 | **max = 3** |
+| GTA V | 7 453 808 | sin tope |
+| banco / SDK 2.12 | 7 519 856 | sin tope |
+
+Por eso "solo crasheaba en Halo": GTA V y el banco corrian builds sin el tope.
+Cyberpunk lo tiene y habria hecho lo mismo si se lo empujaba.
+
+### La solucion: el snippet desde NUESTRA carpeta
+
+Igual que el interposer, que ya salia de `LOCALAPPDATA\mfg-unlock\sdk\2.<v>`.
+Se redirige `nvngx_dlssg.dll` en `hk_ldrload` a
+`LOCALAPPDATA\mfg-unlock\snippet\nvngx_dlssg.dll`. Si el archivo no esta, no
+se toca nada y el juego usa el suyo.
+
+### Y la semantica cambia con el snippet
+
+Con el binario del juego, `numFramesToGenerate` cuenta los GENERADOS: cuenta 1
+da 2X. Con el nuestro **es el multiplicador**: cuenta 1 da 1X.
+
+Eso rompio 2X y costo seis intentos, porque la cuenta se escribe en SIETE
+lugares y el que mandaba era el ultimo que mire:
+
+```c
+} else if (sel >= 2) {                    // force_into, rama de modos fijos
+    { const LONG c = sel - 1; ... }       // no mira g_force_generated
+}
+```
+
+**Leccion de metodo:** `grep "p + 36"` al principio los mostraba todos en dos
+segundos. En vez de eso probe de a uno, con una corrida del usuario en el medio
+cada vez.
+
+### 6X: son TRES techos
+
+| donde | que era |
+|---|---|
+| snippet, `mov edi, 5` | lo que reporta como `MultiFrameCountMax` |
+| plugin, `mov [rdi+0x45e4],5` y `mov edx,5` | lo que se permite pedir |
+| snippet, `mov esi, 5` en `ComputeAndValidateTimeFactor` | **el que rechazaba** |
+
+El tercero lo dijo el runtime 4254 veces:
+
+```
+[EndpointCoreInputs::ComputeAndValidateTimeFactor:416]
+Error: input MultiFrameCount 6 is greater than the maximum supported count (5)
+```
+
+Con los tres en 6: **6.00 entregado, 0 fallos NGX, 0 excepciones, 0 dumps.**
+
+Pero comparado dentro de la MISMA sesion, 6X no se sostiene:
+
+| | cuenta 5 | cuenta 6 |
+|---|---|---|
+| multiplicador (mediana) | **5.0** | 1.0 |
+| tirones de pantalla (p90) | **2** | 8 |
+
+5X genera parejo; 6X entrega 6.0 cuando corre pero se apaga a ratos. Ninguno
+crashea, que era el problema original.
+
+### Lo que sigue: una base unica
+
+Los nueve `sl.*` salen todavia de la cache de NGX. El zip del SDK que el dll ya
+se baja trae TODO en `bin/x64/`: los sl.*, el interposer y el nvngx_dlssg
+(7 519 856, sin tope, con los dos patrones que parcheamos). Sacar todo de ahi da
+una base unica para todos los juegos y elimina tres dependencias externas: la
+cache de NVIDIA, lo que trae cada juego, y la copia manual.
+
 ## Método, para no repetir los errores de la noche
 
 - **Una prueba por hipótesis.** `--intentos 1` en el banco, siempre.
