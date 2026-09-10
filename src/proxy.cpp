@@ -4073,6 +4073,41 @@ static double g_frac_acc = 0.0;
 static double g_produced_avg = 0.0;
 
 static void fractional_tick(void) {
+    // Sin el parche del byte NO hay cadencia. Se sostiene un entero.
+    //
+    // La fraccion vive en el byte por frame o en alternar la cuenta de la API
+    // por bloques. Lo segundo necesita poder MOVER la cuenta, y cuando no hay
+    // parche manda el freno de force_into, que la recorta a la que pide el
+    // juego -- siempre la misma. O sea que la cadencia cambia un numero que
+    // despues se recorta al mismo valor: cero beneficio, y el costo entero.
+    //
+    // Y el costo es el congelamiento. Halo, seleccion 7, con el parche sin
+    // enganchar (una de las tres copias de sl.dlss_g da "sites: 0"): 22
+    // congelamientos, TODOS a cuatro o cinco presentaciones de un cambio de
+    // cuenta. Es la fila fatal de [[subframe-bound-semantics]] -- el byte por
+    // debajo de la reserva detiene la presentacion -- y el usuario no podia ni
+    // moverse por el menu. Solo en CUSTOM y DYNAMIC; los modos fijos, que no
+    // tocan el byte, andaban.
+    //
+    // Esto NO es degradar el modo. El multiplicador entregado es el mismo o
+    // mejor: el freno ya lo tenia clavado en un entero, y lo unico que se deja
+    // de hacer es pagar el cambio de cuenta que no lo movia.
+    if (!g_wic_ok) {
+        static bool dicho = false;
+        if (!dicho) {
+            dicho = true;
+            log_line("cadencia: sin parche del byte no hay fraccional; se sostiene un entero");
+        }
+        const LONG quiere = (LONG)((double)g_dyn_target / 100.0 + 0.999);
+        const LONG t = (g_seis || cuenta_es_multiplicador()) ? 6 : 5;
+        const LONG fijo = quiere < 2 ? 2 : (quiere > t ? t : quiere);
+        if (fijo != g_force_generated) {
+            g_force_generated = fijo;
+            g_opt_pending = 1;
+            log_num("cadencia: entero sostenido ", (unsigned)fijo);
+        }
+        return;
+    }
     static LONG was_sel = -1;
     if (g_force_sel != was_sel) {
         was_sel = g_force_sel;
