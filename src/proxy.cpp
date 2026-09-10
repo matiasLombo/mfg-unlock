@@ -6324,6 +6324,38 @@ static int __stdcall hk_present(void *queue, const void *info) {
 
 typedef HRESULT(STDMETHODCALLTYPE *PFN_DXGIPresent)(IDXGISwapChain *, UINT, UINT);
 static PFN_DXGIPresent g_orig_dxgi_present = nullptr;
+// UN original por VTABLE, no uno global.
+//
+// El codigo ya contemplaba que apareciera un segundo swapchain con otra vtable
+// -- lo dice y lo loguea -- pero guardaba un solo g_orig_dxgi_present, el de la
+// PRIMERA. Desde ahi, cada Present del swapchain nuevo llamaba a la
+// implementacion de la vtable vieja sobre un objeto que no es de esa clase.
+//
+// En Cyberpunk aparecen dos: la del descartable que crea nuestra propia
+// adopcion (D3D11) y la del swapchain real del juego (D3D12,
+// CreateSwapChainForHwnd con flags 2112). El resultado es 0xC00000FD --
+// desbordamiento de pila -- a los 6,3 s, justo despues del primer Present del
+// juego. Y no pasa con -benchmark, que es el dato que lo delato: ahi no hay
+// segundo swapchain con ventana.
+//
+// La regla ya estaba escrita en [[never-byte-detour-present]]: cambiar el slot
+// de la vtable, y llevar la guarda a TODOS los caminos que comparten su forma.
+// Estaba en uno y faltaba en el otro.
+static void **g_vt_tab[8] = { nullptr };
+static PFN_DXGIPresent g_orig_tab[8] = { nullptr };
+static int g_vt_n = 0;
+
+static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *, UINT, UINT);
+
+// El original que le corresponde a ESTE objeto, por su propia vtable.
+static PFN_DXGIPresent orig_para(void *sc) {
+    if (sc != nullptr) {
+        void **vt = *reinterpret_cast<void ***>(sc);
+        for (int i = 0; i < g_vt_n; ++i)
+            if (g_vt_tab[i] == vt) return g_orig_tab[i];
+    }
+    return g_orig_dxgi_present;   // reserva: el de siempre
+}
 
 // ---- pacing the frames ourselves, where nothing else will --------------
 //
@@ -6595,7 +6627,7 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     if (g_novsync) {
         static int tearing = 1;          // 1 = try, 0 = chain refused it
         if (tearing) {
-            const HRESULT hr = g_orig_dxgi_present(self, 0, flags | 0x00000200 /*ALLOW_TEARING*/);
+            const HRESULT hr = orig_para(self)(self, 0, flags | 0x00000200 /*ALLOW_TEARING*/);
             if (SUCCEEDED(hr)) return hr;
             tearing = 0;
             log_line("novsync: the swap chain refuses tearing; the refresh cap stays");
@@ -6611,7 +6643,7 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     {
         LARGE_INTEGER a, b;
         QueryPerformanceCounter(&a);
-        const HRESULT hr = g_orig_dxgi_present(self, interval, flags);
+        const HRESULT hr = orig_para(self)(self, interval, flags);
         QueryPerformanceCounter(&b);
         if (g_qpc_freq > 0)
             g_present_block_us += (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)g_qpc_freq;
@@ -6701,8 +6733,23 @@ static void hook_swapchain_present(void *sc) {
     // 1.10x would be indistinguishable from a correct answer.
     DWORD prot = 0;
     if (!VirtualProtect(&vt[8], sizeof(void *), PAGE_READWRITE, &prot)) return;
-    if (g_orig_dxgi_present == nullptr)
-        g_orig_dxgi_present = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
+    // Se anota el original DE ESTA vtable antes de pisarle el slot.
+    //
+    // Y nunca el nuestro: si vt[8] ya es hk_dxgi_present, guardarlo seria
+    // hacer que el hook se llame a si mismo -- la otra forma de llegar al
+    // mismo desbordamiento de pila.
+    if (vt[8] != reinterpret_cast<void *>(&hk_dxgi_present)) {
+        bool ya = false;
+        for (int i = 0; i < g_vt_n; ++i) if (g_vt_tab[i] == vt) ya = true;
+        if (!ya && g_vt_n < 8) {
+            g_vt_tab[g_vt_n] = vt;
+            g_orig_tab[g_vt_n] = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
+            ++g_vt_n;
+            log_num("recorder: vtable registrada, van ", (unsigned)g_vt_n);
+        }
+        if (g_orig_dxgi_present == nullptr)
+            g_orig_dxgi_present = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
+    }
     g_vt_enganchada = vt;
     g_swapchain = reinterpret_cast<IDXGISwapChain *>(sc);
     hook_frame_latency(sc);
