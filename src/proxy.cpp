@@ -9107,6 +9107,41 @@ static void leer_veredicto_previo(void) {
 static UNICODE_STRING g_us_alt;
 static LONG g_inter_pedidos = 0;
 
+// Cargar NOSOTROS el reemplazo y devolver el handle, en vez de reescribirle la
+// ruta al cargador.
+//
+// Es EL cambio de fondo. Hasta ahora se le cambiaba el UNICODE_STRING a
+// LdrLoadDll y se lo dejaba resolver: el cargador registra entonces el modulo
+// bajo OTRA ruta, asi que el pedido siguiente del nombre original no matchea
+// nada y mapea una SEGUNDA copia. De ahi salieron los dos defectos que rompieron
+// juegos enteros hoy:
+//
+//   - Cyberpunk: dos sl.interposer.dll mapeados, sin independent flip, cero
+//     ventanas de medicion
+//   - Halo: el sl.dlss_g 2.7 del propio juego entrando detras del nuestro, con
+//     'sites: 0', apagando el freno para toda la corrida
+//
+// Devolviendo un HMODULE ya cargado, el refcount y la identidad los lleva
+// Windows: pedir dos veces el mismo archivo devuelve el mismo modulo y no hay
+// segunda copia posible.
+//
+// La reentrada es obligatoria manejarla, no opcional: LoadLibraryW desde adentro
+// de nuestro propio hook de LdrLoadDll vuelve a entrar por aca. El loader lock
+// es del proceso y serializa esta funcion -- por eso g_ruta_pedida ya era global
+// -- asi que una bandera simple alcanza y es mas barata que preguntar quien
+// llamo. Sin ella, recursion infinita.
+static LONG g_ldr_reentra = 0;
+
+static NTSTATUS cargar_propio(const wchar_t *propio, PVOID *base) {
+    if (base == nullptr) return (NTSTATUS)0xC0000001L;
+    g_ldr_reentra = 1;
+    HMODULE h = LoadLibraryW(propio);
+    g_ldr_reentra = 0;
+    if (h == nullptr) return (NTSTATUS)0xC0000001L;
+    *base = (PVOID)h;
+    return (NTSTATUS)0L;
+}
+
 // El trabajo pesado NO se inline en el hook.
 //
 // hk_ldrload corre bajo el loader lock en CADA carga de modulo, en cualquier
@@ -9121,6 +9156,8 @@ static LONG g_inter_pedidos = 0;
 // bajo el loader lock no tienen defensa.
 static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombre,
                                  PVOID *base) {
+    // Nuestra propia carga pasa de largo. Ver cargar_propio.
+    if (g_ldr_reentra != 0) return g_orig_ldrload(ruta, carac, nombre, base);
     if (nombre == nullptr || nombre->Buffer == nullptr || nombre->Length == 0)
         return g_orig_ldrload(ruta, carac, nombre, base);
     const int n = (int)(nombre->Length / sizeof(wchar_t));
@@ -9252,11 +9289,7 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
         // La semantica NO se decide aca: la decide detectar_semantica mirando el
         // binario que quedo mapeado. Cargarlo desde nuestra carpeta y que sea de
         // una build u otra son cosas distintas.
-        int m = 0; while (g_snippet_base[m] != 0) ++m;
-        g_us_alt.Buffer = g_snippet_base;
-        g_us_alt.Length = (USHORT)(m * sizeof(wchar_t));
-        g_us_alt.MaximumLength = (USHORT)((m + 1) * sizeof(wchar_t));
-        const NTSTATUS st3 = g_orig_ldrload(nullptr, carac, &g_us_alt, base);
+        const NTSTATUS st3 = cargar_propio(g_snippet_base, base);
         if (st3 < 0) {
             log_num("  no cargo, status ", (unsigned)st3);
             log_line("  se vuelve al del juego");
@@ -9345,12 +9378,8 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
         if (ruta_en_nuestro_sdk(nom, 12, propio)) {
             log_ruta("base: pedido  ", g_ruta_pedida);
             log_ruta("  se carga el nuestro: ", propio);
-            int m = 0; while (propio[m] != 0) ++m;
-            g_us_alt.Buffer = propio;
-            g_us_alt.Length = (USHORT)(m * sizeof(wchar_t));
-            g_us_alt.MaximumLength = (USHORT)((m + 1) * sizeof(wchar_t));
             g_ya_sustituimos = true;
-            const NTSTATUS stb = g_orig_ldrload(nullptr, carac, &g_us_alt, base);
+            const NTSTATUS stb = cargar_propio(propio, base);
             if (stb >= 0) return stb;
             log_num("  no cargo, status ", (unsigned)stb);
             log_line("  se vuelve al del juego");
@@ -9400,13 +9429,8 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     else           log_num("set: se sustituye un modulo, pedido 2.", (unsigned long long)men);
     log_ruta("  pedido:  ", g_ruta_pedida);
     log_ruta("  cargado: ", alt);
-    int m = 0; while (alt[m] != 0) ++m;
-    g_us_alt.Buffer = const_cast<wchar_t *>(alt);
-    g_us_alt.Length = (USHORT)(m * sizeof(wchar_t));
-    g_us_alt.MaximumLength = (USHORT)((m + 1) * sizeof(wchar_t));
-    // Ruta absoluta: el search path del llamador ya no aplica.
     g_ya_sustituimos = true;
-    const NTSTATUS st = g_orig_ldrload(nullptr, carac, &g_us_alt, base);
+    const NTSTATUS st = cargar_propio(alt, base);
     if (st < 0) {
         log_num("  no cargo, status ", (unsigned)st);
         log_line("  se vuelve al del juego");
