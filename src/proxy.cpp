@@ -572,6 +572,16 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
             // oscilando 1 -> 5 -> 1 y el multiplicador topado en 2.8. Con el
             // techo declarado quedo estable en 3.00.
             {
+                // El techo del MODO, no el del ciclo.
+                //
+                // g_ciclo_techo sube y baja con el ratio, asi que la reserva se
+                // mueve con el. Para fraccional y DYNAMIC el techo es 5 -- la
+                // cuenta mas alta que pueden llegar a pedir -- y declarandolo
+                // una vez la reserva queda fija y ninguna llamada la achica.
+                // El techo del ciclo, no un 5 fijo: declarar 5 siempre dejo
+                // la reserva quieta pero clavo el multiplicador en 6.00 --
+                // objetivo 150, entregadas 174. El desfasaje lo resuelve el
+                // recorte del byte contra la reserva viva, no fijar la reserva.
                 const LONG techo = g_ciclo_techo;
                 if (techo > escribir && techo <= 5) escribir = techo;
             }
@@ -2329,8 +2339,17 @@ static void set_count_now(LONG n) {
             // direccion ya no es un inmediato: es el byte 0x42 de
             // mov eax,[rdx+4], y escribirle corrompe la instruccion del plugin.
             // Medido: con el parche sacado por modo, cero ventanas de medicion.
-            if (g_wic_puesto != 0)
-                sitio_write(g_wic_sitios, g_wic_n, (unsigned char)n);
+            if (g_wic_puesto != 0) {
+                // Ultima linea de defensa: el byte nunca por encima de la
+                // reserva viva. Sin esperas ni frenos -- si la reserva es 3, se
+                // escribe 3. Se pierde multiplicador en ese frame; no se pierde
+                // el juego. Todo crash de esta noche fue el byte pidiendo mas
+                // ranuras de las reservadas.
+                LONG w = n;
+                const LONG ap = g_api_aplicada;
+                if (ap >= 1 && w > ap) w = ap;
+                sitio_write(g_wic_sitios, g_wic_n, (unsigned char)w);
+            }
             // The pacer waits on its own copy. Without this it keeps waiting
             // for the ceiling the API was told, which is the whole throughput
             // loss above 2.0x.
