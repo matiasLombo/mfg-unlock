@@ -1086,8 +1086,22 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
             // la cuenta por frame, asi que pedir por la API mas de lo que el
             // juego pidio no compra nada y arriesga la reserva. Se espeja.
             if (!g_wic_ok) {
-                const LONG suyo = g_last_seen_generated;
-                if (suyo < 1 || suyo > 5) {
+                // La cuenta del juego esta en la semantica del snippet CON EL QUE
+                // SE COMPILO, que no es el que le pusimos.
+                //
+                // Halo pide `count 1` -- las 66 veces de la sesion. Contra su
+                // propio nvngx_dlssg de julio eso es UN FRAME GENERADO, o sea
+                // 2X. Con nuestro snippet la cuenta es el multiplicador, asi que
+                // ese mismo 1 se lee como 1X: le entregamos la mitad de lo que
+                // pidio, y en su propia semantica.
+                //
+                // Sustituir la base cambia el significado del numero que el
+                // juego escribe. Traducirlo es parte de sustituirla; no hacerlo
+                // es dejar al juego hablando un idioma y al plugin leyendo otro.
+                const LONG suyo = cuenta_es_multiplicador()
+                                      ? g_last_seen_generated + 1
+                                      : g_last_seen_generated;
+                if (suyo < 1 || suyo > 6) {
                     // Nunca vimos que cuenta pide el juego -- en Halo no hay una
                     // sola linea de "the game itself last asked for" en toda la
                     // corrida. Sin ese dato no hay a que espejarse, asi que no se
@@ -1152,8 +1166,19 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
                 // 2 es el piso de cualquier modo que genere. La linea queda
                 // igual: si esto aparece seguido, el culpable es otro y hay que
                 // ir a buscarlo.
+                //
+                // NO corrige cuando manda el freno. Sin el parche de la cuenta
+                // no podemos repartirla por frame, asi que el codigo espeja a
+                // proposito lo que pide el juego -- y forzar un valor de reserva
+                // ahi es, palabras del comentario de ese freno, exactamente lo
+                // que hizo crashear a Halo.
+                //
+                // Lo aprendi rompiendolo: la version anterior de esta linea
+                // sobreescribia el freno a 2 y Halo volvio con 24
+                // congelamientos, a cuatro y cinco presentaciones de un cambio
+                // de cuenta y con el byte vivo en 0. Ahi solo se deja constancia.
                 if (cuenta_es_multiplicador() && queda < 2 && g_force_sel >= 2) {
-                    escribir = 2;
+                    if (g_wic_ok) escribir = 2;
                     static LONG dicho = -1;
                     if (dicho != queda) {
                         dicho = queda;
@@ -1163,7 +1188,9 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
                         log_num("  g_force_generated ", (unsigned)g_force_generated);
                         log_num("  g_dyn_target x100 ", (unsigned)g_dyn_target);
                         log_num("  kTope ", (unsigned)kTope);
-                        log_line("  se escribe 2, que es el piso de un modo que genera");
+                        log_line(g_wic_ok
+                                     ? "  se escribe 2, que es el piso de un modo que genera"
+                                     : "  manda el freno (sin parche de la cuenta): NO se corrige");
                     }
                 }
                 *(LONG *)(p + 36) = escribir > kTope ? kTope : escribir;
