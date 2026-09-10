@@ -4068,6 +4068,30 @@ static void fractional_tick(void) {
     // cuenta_es_multiplicador.
     const double kBase = cuenta_es_multiplicador() ? 0.0 : 1.0;
     double per_frame = (double)g_dyn_target / 100.0 - kBase;
+    // DYNAMIC sin ratio decidido todavia: piso 2.0, no 0.
+    //
+    // El controlador necesita una base MEDIDA para decidir el ratio, y sin
+    // generacion no hay base que medir. Con la semantica vieja la semilla de la
+    // cuenta era 1, que eran 1 frame generado = 2X, y con eso arrancaba. Con la
+    // nueva, 1 es 1X: no genera, no hay base, el controlador no decide nunca y
+    // g_dyn_target se queda en 0. Se espera a si mismo.
+    //
+    // Medido en Halo: seleccion 8, "base sin asentar, no se decide. muestras 1"
+    // y la cuenta a la API clavada en 1 durante toda la sesion -- ratio 1.00 en
+    // cada ventana, mientras 4X y 6X entregaban 4.00 y 6.02 en el mismo rato.
+    //
+    // 2.0 es el mismo piso que el controlador aplica despues a su propia salida,
+    // asi que no inventa un valor: arranca donde el iba a terminar de todas
+    // formas, y desde ahi mide.
+    if (per_frame < 2.0 && g_dyn_target < 100 &&
+        (g_force_sel == kSelDynamic || g_force_sel == kSelDynFuture)) {
+        static bool dicho = false;
+        if (!dicho) {
+            dicho = true;
+            log_line("dynamic: sin ratio decidido, se arranca en 2.0 para poder medir la base");
+        }
+        per_frame = 2.0 - kBase;
+    }
     if (per_frame < 0.0) per_frame = 0.0;
     if (per_frame > 6.0) per_frame = 6.0;
 
