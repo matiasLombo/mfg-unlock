@@ -412,6 +412,42 @@ static unsigned char g_vp_copy[64];
 static volatile LONG g_opt_have = 0;
 static volatile LONG g_opt_thread = 0;
 static volatile LONG g_opt_pending = 0;
+// La cuenta que el plugin tiene REALMENTE aplicada, no la que queremos.
+//
+// bound y reserva tienen que moverse juntos: bound = API + 1 anda, bound mayor
+// escribe fuera de la reserva y crashea con 0xC0000005, bound menor detiene la
+// presentacion. No hay margen.
+//
+// El panel cambiaba g_force_generated y dejaba el envio a la API pendiente
+// mientras fractional_tick escribia el byte en el frame siguiente: subir de
+// modo ponia el bound en 5 con reserva para 4. Halo cambio a 6X a los 59 s y
+// murio a los 68 -- la escritura fuera de rango corrompe y el crash llega
+// despues. No aparecio antes porque el banco y Cyberpunk fijan el multiplicador
+// al arrancar y no lo cambian en caliente.
+// 6X queda fuera hasta que el bound deje de necesitar +1.
+//
+// El byte del bound lleva cuenta+1, porque nuestro guard de entrada consume una
+// iteracion (sin eso cada ratio salia un frame corto y el pacing se derrumbaba).
+// El array de sub-frames tiene 6 ranuras inline -- 5 generados y el real -- y
+// los campos vivos del contexto empiezan justo donde termina.
+//
+// A 5X el bound es 5: un desborde de una posicion cae DENTRO del array y no
+// hace nada. A 6X el bound es 6 y cae sobre los campos vivos. Por eso es 6X en
+// particular el que se rompe, y no los de abajo: no tiene holgura.
+//
+// Medido jugando Halo: 2X y 4X andan y sostienen la sesion; 6X mata el juego,
+// tres veces, sin evento WER ni dump -- corrompe y muere despues.
+//
+// Se limita en las DOS mitades a la vez, la cuenta de la API y el byte, porque
+// frenar una sola ya salio mal antes: "freno: la cuenta se limita a 1" con el
+// byte siguiendo al 3, y crash a los 36 s.
+//
+// mfg-x6.txt lo vuelve a habilitar para investigarlo. El arreglo de fondo es
+// encontrar por que el bound necesita el +1 y sacarlo.
+static bool g_permitir_x6 = false;
+static LONG tope_cuenta(void) { return g_permitir_x6 ? 5 : 4; }
+static volatile LONG g_api_aplicada = -1;
+static void set_count_now(LONG n);   // definida mas abajo
 // Set when the game itself configures DLSS-G, cleared when the next frame
 // begins. While it is set, our replay stays out of the way.
 //
@@ -451,6 +487,7 @@ static int g_dyn_said = 0;
 static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     *savedMode = *(LONG *)(p + 32);
     *savedCount = *(LONG *)(p + 36);
+    const LONG kTope = tope_cuenta();
     g_target_written = false;
     const LONG sel = g_force_sel;
     if (sel == 1) {
@@ -568,7 +605,7 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
                     escribir = tope;
                 }
             }
-            *(LONG *)(p + 36) = escribir;
+            *(LONG *)(p + 36) = escribir > kTope ? kTope : escribir;
         }
     } else if (false) {
         // eDynamic, with our own frame-rate target.
@@ -593,7 +630,7 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         // a version 5 copy in options_for_call.
     } else if (sel >= 2) {
         *(LONG *)(p + 32) = 1;                 // DLSSGMode::eOn
-        *(LONG *)(p + 36) = sel - 1;           // 2x -> 1 generated frame
+        { const LONG c = sel - 1; *(LONG *)(p + 36) = c > kTope ? kTope : c; }   // 2x -> 1
     }
 }
 
@@ -815,6 +852,10 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
         }
     }
     const unsigned r = g_orig_setoptions(viewport, options_for_call(options));
+    if (p != nullptr && memcmp(p + 8, kDlssgOptionsGuid, 16) == 0) {
+        g_api_aplicada = *(LONG *)(p + 36);
+        set_count_now(g_api_aplicada);
+    }
     if (saved >= 0) {
         *(LONG *)(p + 36) = saved;
         *(LONG *)(p + 32) = g_saved_mode;
@@ -927,6 +968,20 @@ static void apply_override_now(void) {
         last_mode = m; last_count = c; have_last = 1;
     }
     g_orig_setoptions(g_vp_copy, options_for_call(g_opt_copy));
+    // El byte del bound se escribe ACA, pegado a la llamada.
+    //
+    // Las dos filas de la tabla medida son fatales: bound mayor que la reserva
+    // escribe fuera y crashea; bound menor detiene la presentacion. No hay
+    // transitorio seguro, asi que no alcanza con recortar el byte -- se probo y
+    // Halo se congelo al subir a 6X: las ventanas de medicion se cortaron 1 s
+    // despues del cambio y no volvieron.
+    //
+    // Escribirlo inmediatamente despues de que las opciones salieron deja a las
+    // dos en el mismo instante desde el punto de vista del plugin.
+    g_api_aplicada = *(LONG *)(g_opt_copy + 36);
+    set_count_now(g_api_aplicada);
+    // Recien ahora el plugin reservo esta cuenta: el byte ya puede subir.
+    g_api_aplicada = *(LONG *)(g_opt_copy + 36);
     log_num("override applied now, selection ", (unsigned)g_force_sel);
 }
 
@@ -2157,6 +2212,11 @@ static LONG loop_bound_for(LONG n) {
 }
 
 static void set_count_now(LONG n) {
+    // La mitad del byte del tope de 6X. Ver tope_cuenta.
+    {
+        const LONG t = tope_cuenta();
+        if (n > t) n = t;
+    }
     // El byte parcheado es el limite del bucle; la cuenta de la API dimensiona
     // la reserva. Si el byte supera a lo que la API pidio, el bucle corre mas
     // iteraciones que la memoria que hay, y eso es un acceso invalido.
@@ -5680,6 +5740,16 @@ static DWORD WINAPI recorder(LPVOID) {
                     log_num("panel: HUD ", (unsigned)(g_hud_on ? 1 : 0));
                     g_settings_dirty = 1;
                 }
+                // La fila 6X no se puede elegir.
+                //
+                // Mata el juego en Halo de forma reproducible, en el instante
+                // del cambio. Se limito la cuenta escrita a 4 en las dos
+                // mitades -- API y byte -- y crasheo IGUAL, asi que la causa no
+                // es solo el valor de la cuenta y no esta identificada.
+                //
+                // Se saca la fila en vez de dejar una que rompe: 2X a 5X andan
+                // y sostienen la sesion. mfg-x6.txt la devuelve para
+                // investigarla.
                 const bool row_ok =
                     (g_ov_hot == kSelDynFuture) ? true
                   : (g_ov_hot == kSelDynamic) ? true
@@ -7515,6 +7585,18 @@ static void leer_veredicto_previo(void) {
 }
 static UNICODE_STRING g_us_alt;
 
+// El trabajo pesado NO se inline en el hook.
+//
+// hk_ldrload corre bajo el loader lock en CADA carga de modulo, en cualquier
+// hilo del juego -- incluidos los que tienen poca pila. Con -O2 el compilador
+// inlineaba la sustitucion entera y el marco quedaba en 3288 bytes, que se
+// pagan tambien en el camino comun: un modulo que no nos interesa y se devuelve
+// enseguida.
+//
+// Halo crasheo ahi: 0xc0000005 escribiendo a 0x30(%rsp) dentro de esta funcion,
+// que es firma de pila agotada y no de puntero invalido. El marco era identico
+// en el binario anterior, asi que el peligro no es nuevo -- pero 3288 bytes
+// bajo el loader lock no tienen defensa.
 static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombre,
                                  PVOID *base) {
     if (nombre == nullptr || nombre->Buffer == nullptr || nombre->Length == 0)
@@ -7562,7 +7644,10 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     // hipotesis de que NGX la mapeaba fuera del cargador era falsa.
     bool en_cache = false;
     if (idx < 0) {
-        wchar_t norm[MAX_PATH];
+        // static, no local: 520 bytes menos de marco en un hook que corre bajo
+        // el loader lock. Es seguro porque el loader lock serializa esta
+        // funcion -- por la misma razon g_ruta_pedida ya era global.
+        static wchar_t norm[MAX_PATH];
         int nn2 = 0;
         for (; nn2 < n && nn2 < MAX_PATH - 1; ++nn2) {
             wchar_t c = g_ruta_pedida[nn2];
@@ -7581,7 +7666,40 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
             }
             en_cache = m;
         }
-        if (en_cache) idx = 1;               // una copia OTA: se trata como dlss_g
+        // CUAL modulo de la cache, no "alguno".
+        //
+        // En la cache de NGX todos los modulos se llaman IGUAL --
+        // 190_E658703.dll -- y lo que los distingue es la CARPETA:
+        // sl_reflex_0, sl_pcl_0, sl_dlss_g_0. La version anterior detectaba
+        // el prefijo de la cache y asumia dlss_g para cualquiera.
+        //
+        // Halo lo destapo: pedia el 190_E658703.dll de sl_reflex_0 y le
+        // entregabamos el de sl_dlss_g_0. Streamline lo rechazaba y lo
+        // descargaba en el acto -- tres "modulo descargado / sitios que
+        // quedan 0" seguidos en 110 ms -- y como frame generation NECESITA
+        // Reflex, el juego corrio 142 s con multiplicador 1.00 en las 123
+        // ventanas.
+        //
+        // No se veia en GTA V, que mapea una sola copia y no toca la cache,
+        // ni en Cyberpunk, cuyo Reflex propio ya estaba cargado antes.
+        if (en_cache) {
+            idx = -1;
+            for (int i = 0; i < 9 && idx < 0; ++i) {
+                wchar_t carp[64];
+                carpeta_de_cache(g_set[i].nombre, carp);
+                int lc = 0; while (carp[lc] != 0) ++lc;
+                for (int j = 1; j + lc + 1 <= nn2; ++j) {
+                    if (norm[j-1] != L'\\') continue;
+                    bool m = true;
+                    for (int k = 0; k < lc; ++k) {
+                        wchar_t c = carp[k];
+                        if (c >= L'A' && c <= L'Z') c = (wchar_t)(c + 32);
+                        if (norm[j + k] != c) { m = false; break; }
+                    }
+                    if (m && norm[j + lc] == L'\\') { idx = i; break; }
+                }
+            }
+        }
     }
     if (idx == -1) return g_orig_ldrload(ruta, carac, nombre, base);
 
@@ -7693,6 +7811,91 @@ static void find_newest_ota_build() {
 }
 
 // ---------------------------------------------------------------- attach ---
+
+
+// Quien mata el proceso, dicho por el proceso mismo.
+//
+// Halo muere al entrar a 6X sin dejar dump ni evento WER: algo se traga la
+// excepcion antes de que Windows la vea, asi que siete intentos no dieron ni
+// una direccion. Un vectored exception handler corre ANTES que cualquier
+// __try del juego o del driver, asi que lo ve igual.
+//
+// Solo registra y devuelve CONTINUE_SEARCH: no cambia el comportamiento, no
+// traga nada, no intenta recuperarse. Es un testigo.
+//
+// Se filtran las excepciones de control de flujo que son normales y ruidosas
+// (breakpoints de depurador, C++ EH, y las de "primera oportunidad" que los
+// motores usan a proposito): sin ese filtro el log se llena y el evento que
+// importa se pierde.
+static LONG CALLBACK testigo_excepcion(EXCEPTION_POINTERS *info) {
+    if (info == nullptr || info->ExceptionRecord == nullptr)
+        return EXCEPTION_CONTINUE_SEARCH;
+    const DWORD c = info->ExceptionRecord->ExceptionCode;
+    // Se registra SOLO lo que puede matar el proceso.
+    //
+    // La primera version filtraba por una mascara y dejaba pasar 0x40010006
+    // (DBG_PRINTEXCEPTION_C, o sea OutputDebugString). Halo emite doce de esas
+    // en los primeros catorce segundos, el tope se lleno con ruido y si hubo un
+    // fallo real no quedo registrado.
+    //
+    // Ahora la lista es blanca, no negra: solo las excepciones que terminan un
+    // proceso. Cualquier cosa que no este aca se ignora.
+    const bool mortal =
+        c == EXCEPTION_ACCESS_VIOLATION            ||   // 0xC0000005
+        c == EXCEPTION_ARRAY_BOUNDS_EXCEEDED       ||
+        c == EXCEPTION_DATATYPE_MISALIGNMENT       ||
+        c == EXCEPTION_ILLEGAL_INSTRUCTION         ||
+        c == EXCEPTION_IN_PAGE_ERROR               ||
+        c == EXCEPTION_INT_DIVIDE_BY_ZERO          ||
+        c == EXCEPTION_PRIV_INSTRUCTION            ||
+        c == EXCEPTION_STACK_OVERFLOW              ||   // 0xC00000FD
+        c == 0xC0000409u                           ||   // fail-fast / stack cookie
+        c == 0xC0000374u                           ||   // heap corrompido
+        c == 0xC000041Du;                               // excepcion en un callback
+    if (!mortal) return EXCEPTION_CONTINUE_SEARCH;
+    static volatile LONG dichas = 0;
+    if (InterlockedIncrement(&dichas) > 40) return EXCEPTION_CONTINUE_SEARCH;
+    const void *dir = info->ExceptionRecord->ExceptionAddress;
+    log_line("EXCEPCION ------------------------------------------");
+    log_num("  codigo 0x", (unsigned long long)c);
+    log_num("  direccion 0x", (unsigned long long)(ULONG_PTR)dir);
+    // De que modulo es esa direccion, que es lo que hace util al numero.
+    {
+        HMODULE m = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR)dir, &m) && m != nullptr) {
+            wchar_t nom[MAX_PATH];
+            const DWORD n = GetModuleFileNameW(m, nom, MAX_PATH);
+            if (n > 0) {
+                int corte = (int)n;
+                while (corte > 0 && nom[corte-1] != L'\\') --corte;
+                char a[128];
+                int k = 0;
+                for (int q = corte; nom[q] != 0 && k < 120; ++q)
+                    a[k++] = (char)(nom[q] < 128 ? nom[q] : '?');
+                a[k] = 0;
+                log_line("  modulo:");
+                log_line(a);
+                log_num("  offset en el modulo 0x",
+                        (unsigned long long)((ULONG_PTR)dir - (ULONG_PTR)m));
+            }
+        } else {
+            log_line("  modulo: NINGUNO (memoria sin modulo: puntero corrupto)");
+        }
+    }
+    if (c == EXCEPTION_ACCESS_VIOLATION &&
+        info->ExceptionRecord->NumberParameters >= 2) {
+        log_num("  operacion (0 lee, 1 escribe, 8 ejecuta) ",
+                (unsigned long long)info->ExceptionRecord->ExceptionInformation[0]);
+        log_num("  sobre la direccion 0x",
+                (unsigned long long)info->ExceptionRecord->ExceptionInformation[1]);
+    }
+    log_num("  seleccion en curso ", (unsigned)g_force_sel);
+    log_num("  cuenta pedida ", (unsigned)g_force_generated);
+    log_num("  cuenta aplicada en la API ", (unsigned)g_api_aplicada);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
 
 BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
@@ -7812,6 +8015,8 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 }
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
+            g_permitir_x6 = flag_file(L"mfg-x6.txt");
+            if (g_permitir_x6) log_line("6X habilitado a mano (mfg-x6.txt): crashea en Halo");
             g_dyn_diag = flag_file(L"mfg-dyndiag.txt");
             if (g_dyn_diag) log_line("dynamic: diagnostico por cambio de ratio ENCENDIDO (mfg-dyndiag.txt)");
             if (flag_file(L"mfg-nolatch.txt")) { g_latch_reparto = false; log_line("fractional: reparto NO latcheado (mfg-nolatch.txt)"); }
@@ -7982,6 +8187,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
         HANDLE th = CreateThread(nullptr, 0, &recorder, nullptr, 0, nullptr);
         if (th != nullptr) CloseHandle(th);
     }
+    AddVectoredExceptionHandler(1, testigo_excepcion);
     log_line("--- mfg-unlock attached ---  (F9 records)");
 
     // Turn on Streamline's own logging from here, before anything loads it, so
