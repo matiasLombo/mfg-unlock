@@ -353,6 +353,8 @@ static PFN_slGetFeatureFunction g_orig_getfeaturefn = nullptr;
 typedef unsigned (*PFN_slInit)(void *, unsigned long long);
 static PFN_slInit g_orig_slinit = nullptr;
 static bool g_ota = false;              // mfg-ota.txt
+// mfg-sllog.txt esta presente: ademas del log, se sube el nivel en Preferences.
+static bool g_sllog_on = false;
 // Probado en el sample del banco, que como Halo no pedia OTA: banderas 133 ->
 // 205, de un sl.dlss_g mapeado se pasa a tres -- uno de ellos el 134656 de
 // ProgramData, donde el parche del contador SI engancha -- y el fraccionario
@@ -378,6 +380,42 @@ static unsigned hk_slInit(void *pref, unsigned long long sdk) {
         log_num("slInit: structVersion ", (unsigned)*(unsigned long long *)(p + 24));
         const unsigned long long f = *(unsigned long long *)(p + kPrefFlags);
         log_num("  banderas en +88 ", (unsigned)f);
+        // logLevel, a verbose, para que el runtime diga por que corta.
+        //
+        // beginCommandList (sl.common 0x77AF0) devuelve false por una de dos
+        // razones y las dos escriben al log de Streamline:
+        //
+        //     'Command list not closed'
+        //     "Couldn't reset the allocator %S for %.2f seconds."
+        //
+        // Ninguna aparece en el sl.log de Halo, pero las dos estan gateadas por
+        // una bandera global:
+        //
+        //     0x77b08  cmp byte ptr [rip+0x59e2a], 0
+        //     0x77b0f  je  0x77b98        ; sin log, igual devuelve false
+        //
+        // SL_LOG_LEVEL=2 ya se pone por entorno y no alcanzo: lo que la
+        // aplicacion pasa en Preferences gana. Aca se pisa el campo.
+        //
+        // Offset 36: BaseStructure son 32 (next 8 + GUID 16 + structVersion 8),
+        // showConsole ocupa 4 con relleno, y logLevel viene despues. El mismo
+        // conteo que da 88 para las banderas, que ya esta verificado.
+        //
+        // Solo si el valor que hay tiene forma de enum chico -- si no, el
+        // offset no es el que creemos y escribir seria corromper.
+        {
+            LONG *nivel = (LONG *)(p + 36);
+            const LONG antes = *nivel;
+            log_num("  logLevel en +36 ", (unsigned)antes);
+            if (antes >= 0 && antes <= 3 && g_sllog_on) {
+                DWORD viejo = 0;
+                if (VirtualProtect(nivel, 4, PAGE_READWRITE, &viejo)) {
+                    *nivel = 2;                 // eVerbose
+                    VirtualProtect(nivel, 4, viejo, &viejo);
+                    log_line("  logLevel forzado a verbose (mfg-sllog.txt)");
+                }
+            }
+        }
         log_num("    eAllowOTA (bit 3) ", (unsigned)((f >> 3) & 1));
         log_num("    eLoadDownloadedPlugins (bit 6) ", (unsigned)((f >> 6) & 1));
         // Volcado crudo para poder ubicar el campo si el offset no fuera 88.
@@ -447,9 +485,258 @@ static volatile LONG g_opt_pending = 0;
 static bool g_permitir_x6 = false;
 // 5 es el maximo del plugin (6X). El tope en 4 era una mitigacion del crash
 // que ademas limitaba 5X, y la causa resulto ser otra.
-static LONG tope_cuenta(void) { (void)g_permitir_x6; return 5; }
+static volatile LONG g_max_declarado = 0;   // 0 = todavia no se leyo
+// mfg-topefijo.txt: vuelve al tope de 5 de antes, para poder MEDIR la linea
+// base sin recompilar. Diagnostico local, nunca el arreglo: sin el archivo el
+// dll se comporta como se envia.
+static bool g_tope_fijo = false;
+
+static LONG tope_cuenta(void) {
+    (void)g_permitir_x6;
+    if (g_tope_fijo) return 5;
+    // Lo que el plugin declara, si se pudo leer; 5 mientras tanto, que es como
+    // venia. Ver leer_max_generados: pedir por encima de esto no entrega mas
+    // frames, entrega CERO -- NGX rechaza la evaluacion entera.
+    const LONG d = g_max_declarado;
+    return (d >= 1 && d <= 5) ? d : 5;
+}
+// Base del sl.dlss_g que estamos parcheando, para poder leerle campos.
+static const unsigned char *g_dlssg_base = nullptr;
 static volatile LONG g_api_aplicada = -1;
 static void set_count_now(LONG n);   // definida mas abajo
+
+// Que sigue [global+0x4168]: el techo declarado a la API, o lo generado?
+//
+// De eso depende el arreglo entero. En 0x52c80 -- la funcion que termina
+// llamando a dlfgPresent con el indice que revienta -- el objeto sale de un
+// puntero global en el RVA 0x8f1e8, y una funcion hermana en 0x52e31 valida su
+// indice contra +0x4168 mientras la que falla no valida nada.
+//
+// Si el campo sigue al TECHO, entonces la presentacion cuenta con el numero que
+// force_into declara (g_ciclo_techo) mientras la generacion sigue al byte de la
+// cadencia, y en los frames bajos pide una ranura que nadie hizo. Ese es el
+// mecanismo que hay que romper.
+//
+// Si sigue a lo GENERADO, entonces el indice sale de otro lado y toda esta linea
+// de investigacion esta mal.
+//
+// Se lee, no se escribe. El RVA es de sl_dlss_g 134273; en otra build el numero
+// que salga no significa nada y por eso se imprime crudo.
+static bool leer_ok(const void *src, void *dst, unsigned n) {
+    if (src == nullptr) return false;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(src, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    const DWORD leible = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                         PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                         PAGE_EXECUTE_WRITECOPY;
+    if ((mbi.Protect & leible) == 0) return false;
+    if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
+    if ((ULONG_PTR)src + n > (ULONG_PTR)mbi.BaseAddress + mbi.RegionSize) return false;
+    memcpy(dst, src, n);
+    return true;
+}
+
+// La marca de agua, bajada a la cuenta viva.
+//
+// Medido: [global+0x4168] se queda en el valor mas alto que se declaro alguna
+// vez y NO baja. Con la cadencia alternando 2 y 3, el campo quedo clavado en 3
+// durante 25 ventanas seguidas:
+//
+//     [global+0x4168]   API   byte
+//            3           3     3
+//            3           2     2      <- la generacion hace 2
+//            3           2     2      <- y la presentacion recorre 3
+//
+// La presentacion recorre lo que dice el campo. En los frames de cadencia baja
+// la ultima ranura no la hizo nadie, y ahi esta el puntero nulo. Coincide con
+// el crash: el campo valia 3 y el indice pedido fue 3.
+//
+// Explica por que revienta DYNAMIC y no los modos fijos: un modo fijo nunca
+// baja la cuenta, asi que la marca y la realidad coinciden siempre. DYNAMIC
+// sube, la marca se queda arriba, y cada bajada posterior es un candidato.
+//
+// Bajarla es la direccion segura: recorrer menos ranuras de las que hay no
+// rompe nada, recorrer una de mas es el crash. Nunca se sube -- si el plugin la
+// quiere mas alta, alla el.
+static void bajar_4168(LONG v) {
+    if (g_dlssg_base == nullptr || v < 1) return;
+    unsigned char *pp = nullptr;
+    if (!leer_ok(g_dlssg_base + 0x8f1e8, &pp, sizeof(pp)) || pp == nullptr) return;
+    LONG *campo = (LONG *)(pp + 0x4168);
+    LONG actual = 0;
+    if (!leer_ok(campo, &actual, 4)) return;
+    if (actual <= v) return;              // solo baja
+    static LONG dicho = -1;
+    if (dicho != v) {
+        dicho = v;
+        log_num("4168: la marca baja de ", (unsigned)actual);
+        log_num("  a la cuenta viva ", (unsigned)v);
+    }
+    *campo = v;
+}
+
+// A que apunta la llamada virtual que corta el bucle de generacion.
+//
+// En 0x3de16 el bucle hace `call [rax+0x40]` sobre r14 y, si devuelve falso,
+// corta -- sin mirar nuestro bound. Es lo unico encontrado que puede detener la
+// generacion en 4 con TODOS los contadores diciendo 5.
+//
+// r14 sale del mismo contexto que ya sabemos ubicar (el global de 0x8f1e8,
+// que es el r15 de 0x3d930), elegido entre tres candidatos:
+//
+//     0x3da91  cmp  [r15+0x45a8], 1
+//     0x3da99  lea  r14, [r15+0x20]
+//     0x3da9f  mov  r14, [r15+0x18]
+//     0x3dab2  mov  r14, [r15+0x20]
+//     0x3dab8  mov  r14, [r15+0x38]
+//
+// Resolviendo su vtable desde aca sale el RVA de la funcion, y con el RVA se
+// desensambla y se ve que recurso niega. Todo lectura: no se engancha nada en
+// la ruta de render, que es lo que rompe el renderizado.
+// Nombre y offset del modulo dueño de una direccion.
+static void decir_modulo(const char *etiqueta, const void *fn) {
+    HMODULE m = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)fn, &m) || m == nullptr) {
+        log_line(etiqueta);
+        log_line("    no pertenece a ningun modulo cargado");
+        return;
+    }
+    wchar_t nom[MAX_PATH];
+    GetModuleFileNameW(m, nom, MAX_PATH);
+    char a[260]; int k = 0;
+    for (int q = 0; nom[q] != 0 && k < 250; ++q)
+        a[k++] = (char)(nom[q] < 128 ? nom[q] : '?');
+    a[k] = 0;
+    log_line(etiqueta);
+    log_line(a);
+    log_num("    offset 0x", (unsigned long long)((ULONG_PTR)fn - (ULONG_PTR)m));
+}
+
+// A que apunta la llamada virtual que corta el bucle de generacion.
+//
+// En 0x3de16 el bucle hace `call [rax+0x40]` sobre r14 y, si devuelve falso,
+// corta -- sin mirar nuestro bound.
+//
+// r14 sale del contexto del plugin, y hay DOS bloques que lo eligen:
+//
+//     0x3da91  cmp [r15+0x45a8], 1
+//     0x3da99  lea r14, [r15+0x20]     ; si es 1
+//     0x3da9f  mov r14, [r15+0x18]     ; si no
+//     0x3daa3  mov r14, [r14]          ; y en los dos, un deref mas
+//
+//     0x3daa8  cmp [r15+0x45e1], 0
+//     0x3dab2  mov r14, [r15+0x20]     ; si NO es cero
+//     0x3dab8  mov r14, [r15+0x38]     ; si es cero
+//
+// La primera version de esta sonda resolvio solo el primer bloque y dio una
+// funcion de sl.common que DEVUELVE UN PUNTERO (getAllocator, un pool de
+// command allocators de d3d12 con dos entradas). El llamador hace `test al,al`,
+// o sea espera un bool: no cierra. Asi que ese no era el objeto, o no siempre.
+//
+// Se imprimen los tres candidatos con su modulo. Adivinar cual es ya fallo una
+// vez.
+static void sonda_vtable(void) {
+    if (g_dlssg_base == nullptr) return;
+    static bool dicho = false;
+    if (dicho) return;
+    unsigned char *ctx = nullptr;
+    if (!leer_ok(g_dlssg_base + 0x8f1e8, &ctx, sizeof(ctx)) || ctx == nullptr) return;
+    dicho = true;
+    log_line("vtable: resolviendo el corte del bucle de generacion");
+    LONG sel1 = -1; unsigned char sel2 = 0xFF;
+    leer_ok(ctx + 0x45a8, &sel1, 4);
+    leer_ok(ctx + 0x45e1, &sel2, 1);
+    log_num("  [ctx+0x45a8] ", (unsigned)sel1);
+    log_num("  [ctx+0x45e1] ", (unsigned)sel2);
+
+    struct Cand { const char *nom; unsigned off; bool doble; };
+    const Cand cands[3] = {
+        { "  candidato A: **(ctx+0x18)", 0x18, true  },
+        { "  candidato B:  *(ctx+0x20)", 0x20, false },
+        { "  candidato C:  *(ctx+0x38)", 0x38, false },
+    };
+    for (int c = 0; c < 3; ++c) {
+        unsigned char *obj = nullptr;
+        if (!leer_ok(ctx + cands[c].off, &obj, sizeof(obj)) || obj == nullptr) {
+            log_line(cands[c].nom); log_line("    nulo"); continue;
+        }
+        if (cands[c].doble) {
+            unsigned char *o2 = nullptr;
+            if (!leer_ok(obj, &o2, sizeof(o2)) || o2 == nullptr) {
+                log_line(cands[c].nom); log_line("    segundo deref nulo"); continue;
+            }
+            obj = o2;
+        }
+        unsigned char *vt = nullptr, *fn = nullptr;
+        if (!leer_ok(obj, &vt, sizeof(vt)) || vt == nullptr) {
+            log_line(cands[c].nom); log_line("    vtable ilegible"); continue;
+        }
+        if (!leer_ok(vt + 0x40, &fn, sizeof(fn)) || fn == nullptr) {
+            log_line(cands[c].nom); log_line("    slot +0x40 ilegible"); continue;
+        }
+        decir_modulo(cands[c].nom, fn);
+    }
+}
+// El techo que el plugin declara para si mismo, leido (no escrito).
+//
+// El runtime de NVIDIA lo dijo por escrito con logLevel en verbose:
+//
+//   [slSetData] Input data numFramesToGenerate (4) greater than DLSS-G
+//   supported numFramesToGenerateMax (3). Set input data count lower.
+//   [evaluateNGXFeature] [sl.dlss_g] NGX evaluate feature failed 0xbad00005
+//
+// Pedir mas de 3 generados no genera de menos: la llamada se RECHAZA entera y
+// la evaluacion NGX falla. Las ranuras de esos sub-frames no las llena nadie y
+// nuestro bound forzado igual las recorre -> [nulo+0x40] en +0x3ED6F.
+//
+// El campo es [ctx+0x45e4]:
+//
+//     0x4fccd  mov  dword ptr [rdi + 0x45e4], 5     ; el plugin lo inicia en 5
+//     0x56b5b  mov  r9d, dword ptr [r15 + 0x45e4]   ; y compara contra el
+//     0x56b62  cmp  r8d, r9d
+//     0x56b65  jbe  sigue
+//
+// SUBIRLO NO SIRVE, y esta medido: con el campo en 5 los rechazos de slSetData
+// desaparecen (0) pero NGX falla 7749 veces con 0xbad00005 y el multiplicador
+// entregado cae a mediana 1.00. Se cambia un crash por generacion apagada, que
+// es peor. El 3 no es una opinion del plugin: es lo que NGX soporta.
+//
+// Asi que se LEE. No es un tope nuestro ni un numero inventado: es la capacidad
+// que el dispositivo declara. Si un driver o una GPU futura declaran 5, se usan
+// 5 sin tocar nada.
+// g_max_declarado se define arriba, junto a tope_cuenta.
+
+static void leer_max_generados(void) {
+    if (g_dlssg_base == nullptr) return;
+    unsigned char *ctx = nullptr;
+    if (!leer_ok(g_dlssg_base + 0x8f1e8, &ctx, sizeof(ctx)) || ctx == nullptr) return;
+    LONG v = 0;
+    if (!leer_ok(ctx + 0x45e4, &v, 4)) return;
+    // Rango de cordura: si ahi no hay un numero chico, el offset no es el que
+    // creemos y hacerle caso seria peor que ignorarlo.
+    if (v < 1 || v > 8) return;
+    if (g_max_declarado != v) {
+        static LONG dicho = -1;
+        if (dicho != v) {
+            dicho = v;
+            log_num("max: el plugin declara numFramesToGenerateMax ", (unsigned)v);
+        }
+        g_max_declarado = v;
+    }
+}
+
+static LONG sonda_4168(void) {
+    if (g_dlssg_base == nullptr) return -1;
+    const unsigned char *pp = nullptr;
+    if (!leer_ok(g_dlssg_base + 0x8f1e8, &pp, sizeof(pp)) || pp == nullptr)
+        return -1;
+    LONG v = -1;
+    if (!leer_ok(pp + 0x4168, &v, 4)) return -1;
+    return v;
+}
 // Set when the game itself configures DLSS-G, cleared when the next frame
 // begins. While it is set, our replay stays out of the way.
 //
@@ -706,6 +993,26 @@ static double g_rfx_drv = 0.0;     // sim start -> fin de driver
 static long long g_qpc_freq = 1;   // set in DllMain
 static double g_rfx_ft = 0.0;          // gpuFrameTimeUs, para validar contra la base
 static double g_ctrl_fps = 0.0;       // frames/tiempo, insesgada, para el controlador
+// Cuantas muestras tiene el anillo del estimador ahora mismo.
+//
+// Existe porque el detector de escalon vacia el anillo y deja la base valiendo
+// 1/dt de UN solo frame. Al armarse DYNAMIC los primeros frames son lentos --
+// la reconfiguracion del swapchain esta medida en [[fractional-swapchain-churn]]
+// -- asi que un frame de ~62 ms dejaba la base en 16 fps con la real en 156.
+// Con eso el controlador calculaba 165/16 = 10.3 y topaba en 6.00, que es
+// justo el ratio que revienta.
+//
+// Del log de Halo, sin interpretacion:
+//
+//     [37891ms] dynamic: refresh is 165            <- DYNAMIC recien armado
+//     [38000ms] target needs more than 6x at this base, fps 165
+//     [38000ms]   base is 16
+//     [38172ms] measured: rendered fps 156         <- 172 ms despues
+//     [38172ms]   base por Reflex 0                <- y Reflex no alimentaba
+//
+// Con la base real el ratio pedido es 165/33 = 5.0 exacto: alcanzable y sin
+// tocar la ranura que el plugin no llena.
+static int g_ctrl_n = 0;
 static double g_rfx_base = 0.0;        // base en fps, del contador de frames de Reflex
 static ULONGLONG g_ctrl_rfx_ms = 0;    // ultima vez que Reflex alimento el estimador
 
@@ -728,6 +1035,7 @@ static void ctrl_feed_dt(double dt) {
     ri = (ri + 1) & 7;
     if (rn < 8) ++rn;
     g_ctrl_fps = rsum > 0.0 ? (double)rn / rsum : 0.0;
+    g_ctrl_n = rn;
     // Un escalon invalida la historia: se reempieza con el valor nuevo en vez
     // de arrastrar ocho frames de la carga anterior.
     static double prev2 = 0.0;
@@ -738,6 +1046,7 @@ static void ctrl_feed_dt(double dt) {
         if (lejos2 && igual2) {
             ring[0] = dt; ri = 1; rn = 1; rsum = dt;
             g_ctrl_fps = 1.0 / dt;
+            g_ctrl_n = 1;         // y con una muestra no se decide nada
         }
     }
     prev2 = dt;
@@ -1416,6 +1725,56 @@ static int patch_work_item_count(unsigned char *text, size_t len) {
     q[2] = 0x58;    // pop rax
     sitio_add(g_wic_sitios, &g_wic_n, q + 1);
     log_line("  work item count is ours (bound, index and metering agree)");
+
+    // El SEGUNDO campo, doce bytes mas adelante. Sin este, todo lo demas falla.
+    //
+    // El constructor copia dos contadores seguidos:
+    //
+    //     0x47333  mov  eax, [rdx + 4]     <- lo forzabamos
+    //     0x47336  mov  r8d, 0xc0
+    //     0x4733c  mov  [rcx + 4], eax
+    //     0x4733f  mov  eax, [rdx + 8]     <- lo dejabamos pasar
+    //     0x47342  mov  [rcx + 8], eax
+    //
+    // Y cada campo acota un bucle distinto:
+    //
+    //     generacion  0x3ddfa  cmp [r13+4], ebx      <- nuestro numero
+    //     llenado     0x45984  mov r14d, [rdx+8]     <- el del plugin
+    //                 0x45b87  sub r12, 0xc0         (hacia atras hasta 0)
+    //
+    // Forzando solo +4, la generacion recorre hasta [ctx+4]-1 mientras el
+    // llenado solo cubrio [ctx+8]-1. La ultima entrada queda sin puntero y el
+    // functor de esa iteracion lo desreferencia: [nulo+0x40] en +0x3ED6F.
+    //
+    // Diez autopsias, banco y Halo, siempre lo mismo:
+    //
+    //     [ctx+4]  [ctx+8]  indice pedido  ranuras llenas
+    //        5        4           4            0..3
+    //        4        3           3            0..2
+    //
+    // Por eso ningun valor del byte servia: mover +4 mueve la generacion y no
+    // el llenado, asi que el hueco se corre pero no se cierra. Y por eso NVIDIA
+    // no chequea nulo ahi -- en operacion normal los dos campos los escribe el
+    // mismo codigo y no pueden discrepar.
+    //
+    // Los dos sitios quedan en la misma lista, asi que set_count_now les
+    // escribe el mismo numero y los dos bucles recorren el mismo rango.
+    {
+        unsigned char *q2 = q + 12;
+        if (q2[0] == 0x8B && q2[1] == 0x42 && q2[2] == 0x08) {
+            DWORD o2 = 0;
+            if (VirtualProtect(q2, 3, PAGE_EXECUTE_READWRITE, &o2)) {
+                q2[0] = 0x6A;
+                q2[1] = 1;
+                q2[2] = 0x58;
+                sitio_add(g_wic_sitios, &g_wic_n, q2 + 1);
+                log_line("  fill count is ours too (el llenado sigue al bound)");
+            }
+        } else {
+            // Sin este el parche esta a medias y el crash vuelve. Se dice.
+            log_line("  ! fill count site NOT found: el llenado sigue siendo del plugin");
+        }
+    }
     return 1;
 }
 
@@ -2592,6 +2951,13 @@ static void note_rendered_frame(void) {
                 // cadence. Running both arms silent settles which.
                 if (!g_quiet)
                 log_num("measured: rendered fps ", (unsigned)(int)(g_rendered_fps + 0.5));
+            {
+                sonda_vtable();
+                const LONG p4168 = sonda_4168();
+                log_num("  [global+0x4168] ", (unsigned)p4168);
+                log_num("  techo declarado a la API ", (unsigned)g_api_aplicada);
+                log_num("  byte vivo (la cadencia) ", (unsigned)g_count_live);
+            }
                 // Las dos bases, lado a lado, una vez por ventana. La de
                 // Reflex es el contador del driver; la de arriba cuenta
                 // llamadas al token y depende de como llame el juego. En el
@@ -3092,9 +3458,26 @@ static void dyn_control(double base_fps, double presented_fps) {
 // ocho ventanas en 170-199 fps despues de cada escalon de base, que era el
 // techo de la version anterior. La banda muerta es lo que evita que correr
 // por frame se convierta en una escritura de opciones por frame.
+// Muestras minimas antes de que la salida del estimador valga una decision.
+// Cuatro de las ocho del anillo: a 33 fps son 120 ms de espera, y a 300 fps
+// son 13. Ocho seria esperar el anillo entero y perder el escalon que el
+// detector existe para captar.
+static const int kCtrlMinMuestras = 4;
+
 static void dyn_apply(double base_fps) {
     if (g_force_sel != kSelDynFuture) return;
     if (base_fps <= 1.0) return;
+    // Recien reseteado el anillo, la base es un frame suelto. Decidir con eso
+    // fue lo que puso 6.00 en el menu de Halo. Ver g_ctrl_n.
+    if (g_ctrl_fps > 0.0 && g_ctrl_n < kCtrlMinMuestras) {
+        static int callado = 0;
+        if (++callado % 240 == 1) {
+            log_num("dynamic: base sin asentar, no se decide. muestras ",
+                    (unsigned)g_ctrl_n);
+            log_num("  base que habria usado ", (unsigned)(base_fps + 0.5));
+        }
+        return;
+    }
     if (g_refresh_hz <= 0) {
         DEVMODEW dm; dm.dmSize = sizeof(dm); dm.dmDriverExtra = 0;
         if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm))
@@ -4304,6 +4687,8 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
         if (same) return r;
         ++g_frames_gated;
     }
+    // Una vez por frame: el plugin lo puede recalcular al cambiar de modo.
+    leer_max_generados();
     note_rendered_frame();
     g_game_set_this_frame = 0;      // a new frame; the last one is settled
     reflex_poll();
@@ -7019,6 +7404,7 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         // aca falla por diseno. La carga se hace en el camino de present.
         if (g_twocopies) g_twocopies_pending = 1;
         {
+            g_dlssg_base = reinterpret_cast<const unsigned char *>(d->DllBase);
             const int sc = patch_subframe_count(reinterpret_cast<unsigned char *>(d->DllBase));
             log_num("  sub-frame count made writable, sites: ", (unsigned)sc);
         }
@@ -7933,6 +8319,146 @@ static void find_newest_ota_build() {
 // (breakpoints de depurador, C++ EH, y las de "primera oportunidad" que los
 // motores usan a proposito): sin ese filtro el log se llena y el evento que
 // importa se pierde.
+// Lee memoria ajena sin poder faultear a su vez.
+//
+// Corre DENTRO del manejador de excepciones, donde una segunda violacion de
+// acceso no da un segundo aviso: mata el proceso sin log. VirtualQuery contesta
+// por pagina y sin tocar el contenido, asi que se pregunta primero.
+static bool leer_seguro(const void *src, void *dst, unsigned n) {
+    if (src == nullptr) return false;
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(src, &mbi, sizeof(mbi)) == 0) return false;
+    if (mbi.State != MEM_COMMIT) return false;
+    const DWORD leible = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                         PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                         PAGE_EXECUTE_WRITECOPY;
+    if ((mbi.Protect & leible) == 0) return false;
+    if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
+    // Que el rango entero entre en esta region; si cruza pagina, no se lee.
+    const ULONG_PTR fin = (ULONG_PTR)mbi.BaseAddress + mbi.RegionSize;
+    if ((ULONG_PTR)src + n > fin) return false;
+    memcpy(dst, src, n);
+    return true;
+}
+
+// La autopsia del array de sub-frames, en el instante del fallo.
+//
+// El fallo es siempre el mismo: sl.dlss_g +0x3ED6F, LECTURA de [nulo+0x40].
+//
+//     0x3ecc9  mov  r10d, [rbp + 0xf8]        ; indice, 6to argumento
+//     0x3ed62  lea  rcx, [r10 + r10*2]
+//     0x3ed66  shl  rcx, 6                    ; r10 * 192
+//     0x3ed6a  mov  rax, [rcx + r13 + 0x48]   ; array[r10]
+//     0x3ed6f  mov  ecx, [rax + 0x40]         ; <- aca
+//
+// Con el CONTEXT en la mano se leen r10 (que indice pidio) y r13 (la base del
+// contexto), y de ahi las 6 ranuras y los dos contadores en +4 y +8. Eso separa
+// de una vez las hipotesis que llevan tres intentos sin distinguirse:
+//
+//   * si el nulo esta en r10 y las de abajo estan llenas -> la presentacion
+//     pidio un indice que la generacion nunca lleno
+//   * si TODAS estan nulas -> el contexto no es el que creiamos, o se destruyo
+//   * si [r13+4] no es nuestro byte -> el parche no llega a este contexto
+//
+// Solo lee. No cambia nada y devuelve CONTINUE_SEARCH igual que el resto.
+static void autopsia_subframes(const CONTEXT *ctx, const void *modbase) {
+    if (ctx == nullptr) return;
+    const ULONG_PTR base = (ULONG_PTR)ctx->R13;
+    const unsigned idx = (unsigned)(ctx->R10 & 0xFFFFFFFFu);
+    log_line("  --- autopsia del array de sub-frames ---");
+    log_num("  indice pedido (r10) ", (unsigned long long)idx);
+    log_num("  base del contexto (r13) 0x", (unsigned long long)base);
+    LONG total = 0, hechos = 0;
+    if (leer_seguro((const void *)(base + 4), &total, 4))
+        log_num("  [ctx+4] (nuestro byte) ", (unsigned)total);
+    else
+        log_line("  [ctx+4] ilegible");
+    if (leer_seguro((const void *)(base + 8), &hechos, 4))
+        log_num("  [ctx+8] (el otro contador) ", (unsigned)hechos);
+    else
+        log_line("  [ctx+8] ilegible");
+    // Las 6 ranuras inline de 192 bytes. Cual esta llena y cual no es el dato.
+    for (unsigned i = 0; i < 6; ++i) {
+        const ULONG_PTR ranura = base + 0x48 + (ULONG_PTR)i * 192;
+        void *ptr = nullptr;
+        if (!leer_seguro((const void *)ranura, &ptr, sizeof(ptr))) {
+            log_num("  ranura ilegible ", (unsigned long long)i);
+            continue;
+        }
+        log_num(ptr == nullptr ? "  ranura NULA " : "  ranura llena ",
+                (unsigned long long)i);
+    }
+    // La cuenta que usa el lado de PRESENTACION, si es que es esta.
+    //
+    // En 0x52c80 -- la funcion que termina llamando a dlfgPresent con el indice
+    // que falla -- el objeto sale de un puntero global en el RVA 0x8f1e8. Y en
+    // 0x52e31 hay una funcion hermana que valida su indice contra +0x4168:
+    //
+    //     0x52e31  cmp  edx, dword ptr [rax + 0x4168]
+    //     0x52e37  jb   ...                             ; si entra, sigue
+    //
+    // La ruta que revienta NO hace esa comprobacion. Si +0x4168 resulta valer
+    // lo mismo que el indice pedido, entonces ese campo es de donde sale, y es
+    // el que hay que alinear con lo realmente generado. Si no coincide, la
+    // deduccion es mia y esta mal, y hay que buscar en otro lado.
+    //
+    // El RVA es de esta build (sl_dlss_g 134273). En otra no significa nada, y
+    // por eso se imprime crudo y sin interpretar.
+    if (modbase != nullptr) {
+        const void *pp = nullptr;
+        if (leer_seguro((const unsigned char *)modbase + 0x8f1e8, &pp, sizeof(pp))
+            && pp != nullptr) {
+            LONG cuenta = 0;
+            if (leer_seguro((const unsigned char *)pp + 0x4168, &cuenta, 4))
+                log_num("  [global+0x4168] (cuenta de presentacion?) ",
+                        (unsigned)cuenta);
+            else
+                log_line("  [global+0x4168] ilegible");
+        } else {
+            log_line("  el global de 0x8f1e8 no se pudo leer");
+        }
+    }
+    // La cadena de llamadas, sacada de la pila.
+    //
+    // Hace falta porque la lectura estatica se acabo: 0x3ec80 y 0x3e6f0 no
+    // tienen NINGUN llamador localizable -- ni salto relativo, ni puntero en
+    // datos, ni export. Se invocan por puntero armado en runtime.
+    //
+    // No es un desenrollado formal: se barre la pila y se anota todo valor que
+    // caiga dentro del modulo del plugin. Entre esos estan las direcciones de
+    // retorno, y con sus offsets se ve de donde vino la llamada. Sobra ruido
+    // -- punteros a codigo que quedaron en la pila sin ser retornos -- asi que
+    // los offsets hay que contrastarlos con el desensamblado, no creerlos.
+    if (modbase != nullptr) {
+        const ULONG_PTR mb = (ULONG_PTR)modbase;
+        // El tamano del modulo, para saber que es "adentro".
+        ULONG_PTR mfin = mb + 0x97000;          // sl.dlss_g 2.12 mide 0x97000
+        log_line("  --- posibles retornos en la pila ---");
+        const ULONG_PTR sp = (ULONG_PTR)ctx->Rsp;
+        int puestos = 0;
+        for (int i = 0; i < 160 && puestos < 14; ++i) {
+            ULONG_PTR v = 0;
+            if (!leer_seguro((const void *)(sp + (ULONG_PTR)i * 8), &v, 8)) continue;
+            if (v <= mb || v >= mfin) continue;
+            log_num("  +0x", (unsigned long long)(v - mb));
+            ++puestos;
+        }
+        if (puestos == 0) log_line("  ninguno");
+    }
+    // Los registros crudos. r10 es el indice y r13 la base; el resto es para
+    // identificar el objeto desde memoria viva, que es lo que el binario solo
+    // no alcanza a decir.
+    log_num("  rbx 0x", (unsigned long long)ctx->Rbx);
+    log_num("  rcx 0x", (unsigned long long)ctx->Rcx);
+    log_num("  rdx 0x", (unsigned long long)ctx->Rdx);
+    log_num("  rsi 0x", (unsigned long long)ctx->Rsi);
+    log_num("  rdi 0x", (unsigned long long)ctx->Rdi);
+    log_num("  r12 0x", (unsigned long long)ctx->R12);
+    log_num("  r14 0x", (unsigned long long)ctx->R14);
+    log_num("  r15 0x", (unsigned long long)ctx->R15);
+    log_line("  --- fin de la autopsia ---");
+}
+
 static LONG CALLBACK testigo_excepcion(EXCEPTION_POINTERS *info) {
     if (info == nullptr || info->ExceptionRecord == nullptr)
         return EXCEPTION_CONTINUE_SEARCH;
@@ -8000,6 +8526,21 @@ static LONG CALLBACK testigo_excepcion(EXCEPTION_POINTERS *info) {
     log_num("  seleccion en curso ", (unsigned)g_force_sel);
     log_num("  cuenta pedida ", (unsigned)g_force_generated);
     log_num("  cuenta aplicada en la API ", (unsigned)g_api_aplicada);
+    log_num("  byte vivo en el sitio ", (unsigned)g_count_live);
+    // Solo para la lectura de [nulo+0x40], que es el fallo que se repite. En
+    // cualquier otro los registros no significan lo mismo y el volcado seria
+    // ruido con forma de dato.
+    if (c == EXCEPTION_ACCESS_VIOLATION &&
+        info->ExceptionRecord->NumberParameters >= 2 &&
+        info->ExceptionRecord->ExceptionInformation[0] == 0 &&
+        info->ExceptionRecord->ExceptionInformation[1] == 0x40)
+    {
+        HMODULE mm = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)dir, &mm);
+        autopsia_subframes(info->ContextRecord, (const void *)mm);
+    }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -8121,6 +8662,8 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 }
             }
             g_peralt = flag_file(L"mfg-peralt.txt");
+            g_tope_fijo = flag_file(L"mfg-topefijo.txt");
+            if (g_tope_fijo) log_line("tope fijo en 5 (mfg-topefijo.txt): es la LINEA BASE, crashea");
             g_permitir_x6 = flag_file(L"mfg-x6.txt");
             if (g_permitir_x6) log_line("6X habilitado a mano (mfg-x6.txt): crashea en Halo");
             g_dyn_diag = flag_file(L"mfg-dyndiag.txt");
@@ -8324,6 +8867,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             if (m > 1) { dir[m - 1] = 0; SetEnvironmentVariableW(L"SL_LOG_PATH", dir); }
             SetEnvironmentVariableW(L"SL_LOG_LEVEL", L"2");
             SetEnvironmentVariableW(L"SL_ENABLE_CONSOLE_LOGGING", L"0");
+            g_sllog_on = true;
             log_line("streamline logging enabled (sl.log lands beside this dll)");
         } else {
             SetEnvironmentVariableW(L"SL_LOG_LEVEL", L"0");
