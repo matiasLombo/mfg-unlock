@@ -3004,6 +3004,7 @@ static double g_pres_ms_sum = 0.0;
 static double g_pres_ms_max = 0.0;
 static int    g_pres_n = 0;
 static int    g_pres_hitch = 0;             // intervals over 33 ms
+static int    g_freeze_dichos = 0;          // tope de lineas del diagnostico
 static int    g_pres_bucket[6] = { 0, 0, 0, 0, 0, 0 };
 // El reloj de la PANTALLA, que es otro que el de Present.
 //
@@ -6151,6 +6152,35 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
                     const LONG since = g_present_count - g_last_change_pres;
                     if (since < 4) ++g_hitch_near;
                     else ++g_hitch_far;
+                    // El ESTADO en el instante del congelamiento, no el resumen
+                    // de la ventana.
+                    //
+                    // El resumen dice "presMax 284.7 ms, 12 hitches" y con eso no
+                    // se puede decidir nada: no dice si la cuenta acababa de
+                    // cambiar ni si el byte y la reserva estaban en el mismo
+                    // escalon. La tabla medida tiene las dos filas fatales --
+                    // byte por encima de la reserva crashea, por debajo DETIENE
+                    // LA PRESENTACION -- y entrar al menu es justo cuando el
+                    // juego apaga la generacion y la cuenta se mueve.
+                    //
+                    // Umbral alto y tope de lineas: esto escribe al log desde el
+                    // hilo de Present, y log_line abre el archivo por linea.
+                    if (ms > 60.0 && g_freeze_dichos < 40) {
+                        ++g_freeze_dichos;
+                        log_num("CONGELAMIENTO: present ms x10 ", (unsigned)(ms * 10.0));
+                        log_num("  presentaciones desde el ultimo cambio de cuenta ",
+                                (unsigned)since);
+                        log_num("  byte vivo ", (unsigned)g_count_live);
+                        log_num("  cuenta aplicada en la API ", (unsigned)g_api_aplicada);
+                        log_num("  cuenta pedida ", (unsigned)g_force_generated);
+                        log_num("  seleccion ", (unsigned)g_force_sel);
+                        log_num("  interpolacion encendida ", (unsigned)(g_interp_on ? 1 : 0));
+                        log_num("  ventana al frente ",
+                                (unsigned)(g_game_hwnd != nullptr &&
+                                           GetForegroundWindow() == g_game_hwnd ? 1 : 0));
+                        log_num("  lo ultimo que pidio el juego, cuenta ",
+                                (unsigned)g_last_seen_generated);
+                    }
                 }
             }
         }
