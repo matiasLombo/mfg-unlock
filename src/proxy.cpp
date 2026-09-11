@@ -49,6 +49,10 @@ static bool state_path(wchar_t *out, int max);            // M1, idem
 static void dyn_apply(double base_fps);                          // definida mas abajo
 static void log_line(const char *text);
 static void log_num(const char *label, unsigned long long v);
+// Direcciones y offsets, en hex y con el "0x" puesto aca. log_num es decimal
+// y no lleva "0x" en la etiqueta: el 11/09 el testigo escribio "offset en el
+// modulo 0x87252" con 87252 decimal, y se busco 0x87252 media hora.
+static void log_hex(const char *label, unsigned long long v);
 // Capa 0: cual copia EJECUTA, atada por el puntero que devuelve el interposer.
 static void executing_copy(const void *fn, const char *name);
 
@@ -216,6 +220,19 @@ static void log_num(const char *label, unsigned long long v) {
     int d = 0;
     if (v == 0) digits[d++] = '0';
     while (v > 0) { digits[d++] = (char)('0' + (v % 10)); v /= 10; }
+    while (d > 0) buf[i++] = digits[--d];
+    buf[i] = 0;
+    log_line(buf);
+}
+static void log_hex(const char *label, unsigned long long v) {
+    char buf[128];
+    int i = 0;
+    while (label[i] != 0 && i < 90) { buf[i] = label[i]; ++i; }
+    buf[i++] = '0'; buf[i++] = 'x';
+    char digits[24];
+    int d = 0;
+    if (v == 0) digits[d++] = '0';
+    while (v > 0) { const int n = (int)(v & 0xF); digits[d++] = (char)(n < 10 ? '0' + n : 'a' + n - 10); v >>= 4; }
     while (d > 0) buf[i++] = digits[--d];
     buf[i] = 0;
     log_line(buf);
@@ -489,7 +506,7 @@ static void say_module(const char *tag, const void *fn) {
     a[k] = 0;
     log_line(tag);
     log_line(a);
-    log_num("    offset 0x", (unsigned long long)((ULONG_PTR)fn - (ULONG_PTR)m));
+    log_hex("    offset ", (unsigned long long)((ULONG_PTR)fn - (ULONG_PTR)m));
 }
 
 // A que apunta la llamada virtual que corta el bucle de generacion.
@@ -526,8 +543,8 @@ static void probe_vtable(void) {
     LONG sel1 = -1; unsigned char sel2 = 0xFF;
     read_ok(ctx + 0x45a8, &sel1, 4);
     read_ok(ctx + 0x45e1, &sel2, 1);
-    log_num("  [ctx+0x45a8] ", (unsigned)sel1);
-    log_num("  [ctx+0x45e1] ", (unsigned)sel2);
+    log_num("  [ctx+45a8h] ", (unsigned)sel1);
+    log_num("  [ctx+45e1h] ", (unsigned)sel2);
 
     struct Cand { const char *name_w; unsigned off; bool doble; };
     const Cand cands[3] = {

@@ -70,6 +70,8 @@
 
 // Vive en loader.h, que se incluye despues.
 static bool path_in_our_sdk(const wchar_t *module, unsigned minor, wchar_t *out);
+// Vive en present.h (se incluye despues): el swapchain adoptado, comprobado.
+static IDXGISwapChain *live_swapchain(void);
 
 static bool g_host_on = false;                 // config `host 1`
 static bool g_host_hudless = false;            // config `hosthudless 1`: taggear la salida de DLSS como sin-HUD (se ve mal, ver abajo)
@@ -351,6 +353,26 @@ static unsigned hk_ngx_evaluate(ID3D12GraphicsCommandList *cl, const void *handl
         log_num("  jitter x1000 (+32768 si negativo) ", (unsigned)(jx < 0 ? 32768 + (unsigned)(-jx * 1000) : (unsigned)(jx * 1000)));
         log_num("  mv scale x1000 ", (unsigned)(sx * 1000));
         log_num("  create flags ", flags);
+        // Formato y tamano de cada buffer, y el del backbuffer: el 11/09 el
+        // blur en movimiento era la salida de DLSS en HDR lineal (IsHDR) contra
+        // un backbuffer RGBA8, y nuestro log no lo decia; lo dijo sl.log.
+        const ID3D12Resource *bufs[3] = { depth, mvec, output };
+        const char *names[3] = { "  depth: formato ", "  mvec: formato ", "  salida: formato " };
+        for (int b = 0; b < 3; ++b) {
+            if (bufs[b] == nullptr) continue;
+            const D3D12_RESOURCE_DESC d = const_cast<ID3D12Resource *>(bufs[b])->GetDesc();
+            log_num(names[b], (unsigned)d.Format);
+            log_num("    ancho ", (unsigned)d.Width);
+            log_num("    alto ", d.Height);
+        }
+        {
+            IDXGISwapChain *chain = live_swapchain();
+            DXGI_SWAP_CHAIN_DESC sd;
+            if (chain != nullptr && SUCCEEDED(chain->GetDesc(&sd)))
+                log_num("  backbuffer: formato ", (unsigned)sd.BufferDesc.Format);
+            else
+                log_line("  backbuffer: sin swapchain adoptado todavia");
+        }
     }
     if (depth == nullptr || mvec == nullptr || output == nullptr) return r;
 

@@ -132,7 +132,7 @@ static void dump_window(const ClosedWindow &w) {
     {
         probe_vtable();
         const LONG p4168 = probe_4168();
-        log_num("  [global+0x4168] ", (unsigned)p4168);
+        log_num("  [global+4168h] ", (unsigned)p4168);
         log_num("  techo declarado a la API ", (unsigned)w.api_applied);
         log_num("  g_force_sel ", (unsigned)w.force_sel);
         log_num("  g_force_generated ", (unsigned)w.force_generated);

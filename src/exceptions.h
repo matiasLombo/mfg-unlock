@@ -79,7 +79,7 @@ static void subframe_autopsy(const CONTEXT *ctx, const void *modbase) {
     const unsigned idx = (unsigned)(ctx->R10 & 0xFFFFFFFFu);
     log_line("  --- autopsia del array de sub-frames ---");
     log_num("  indice pedido (r10) ", (unsigned long long)idx);
-    log_num("  base del contexto (r13) 0x", (unsigned long long)base);
+    log_hex("  base del contexto (r13) ", (unsigned long long)base);
     LONG total = 0, done_n = 0;
     if (read_safe((const void *)(base + 4), &total, 4))
         log_num("  [ctx+4] (nuestro byte) ", (unsigned)total);
@@ -122,7 +122,7 @@ static void subframe_autopsy(const CONTEXT *ctx, const void *modbase) {
             && pp != nullptr) {
             LONG count = 0;
             if (read_safe((const unsigned char *)pp + 0x4168, &count, 4))
-                log_num("  [global+0x4168] (cuenta de presentacion?) ",
+                log_num("  [global+4168h] (cuenta de presentacion?) ",
                         (unsigned)count);
             else
                 log_line("  [global+0x4168] ilegible");
@@ -152,7 +152,7 @@ static void subframe_autopsy(const CONTEXT *ctx, const void *modbase) {
             ULONG_PTR v = 0;
             if (!read_safe((const void *)(sp + (ULONG_PTR)i * 8), &v, 8)) continue;
             if (v <= mb || v >= mend) continue;
-            log_num("  +0x", (unsigned long long)(v - mb));
+            log_hex("  +", (unsigned long long)(v - mb));
             ++placed;
         }
         if (placed == 0) log_line("  ninguno");
@@ -160,14 +160,14 @@ static void subframe_autopsy(const CONTEXT *ctx, const void *modbase) {
     // Los registros crudos. r10 es el indice y r13 la base; el resto es para
     // identificar el objeto desde memoria viva, que es lo que el binario solo
     // no alcanza a decir.
-    log_num("  rbx 0x", (unsigned long long)ctx->Rbx);
-    log_num("  rcx 0x", (unsigned long long)ctx->Rcx);
-    log_num("  rdx 0x", (unsigned long long)ctx->Rdx);
-    log_num("  rsi 0x", (unsigned long long)ctx->Rsi);
-    log_num("  rdi 0x", (unsigned long long)ctx->Rdi);
-    log_num("  r12 0x", (unsigned long long)ctx->R12);
-    log_num("  r14 0x", (unsigned long long)ctx->R14);
-    log_num("  r15 0x", (unsigned long long)ctx->R15);
+    log_hex("  rbx ", (unsigned long long)ctx->Rbx);
+    log_hex("  rcx ", (unsigned long long)ctx->Rcx);
+    log_hex("  rdx ", (unsigned long long)ctx->Rdx);
+    log_hex("  rsi ", (unsigned long long)ctx->Rsi);
+    log_hex("  rdi ", (unsigned long long)ctx->Rdi);
+    log_hex("  r12 ", (unsigned long long)ctx->R12);
+    log_hex("  r14 ", (unsigned long long)ctx->R14);
+    log_hex("  r15 ", (unsigned long long)ctx->R15);
     log_line("  --- fin de la autopsia ---");
 }
 
@@ -201,8 +201,8 @@ static LONG CALLBACK exception_witness(EXCEPTION_POINTERS *info) {
     if (InterlockedIncrement(&said_n) > 40) return EXCEPTION_CONTINUE_SEARCH;
     const void *dir = info->ExceptionRecord->ExceptionAddress;
     log_line("EXCEPCION ------------------------------------------");
-    log_num("  codigo 0x", (unsigned long long)c);
-    log_num("  direccion 0x", (unsigned long long)(ULONG_PTR)dir);
+    log_hex("  codigo ", (unsigned long long)c);
+    log_hex("  direccion ", (unsigned long long)(ULONG_PTR)dir);
     // De que modulo es esa direccion, que es lo que hace util al numero.
     {
         HMODULE m = nullptr;
@@ -221,7 +221,7 @@ static LONG CALLBACK exception_witness(EXCEPTION_POINTERS *info) {
                 a[k] = 0;
                 log_line("  modulo:");
                 log_line(a);
-                log_num("  offset en el modulo 0x",
+                log_hex("  offset en el modulo ",
                         (unsigned long long)((ULONG_PTR)dir - (ULONG_PTR)m));
             }
         } else {
@@ -232,7 +232,7 @@ static LONG CALLBACK exception_witness(EXCEPTION_POINTERS *info) {
         info->ExceptionRecord->NumberParameters >= 2) {
         log_num("  operacion (0 lee, 1 escribe, 8 ejecuta) ",
                 (unsigned long long)info->ExceptionRecord->ExceptionInformation[0]);
-        log_num("  sobre la direccion 0x",
+        log_hex("  sobre la direccion ",
                 (unsigned long long)info->ExceptionRecord->ExceptionInformation[1]);
     }
     log_num("  seleccion en curso ", (unsigned)g_force_sel);
