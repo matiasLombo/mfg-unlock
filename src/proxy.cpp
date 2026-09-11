@@ -230,7 +230,7 @@ static bool flag_file(const wchar_t *name) {
 }
 
 // Lo que hay al lado de la dll, leido una vez en DllMain (src/config.h).
-static cfg::Ajustes g_cfg;
+static config::Settings g_cfg;
 
 // Se abre y se cierra por linea, a proposito. Se probo dejar el handle abierto
 // -- seis llamadas al sistema por linea contra una sola apertura -- y en GTA V
@@ -4564,8 +4564,8 @@ static void settings_load(void) {
     // no se toca: una escritura truncada no puede volverse "AUTO, objetivo
     // nada". La semilla de la cuenta y el piso del objetivo son politica y
     // quedan aca.
-    cfg::Ajustes s;
-    cfg::parsear_settings(buf, n, kPanRows, kMaxCustom, s);
+    config::Settings s;
+    config::parse_settings(buf, n, kPanRows, kMaxCustom, s);
     if (s.dynfps >= 0) g_dyn_fps = s.dynfps;
     if (s.hud >= 0) g_hud_on = s.hud == 1;
     if (s.mode >= 0) {
@@ -9155,8 +9155,8 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             // se reparte a los globales que cada subsistema ya usaba. Lo que
             // sigue conserva el orden, los avisos y los efectos (arm_slinit
             // temprano, la cuenta recalculada) que DllMain tenia a mano.
-            cfg::leer_banderas(g_cfg, [](const wchar_t *f) { return flag_file(f); });
-            cfg::leer_numericos(g_cfg, [](const wchar_t *f, char *b, unsigned cap) -> unsigned {
+            config::read_flags(g_cfg, [](const wchar_t *f) { return flag_file(f); });
+            config::read_numerics(g_cfg, [](const wchar_t *f, char *b, unsigned cap) -> unsigned {
                 wchar_t p[MAX_PATH];
                 beside_dll(p, f);
                 HANDLE h = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ, nullptr,
@@ -9183,12 +9183,12 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                     CloseHandle(ch);
                     if (ok && got > 0) {
                         cbuf[got] = 0;
-                        const int vistas = cfg::parsear_config(cbuf, (unsigned)got, g_cfg);
+                        const int vistas = config::parse_config(cbuf, (unsigned)got, g_cfg);
                         log_num("config: claves leidas de mfg-config.txt ", (unsigned)vistas);
                     }
                 }
             }
-            const cfg::Ajustes &a = g_cfg;
+            const config::Settings &a = g_cfg;
             g_debug = a.debug;
             g_watch_settings = a.watch;
             g_novsync = a.novsync;
