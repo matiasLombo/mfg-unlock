@@ -168,8 +168,11 @@ static PFN_DXGIPresent present_original_for(IDXGISwapChain *self) {
 // es el contador del runtime -- el que este proyecto ya habia concluido que era
 // el honesto ([[measure-with-the-runtime-counter]]). Se llama desde el camino
 // del frame token, que corre igual.
+static IDXGISwapChain *live_swapchain(void);   // mas abajo, con la adopcion
 static void runtime_presents(void) {
-    if (!g_present_via_runtime || g_swapchain == nullptr) return;
+    if (!g_present_via_runtime) return;
+    IDXGISwapChain *chain = live_swapchain();
+    if (chain == nullptr) return;
     // GetLastPresentCount, no GetFrameStatistics.
     //
     // La primera version usaba GetFrameStatistics y no conto NUNCA: esa llamada
@@ -183,7 +186,7 @@ static void runtime_presents(void) {
     // GetLastPresentCount devuelve el contador del runtime sin depender del
     // modo de presentacion, que es justo lo que hace falta aca.
     UINT now_qpc = 0;
-    const HRESULT hr = g_swapchain->GetLastPresentCount(&now_qpc);
+    const HRESULT hr = chain->GetLastPresentCount(&now_qpc);
     if (FAILED(hr)) {
         static bool said = false;
         if (!said) {
@@ -520,6 +523,65 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
 // SetMaximumFrameLatency. 12 * 8 = 0x60, matching the `call qword ptr [rax+0x60]`
 // the pin patch was written against.
 static PFN_SMFL g_orig_smfl = nullptr;
+
+// Lo adoptado se suelta cuando se destruye. "La ultima instancia gana" dejo
+// un puntero colgado en GTA V (2026-09-11): a los 52 s alguien creo un
+// swapchain transitorio (CreateSwapChain flags 2, no el del juego), se adopto,
+// lo liberaron, y a los 111 s hk_slGetNewFrameToken leyo su vtable ya basura
+// (0xC0000005 en GetLastPresentCount, vtable 0xAE000). Antes no pasaba solo
+// porque con ReShade en el slot no se adoptaba nada.
+//
+// La primera version enganchaba el slot 2 de la vtable (IUnknown::Release)
+// para enterarse de la destruccion. El overlay de Steam tambien lo engancha
+// -- la misma trampa que Present, [[never-byte-detour-present]] -- y
+// Cyberpunk cayo con 0xC00000FD en gameoverlayrenderer64.dll al crear su
+// swapchain. Asi que sin hooks: antes de usar el adoptado se comprueba que
+// su pagina este mapeada y que su vtable apunte adentro de un modulo. Si no,
+// se suelta y vuelve el anterior que siga vivo. Dos VirtualQuery por frame
+// renderizado.
+static IDXGISwapChain *g_adopted[4] = { nullptr, nullptr, nullptr, nullptr };
+
+static void adopt_swapchain(void *sc) {
+    IDXGISwapChain *c = reinterpret_cast<IDXGISwapChain *>(sc);
+    int slot = -1;
+    for (int i = 0; i < 4; ++i) if (g_adopted[i] == c) { slot = i; break; }
+    if (slot < 0) {
+        for (int i = 3; i > 0; --i) g_adopted[i] = g_adopted[i - 1];   // el mas nuevo primero
+        g_adopted[0] = c;
+    }
+    g_swapchain = c;
+}
+static void forget_swapchain(IDXGISwapChain *c) {
+    for (int i = 0; i < 4; ++i) {
+        if (g_adopted[i] != c) continue;
+        for (int j = i; j < 3; ++j) g_adopted[j] = g_adopted[j + 1];
+        g_adopted[3] = nullptr;
+        break;
+    }
+    if (g_swapchain == c) g_swapchain = g_adopted[0];
+}
+static bool swapchain_looks_alive(const IDXGISwapChain *c) {
+    MEMORY_BASIC_INFORMATION mb;
+    if (VirtualQuery(c, &mb, sizeof mb) != sizeof mb) return false;
+    if (mb.State != MEM_COMMIT || (mb.Protect & PAGE_GUARD) || (mb.Protect & PAGE_NOACCESS)) return false;
+    const void *vt = *reinterpret_cast<const void *const *>(c);
+    HMODULE owner = nullptr;
+    return vt != nullptr &&
+           GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              (LPCWSTR)vt, &owner) && owner != nullptr;
+}
+// El adoptado vivo, o nullptr. Descarta los muertos al pasar.
+static IDXGISwapChain *live_swapchain(void) {
+    for (int k = 0; k < 4; ++k) {
+        IDXGISwapChain *c = g_swapchain;
+        if (c == nullptr) return nullptr;
+        if (swapchain_looks_alive(c)) return c;
+        log_line("present: el swapchain adoptado ya no existe; se suelta");
+        forget_swapchain(c);
+    }
+    return nullptr;
+}
+
 static HRESULT STDMETHODCALLTYPE hk_smfl(IUnknown *self, UINT n) {
     InterlockedIncrement(&g_smfl_calls);
     if (g_clamp_latency > 0 && (int)n > g_clamp_latency) n = (UINT)g_clamp_latency;
@@ -573,7 +635,7 @@ static void hook_swapchain_present(void *sc) {
             // aca, salia por este return, y presentes_del_runtime se quedaba
             // sin swapchain que leer: cero lineas de PresentCount y el HUD en
             // cero. La ultima instancia gana, igual que en hk_cscfh.
-            g_swapchain = reinterpret_cast<IDXGISwapChain *>(sc);
+            adopt_swapchain(sc);
             hook_frame_latency(sc);
             log_line("present: vtable ya enganchada; se adopta la instancia nueva");
             return;
@@ -721,7 +783,7 @@ static void hook_swapchain_present(void *sc) {
     g_vt_present[g_vt_present_n].orig = orig_of_this;
     InterlockedIncrement(&g_vt_present_n);
     if (g_orig_dxgi_present == nullptr) g_orig_dxgi_present = orig_of_this;
-    g_swapchain = reinterpret_cast<IDXGISwapChain *>(sc);
+    adopt_swapchain(sc);
     hook_frame_latency(sc);
     // What the swap chain was created with, and whether the app takes the
     // waitable handle.
@@ -828,6 +890,7 @@ static void adopt_existing_swapchain(void) {
     log_line("  (los flags de arriba son del swapchain descartable, no del juego)");
     // El descartable ya cumplio. La vtable vive en el modulo de DXGI, no en el
     // objeto, asi que el parche sobrevive a soltarlo.
+    forget_swapchain(sc);
     g_swapchain = nullptr;
     sc->Release();
     if (ctx != nullptr) reinterpret_cast<IUnknown *>(ctx)->Release();
