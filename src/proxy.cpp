@@ -77,7 +77,7 @@ static void leer_veredicto_previo(void);
 static void guardar_consentimiento(int si);
 static bool version_soportada(const wchar_t *ruta, unsigned *may, unsigned *men);
 static bool g_ya_sustituimos = false;                         // M3
-static void emitir_veredicto_si_toca(void);   // M1, definida mas abajo
+static void emit_verdict_if_due(void);   // M1, definida mas abajo
 static bool ruta_de_estado(wchar_t *out, int max);            // M1, idem
 static void dyn_apply(double base_fps);                          // definida mas abajo
 bool g_dynamic_known = false;
@@ -104,7 +104,7 @@ static inline bool fase_activa(void) { return g_fase == (LONG)Fase::ACTIVO; }
 static inline bool fase_pasiva(void) { return g_fase == (LONG)Fase::PASIVO; }
 static void evaluar_invariantes(void);
 // Alimenta g_present_count desde el runtime cuando no hay hook de Present.
-static void presentes_del_runtime(void);
+static void runtime_presents(void);
 extern int g_copia_ejecuta;
 // Presentaciones vistas en el swapchain. Declarada aca porque el latch de
 // apply_override_now la necesita y vive antes que su definicion.
@@ -878,9 +878,9 @@ static void bajar_4168(LONG v) {
     LONG actual = 0;
     if (!leer_ok(campo, &actual, 4)) return;
     if (actual <= v) return;              // solo baja
-    static LONG dicho = -1;
-    if (dicho != v) {
-        dicho = v;
+    static LONG said = -1;
+    if (said != v) {
+        said = v;
         log_num("4168: la marca baja de ", (unsigned)actual);
         log_num("  a la cuenta viva ", (unsigned)v);
     }
@@ -915,11 +915,11 @@ static void decir_modulo(const char *etiqueta, const void *fn) {
         log_line("    no pertenece a ningun modulo cargado");
         return;
     }
-    wchar_t nom[MAX_PATH];
-    GetModuleFileNameW(m, nom, MAX_PATH);
+    wchar_t name_w[MAX_PATH];
+    GetModuleFileNameW(m, name_w, MAX_PATH);
     char a[260]; int k = 0;
-    for (int q = 0; nom[q] != 0 && k < 250; ++q)
-        a[k++] = (char)(nom[q] < 128 ? nom[q] : '?');
+    for (int q = 0; name_w[q] != 0 && k < 250; ++q)
+        a[k++] = (char)(name_w[q] < 128 ? name_w[q] : '?');
     a[k] = 0;
     log_line(etiqueta);
     log_line(a);
@@ -951,11 +951,11 @@ static void decir_modulo(const char *etiqueta, const void *fn) {
 // vez.
 static void sonda_vtable(void) {
     if (g_dlssg_base == nullptr) return;
-    static bool dicho = false;
-    if (dicho) return;
+    static bool said = false;
+    if (said) return;
     unsigned char *ctx = nullptr;
     if (!leer_ok(g_dlssg_base + 0x8f1e8, &ctx, sizeof(ctx)) || ctx == nullptr) return;
-    dicho = true;
+    said = true;
     log_line("vtable: resolviendo el corte del bucle de generacion");
     LONG sel1 = -1; unsigned char sel2 = 0xFF;
     leer_ok(ctx + 0x45a8, &sel1, 4);
@@ -963,7 +963,7 @@ static void sonda_vtable(void) {
     log_num("  [ctx+0x45a8] ", (unsigned)sel1);
     log_num("  [ctx+0x45e1] ", (unsigned)sel2);
 
-    struct Cand { const char *nom; unsigned off; bool doble; };
+    struct Cand { const char *name_w; unsigned off; bool doble; };
     const Cand cands[3] = {
         { "  candidato A: **(ctx+0x18)", 0x18, true  },
         { "  candidato B:  *(ctx+0x20)", 0x20, false },
@@ -972,23 +972,23 @@ static void sonda_vtable(void) {
     for (int c = 0; c < 3; ++c) {
         unsigned char *obj = nullptr;
         if (!leer_ok(ctx + cands[c].off, &obj, sizeof(obj)) || obj == nullptr) {
-            log_line(cands[c].nom); log_line("    nulo"); continue;
+            log_line(cands[c].name_w); log_line("    nulo"); continue;
         }
         if (cands[c].doble) {
             unsigned char *o2 = nullptr;
             if (!leer_ok(obj, &o2, sizeof(o2)) || o2 == nullptr) {
-                log_line(cands[c].nom); log_line("    segundo deref nulo"); continue;
+                log_line(cands[c].name_w); log_line("    segundo deref nulo"); continue;
             }
             obj = o2;
         }
         unsigned char *vt = nullptr, *fn = nullptr;
         if (!leer_ok(obj, &vt, sizeof(vt)) || vt == nullptr) {
-            log_line(cands[c].nom); log_line("    vtable ilegible"); continue;
+            log_line(cands[c].name_w); log_line("    vtable ilegible"); continue;
         }
         if (!leer_ok(vt + 0x40, &fn, sizeof(fn)) || fn == nullptr) {
-            log_line(cands[c].nom); log_line("    slot +0x40 ilegible"); continue;
+            log_line(cands[c].name_w); log_line("    slot +0x40 ilegible"); continue;
         }
-        decir_modulo(cands[c].nom, fn);
+        decir_modulo(cands[c].name_w, fn);
     }
 }
 // El techo que el plugin declara para si mismo, leido (no escrito).
@@ -1160,18 +1160,18 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     case policy::Reason::PASSIVE: {
         // Un juego con topologia rota corre como si el mod no estuviera, en vez
         // de crashear. Ver evaluar_invariantes.
-        static bool dicho = false;
-        if (!dicho) {
-            dicho = true;
+        static bool said = false;
+        if (!said) {
+            said = true;
             log_line("PASIVO: no se reescriben las opciones del juego");
         }
         return;
     }
     case policy::Reason::GAME_TURNED_OFF: {
         // El congelamiento del menu de pausa: ver juego_apago_la_generacion.
-        static LONG dicho = -1;
-        if (dicho != g_force_sel) {
-            dicho = g_force_sel;
+        static LONG said = -1;
+        if (said != g_force_sel) {
+            said = g_force_sel;
             log_num("override: el juego apago la generacion, no se le pelea; seleccion ",
                     (unsigned)g_force_sel);
         }
@@ -1183,9 +1183,9 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     g_target_written = false;
 
     if (s.a1_declared) {
-        static bool dicho = false;
-        if (!dicho) {
-            dicho = true;
+        static bool said = false;
+        if (!said) {
+            said = true;
             log_num("A1: declarando el techo del ciclo mientras apagado ",
                     (unsigned)s.a1_ceiling);
         }
@@ -1205,9 +1205,9 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         return;
     }
     if (s.brake_limited) {
-        static LONG dicho = -1;
-        if (dicho != s.brake_cap) {
-            dicho = s.brake_cap;
+        static LONG said = -1;
+        if (said != s.brake_cap) {
+            said = s.brake_cap;
             log_num("freno: sin parche, la cuenta se limita a la del juego ",
                     (unsigned)s.brake_cap);
         }
@@ -1229,9 +1229,9 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         // corrige solo cuando manda el parche; con el freno se deja constancia
         // (corregirlo ahi congelo Halo 24 veces). Si esto aparece seguido, el
         // culpable es otro y hay que ir a buscarlo.
-        static LONG dicho = -1;
-        if (dicho != s.remains) {
-            dicho = s.remains;
+        static LONG said = -1;
+        if (said != s.remains) {
+            said = s.remains;
             diag::Line l = diag::invariant(diag::Layer::POLICY, "cuenta>=2",
                                              s.invariant_fixed
                                                  ? "con multiplicador es 1X; se escribe 2, el piso"
@@ -1569,9 +1569,9 @@ static void apply_override_now(void) {
             if (ms < 150.0) return;                                  // (1)
             if (g_present_count - pres_ultimo < 8) return;           // (2)
             if (enviado_ultimo >= 0 && g_api_applied != enviado_ultimo) {
-                static LONG dicho = -1;                              // (3)
-                if (dicho != enviado_ultimo) {
-                    dicho = enviado_ultimo;
+                static LONG said = -1;                              // (3)
+                if (said != enviado_ultimo) {
+                    said = enviado_ultimo;
                     log_num("latch: el cambio anterior aun no se observo; se espera. pedido ",
                             (unsigned)enviado_ultimo);
                     log_num("  aplicado en la API ", (unsigned)g_api_applied);
@@ -3079,9 +3079,9 @@ static void set_count_now(LONG n) {
         const LONG suyo = g_last_seen_generated;
         const LONG tope = (suyo >= 1 && suyo <= 5) ? suyo : 0;
         if (n > tope) {
-            static LONG dicho = -1;
-            if (dicho != tope) {
-                dicho = tope;
+            static LONG said = -1;
+            if (said != tope) {
+                said = tope;
                 log_num("freno: el byte de la cuenta tambien se limita a ",
                         (unsigned)tope);
             }
@@ -3460,9 +3460,9 @@ static void fractional_tick(void) {
     // que genera quiso pedir.
     if (per_frame < 2.0 &&
         (g_force_sel == kSelDynamic || g_force_sel == kSelDynFuture)) {
-        static bool dicho = false;
-        if (!dicho) {
-            dicho = true;
+        static bool said = false;
+        if (!said) {
+            said = true;
             log_line("dynamic: sin ratio decidido, se arranca en 2.0 para poder medir la base");
         }
         per_frame = 2.0 - kBase;
@@ -3613,9 +3613,9 @@ static void fractional_tick(void) {
     // generacion apagada. El fraccional necesita bloques, o sea g_slowalt, que
     // viene encendido salvo que mfg-noslowalt.txt lo apague.
     if (cuenta_es_multiplicador() && g_dyn_target % 100 != 0) {
-        static bool dicho = false;
-        if (!dicho) {
-            dicho = true;
+        static bool said = false;
+        if (!said) {
+            said = true;
             log_line("frac: sin slowalt el ratio queda en el entero de arriba");
         }
     }
@@ -3715,7 +3715,7 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     // El grafo ya cargo entero: aca se deciden los invariantes, una sola vez.
     evaluar_invariantes();
     // Y si no hay hook de Present, el contador se alimenta desde aca.
-    presentes_del_runtime();
+    runtime_presents();
     // One rendered frame, exactly once.
     //
     // The game asks for the frame token about seven times per frame -- 305.7
@@ -5060,7 +5060,7 @@ static DWORD WINAPI recorder(LPVOID) {
         // D3D12 games never reach the Vulkan branches above, so this is not in
         // the else of anything: both are attempted, and whichever applies wins.
         arm_dxgi_recorder();
-        emitir_veredicto_si_toca();
+        emit_verdict_if_due();
         // Y si el juego ya tenia su swapchain hecho cuando llegamos, el hook de
         // la factory no lo va a ver nunca. Se adopta por la vtable compartida.
         adopt_existing_swapchain();
@@ -5739,8 +5739,8 @@ int g_copia_ejecuta = -1;   // indice en g_copias, -1 = todavia no se sabe
 bool g_ejecuta_resuelto = false;
 
 static void copia_que_ejecuta(const void *fn, const char *nombre) {
-    static bool dicho = false;
-    if (dicho || fn == nullptr) return;
+    static bool said = false;
+    if (said || fn == nullptr) return;
     const unsigned char *p = (const unsigned char *)fn;
     // Dos pasadas: primero entre las que siguen mapeadas.
     //
@@ -5765,7 +5765,7 @@ static void copia_que_ejecuta(const void *fn, const char *nombre) {
     // constancia y se vuelve a intentar con la funcion siguiente: latchear un
     // fallo es quedarse con el peor dato de la corrida.
     if (cual >= 0) {
-        dicho = true;
+        said = true;
         g_copia_ejecuta = cual;
         g_ejecuta_resuelto = true;
     }
@@ -5990,7 +5990,7 @@ static bool ruta_de_estado(wchar_t *out, int max) {
 // seguido y una corrida que muere a los 5 s no llegaba a emitir nada, asi que el
 // fixture no se podia medir. 8 s sigue siendo cinco veces el peor asentamiento
 // visto y sobrevive a las corridas cortas.
-static void emitir_veredicto_si_toca(void) {
+static void emit_verdict_if_due(void) {
     if (g_veredicto_escrito || g_copias_n == 0) return;
     if (GetTickCount64() - g_primera_copia_ms < 8000ULL) return;
     g_veredicto_escrito = true;
@@ -6793,8 +6793,8 @@ static bool buscar_interposer(unsigned v, wchar_t *out) {
         wchar_t cand[MAX_PATH];
         int k = 0;
         for (; k < corte; ++k) cand[k] = exe[k];
-        const wchar_t *nom = L"sl.interposer.dll";
-        for (int i = 0; nom[i] != 0; ++i) cand[k++] = nom[i];
+        const wchar_t *name_w = L"sl.interposer.dll";
+        for (int i = 0; name_w[i] != 0; ++i) cand[k++] = name_w[i];
         cand[k] = 0;
         if (version_es(cand, v)) {
             for (int i = 0; i <= k; ++i) out[i] = cand[i];
@@ -6999,10 +6999,10 @@ static LONG g_inter_pedidos = 0;
 // llamo. Sin ella, recursion infinita.
 static LONG g_ldr_reentra = 0;
 
-static NTSTATUS cargar_propio(const wchar_t *propio, PVOID *base) {
+static NTSTATUS cargar_propio(const wchar_t *own, PVOID *base) {
     if (base == nullptr) return (NTSTATUS)0xC0000001L;
     g_ldr_reentra = 1;
-    HMODULE h = LoadLibraryW(propio);
+    HMODULE h = LoadLibraryW(own);
     g_ldr_reentra = 0;
     if (h == nullptr) return (NTSTATUS)0xC0000001L;
     *base = (PVOID)h;
@@ -7240,13 +7240,13 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
         return g_orig_ldrload(ruta, carac, nombre, base);
     }
     if (g_snippet_on && (idx != -2 || !g_inter_fuera)) {
-        static wchar_t propio[MAX_PATH];
-        const wchar_t *nom = (idx == -2) ? L"sl.interposer.dll" : g_set[idx].nombre;
-        if (ruta_en_nuestro_sdk(nom, 12, propio)) {
+        static wchar_t own[MAX_PATH];
+        const wchar_t *name_w = (idx == -2) ? L"sl.interposer.dll" : g_set[idx].nombre;
+        if (ruta_en_nuestro_sdk(name_w, 12, own)) {
             log_ruta("base: pedido  ", g_ruta_pedida);
-            log_ruta("  se carga el nuestro: ", propio);
+            log_ruta("  se carga el nuestro: ", own);
             g_ya_sustituimos = true;
-            const NTSTATUS stb = cargar_propio(propio, base);
+            const NTSTATUS stb = cargar_propio(own, base);
             if (stb >= 0) return stb;
             log_num("  no cargo, status ", (unsigned)stb);
             log_line("  se vuelve al del juego");
@@ -7270,9 +7270,9 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     if (g_veredicto_previo != 2) {
         // Sin un ROJO de la corrida anterior no se sustituye NADA. Un juego que
         // funciona nunca llega a esta rama, que es la salvaguarda que faltaba.
-        static bool dicho = false;
-        if (!dicho) {
-            dicho = true;
+        static bool said = false;
+        if (!said) {
+            said = true;
             log_num("set: sin veredicto ROJO previo, no se sustituye. veredicto=",
                     (unsigned long long)(unsigned)(g_veredicto_previo + 1));
         }
@@ -7551,15 +7551,15 @@ static LONG CALLBACK testigo_excepcion(EXCEPTION_POINTERS *info) {
         if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                                (LPCWSTR)dir, &m) && m != nullptr) {
-            wchar_t nom[MAX_PATH];
-            const DWORD n = GetModuleFileNameW(m, nom, MAX_PATH);
+            wchar_t name_w[MAX_PATH];
+            const DWORD n = GetModuleFileNameW(m, name_w, MAX_PATH);
             if (n > 0) {
                 int corte = (int)n;
-                while (corte > 0 && nom[corte-1] != L'\\') --corte;
+                while (corte > 0 && name_w[corte-1] != L'\\') --corte;
                 char a[128];
                 int k = 0;
-                for (int q = corte; nom[q] != 0 && k < 120; ++q)
-                    a[k++] = (char)(nom[q] < 128 ? nom[q] : '?');
+                for (int q = corte; name_w[q] != 0 && k < 120; ++q)
+                    a[k++] = (char)(name_w[q] < 128 ? name_w[q] : '?');
                 a[k] = 0;
                 log_line("  modulo:");
                 log_line(a);

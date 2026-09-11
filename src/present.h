@@ -47,7 +47,7 @@ typedef HRESULT(STDMETHODCALLTYPE *PFN_DXGIPresent)(IDXGISwapChain *, UINT, UINT
 static PFN_DXGIPresent g_orig_dxgi_present = nullptr;
 // Cierto cuando NO pudimos enganchar Present (overlay de Steam): el contador de
 // presentaciones pasa a leerse del runtime. Ver presentes_del_runtime.
-static bool g_present_por_runtime = false;
+static bool g_present_via_runtime = false;
 
 // Un original POR VTABLE, no uno por proceso.
 //
@@ -69,16 +69,16 @@ struct VtPresent { void **vt; PFN_DXGIPresent orig; };
 static VtPresent g_vt_present[8];
 static volatile LONG g_vt_present_n = 0;
 // Cuantas veces el hook corrio anidado dentro de si mismo (ver hk_dxgi_present).
-static volatile LONG g_present_anidados = 0;
+static volatile LONG g_present_nested = 0;
 // Profundidad de hk_dxgi_present en ESTE hilo. Sube al entrar y baja al salir
 // por RAII, asi que una excepcion adentro del original tampoco la deja torcida.
-static thread_local int g_present_nivel = 0;
-struct PresentAnidado {
-    PresentAnidado() { ++g_present_nivel; }
-    ~PresentAnidado() { --g_present_nivel; }
+static thread_local int g_present_depth = 0;
+struct NestedPresent {
+    NestedPresent() { ++g_present_depth; }
+    ~NestedPresent() { --g_present_depth; }
 };
 
-static PFN_DXGIPresent present_original_de(IDXGISwapChain *self) {
+static PFN_DXGIPresent present_original_for(IDXGISwapChain *self) {
     if (self == nullptr) return nullptr;
     void **vt = *reinterpret_cast<void ***>(self);
     const LONG n = g_vt_present_n;
@@ -144,8 +144,8 @@ static bool g_native_pacer_found = false;  // sticky: one plugin with sites is e
 // es el contador del runtime -- el que este proyecto ya habia concluido que era
 // el honesto ([[measure-with-the-runtime-counter]]). Se llama desde el camino
 // del frame token, que corre igual.
-static void presentes_del_runtime(void) {
-    if (!g_present_por_runtime || g_swapchain == nullptr) return;
+static void runtime_presents(void) {
+    if (!g_present_via_runtime || g_swapchain == nullptr) return;
     // GetLastPresentCount, no GetFrameStatistics.
     //
     // La primera version usaba GetFrameStatistics y no conto NUNCA: esa llamada
@@ -161,9 +161,9 @@ static void presentes_del_runtime(void) {
     UINT now_qpc = 0;
     const HRESULT hr = g_swapchain->GetLastPresentCount(&now_qpc);
     if (FAILED(hr)) {
-        static bool dicho = false;
-        if (!dicho) {
-            dicho = true;
+        static bool said = false;
+        if (!said) {
+            said = true;
             diag::Line l = diag::invariant(diag::Layer::PRESENTATION, "contador",
                                              "GetLastPresentCount fallo; el contador queda en cero");
             l.pair("hr", (long long)(long)hr);
@@ -218,10 +218,10 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     // una vtable que no enganchamos -- no deberia pasar, porque solo se llega
     // aca por un slot que nosotros escribimos -- se avisa una vez y se usa el
     // primer original, que es lo que hacia el codigo anterior siempre.
-    PFN_DXGIPresent orig = present_original_de(self);
+    PFN_DXGIPresent orig = present_original_for(self);
     if (orig == nullptr) {
-        static LONG dicho = 0;
-        if (InterlockedCompareExchange(&dicho, 1, 0) == 0)
+        static LONG said = 0;
+        if (InterlockedCompareExchange(&said, 1, 0) == 0)
             log_line("present: objeto con vtable desconocida; se usa el primer original");
         orig = g_orig_dxgi_present;
         if (orig == nullptr) return (HRESULT)0x887A0001L;   // DXGI_ERROR_INVALID_CALL
@@ -232,7 +232,7 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     // solo por el chain real). Se deja constancia una vez para que quien lea
     // los contadores por hook sepa que cuentan los dos niveles; el contador
     // que no depende de esto es PresentCount de GetFrameStatistics.
-    PresentAnidado anidado;
+    NestedPresent nested;
     // FRENO DURO DE RECURSION.
     //
     // Con la tabla por vtable el anidamiento deberia ser de DOS niveles y
@@ -249,18 +249,18 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     // instrumentacion en esos frames; no se pierde el proceso. Y la profundidad
     // queda en el log, que es el dato que falta para entender por que hay mas de
     // dos niveles.
-    if (g_present_nivel > 2) {
-        static LONG max_visto = 0;
-        if (g_present_nivel > max_visto) {
-            max_visto = g_present_nivel;
-            log_num("present: RECURSION, profundidad ", (unsigned)g_present_nivel);
+    if (g_present_depth > 2) {
+        static LONG max_seen = 0;
+        if (g_present_depth > max_seen) {
+            max_seen = g_present_depth;
+            log_num("present: RECURSION, profundidad ", (unsigned)g_present_depth);
         }
         return orig(self, interval, flags);
     }
-    if (g_present_nivel > 1) {
-        InterlockedIncrement(&g_present_anidados);
-        static LONG dicho_anidado = 0;
-        if (InterlockedCompareExchange(&dicho_anidado, 1, 0) == 0)
+    if (g_present_depth > 1) {
+        InterlockedIncrement(&g_present_nested);
+        static LONG said_nested = 0;
+        if (InterlockedCompareExchange(&said_nested, 1, 0) == 0)
             log_line("present: llamada anidada (proxy de SL -> chain real); "
                      "los contadores por hook cuentan los dos niveles");
     }
@@ -277,7 +277,7 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     // enganche de DXGI se armaba tarde ahi). Sin esto el veredicto de M1 no se
     // podria medir en la unica herramienta con la que se permite probar.
     // Se auto-limita: despues de la primera emision es una lectura de bool.
-    emitir_veredicto_si_toca();
+    emit_verdict_if_due();
     // The runtime's own tally, so our hook can be checked against something we
     // do not maintain. If these two agree, a shortfall of presents against
     // rendered frames is the frame counter's fault and not the hook's.
@@ -601,13 +601,13 @@ static void hook_swapchain_present(void *sc) {
     // toman igual. De esa cadena cuelga el HUD entero -- fps y latencia -- y la
     // primera version de esta guarda hacia return aca y lo dejaba en cero.
     // Perder el contador propio es aceptable; perder el HUD no lo es.
-    bool sin_hook = false;
+    bool no_hook = false;
     {
-        static bool dicho = false;
+        static bool said = false;
         if (GetModuleHandleW(L"gameoverlayrenderer64.dll") != nullptr) {
-            sin_hook = true;
-            if (!dicho) {
-                dicho = true;
+            no_hook = true;
+            if (!said) {
+                said = true;
                 log_line("present: overlay de Steam presente; NO se escribe el slot");
                 log_line("  hace byte-detour de la funcion, asi que llamar al");
                 log_line("  original nos devuelve a nosotros: recursion sin fin.");
@@ -642,28 +642,28 @@ static void hook_swapchain_present(void *sc) {
     // instrumento honesto de todas formas ([[measure-with-the-runtime-counter]]).
     {
         HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
-        HMODULE dueno = nullptr;
+        HMODULE owner = nullptr;
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCWSTR)vt[8], &dueno);
-        if (dueno != nullptr && dxgi != nullptr && dueno != dxgi &&
+                           (LPCWSTR)vt[8], &owner);
+        if (owner != nullptr && dxgi != nullptr && owner != dxgi &&
             vt[8] != (void *)&hk_dxgi_present) {
-            static bool dicho = false;
-            if (!dicho) {
-                dicho = true;
+            static bool said = false;
+            if (!said) {
+                said = true;
                 // El nombre del modulo, en ASCII, sin depender de log_ruta
                 // que se define mas abajo en el archivo.
-                wchar_t nom[MAX_PATH] = { 0 };
-                GetModuleFileNameW(dueno, nom, MAX_PATH);
-                char corto[96];
-                int c = 0, ini = 0;
-                for (int i = 0; nom[i] != 0; ++i)
-                    if (nom[i] == 92 || nom[i] == 47) ini = i + 1;
-                for (int i = ini; nom[i] != 0 && c < 94; ++i)
-                    corto[c++] = (char)(nom[i] < 128 ? nom[i] : '?');
-                corto[c] = 0;
+                wchar_t name_w[MAX_PATH] = { 0 };
+                GetModuleFileNameW(owner, name_w, MAX_PATH);
+                char short_name[96];
+                int c = 0, start = 0;
+                for (int i = 0; name_w[i] != 0; ++i)
+                    if (name_w[i] == 92 || name_w[i] == 47) start = i + 1;
+                for (int i = start; name_w[i] != 0 && c < 94; ++i)
+                    short_name[c++] = (char)(name_w[i] < 128 ? name_w[i] : '?');
+                short_name[c] = 0;
                 log_line("present: el slot YA lo engancho otro; no nos apilamos");
-                log_line(corto);
+                log_line(short_name);
                 log_line("  (apilarse forma un lazo entre los dos hooks:");
                 log_line("   medido en Cyberpunk desde Steam, profundidad 4244)");
             }
@@ -674,11 +674,11 @@ static void hook_swapchain_present(void *sc) {
     if (!VirtualProtect(&vt[8], sizeof(void *), PAGE_READWRITE, &prot)) return;
     // El original de ESTA vtable, registrado antes de escribir el slot. El
     // hook lo busca por la vtable del objeto que recibe (present_original_de).
-    const PFN_DXGIPresent orig_de_esta = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
+    const PFN_DXGIPresent orig_of_this = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
     g_vt_present[g_vt_present_n].vt = vt;
-    g_vt_present[g_vt_present_n].orig = orig_de_esta;
+    g_vt_present[g_vt_present_n].orig = orig_of_this;
     InterlockedIncrement(&g_vt_present_n);
-    if (g_orig_dxgi_present == nullptr) g_orig_dxgi_present = orig_de_esta;
+    if (g_orig_dxgi_present == nullptr) g_orig_dxgi_present = orig_of_this;
     g_swapchain = reinterpret_cast<IDXGISwapChain *>(sc);
     hook_frame_latency(sc);
     // What the swap chain was created with, and whether the app takes the
@@ -700,12 +700,12 @@ static void hook_swapchain_present(void *sc) {
                      : "  this chain is not waitable");
         }
     }
-    if (!sin_hook) {
+    if (!no_hook) {
         vt[8] = reinterpret_cast<void *>(&hk_dxgi_present);
         log_line("recorder: present slot swapped (vt[8], not detoured)");
     }
     VirtualProtect(&vt[8], sizeof(void *), prot, &prot);
-    g_present_por_runtime = sin_hook;
+    g_present_via_runtime = no_hook;
     log_num("  vtables enganchadas ", (unsigned)g_vt_present_n);
 }
 
@@ -733,16 +733,16 @@ static void adopt_existing_swapchain(void) {
     if (g_adopt_done || g_orig_dxgi_present != nullptr) return;
     // Primero se le da su chance al camino normal: si el juego crea su swapchain
     // despues que nosotros, el hook de la factory lo agarra y esto no hace falta.
-    static unsigned long long visto = 0;
-    if (visto == 0) { visto = GetTickCount64(); return; }
-    if (GetTickCount64() - visto < 5000ULL) return;
+    static unsigned long long seen = 0;
+    if (seen == 0) { seen = GetTickCount64(); return; }
+    if (GetTickCount64() - seen < 5000ULL) return;
     g_adopt_done = true;
 
     HMODULE d3d11 = LoadLibraryW(L"d3d11.dll");
     if (d3d11 == nullptr) { log_line("adopcion: no hay d3d11.dll"); return; }
-    PFN_D3D11CDSC crear = reinterpret_cast<PFN_D3D11CDSC>(
+    PFN_D3D11CDSC create = reinterpret_cast<PFN_D3D11CDSC>(
             GetProcAddress(d3d11, "D3D11CreateDeviceAndSwapChain"));
-    if (crear == nullptr) { log_line("adopcion: no hay D3D11CreateDeviceAndSwapChain"); return; }
+    if (create == nullptr) { log_line("adopcion: no hay D3D11CreateDeviceAndSwapChain"); return; }
 
     WNDCLASSEXW wc;
     memset(&wc, 0, sizeof(wc));
@@ -770,7 +770,7 @@ static void adopt_existing_swapchain(void) {
     IDXGISwapChain *sc = nullptr;
     void *dev = nullptr;
     void *ctx = nullptr;
-    const HRESULT hr = crear(nullptr, 1 /* HARDWARE */, nullptr, 0, nullptr, 0,
+    const HRESULT hr = create(nullptr, 1 /* HARDWARE */, nullptr, 0, nullptr, 0,
                              7 /* D3D11_SDK_VERSION */, &sd, &sc, &dev, nullptr, &ctx);
     if (FAILED(hr) || sc == nullptr) {
         log_num("adopcion: D3D11CreateDeviceAndSwapChain fallo, hr ", (unsigned)hr);
