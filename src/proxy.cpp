@@ -495,12 +495,65 @@ static const int kPrefFlags = 88;
 // juegos que ya andan no cambian.
 static void arm_slinit_temprano(void);
 
+// Experimento de la fase D: apuntar pathsToPlugins a nuestra carpeta.
+// Ver el bloque de hk_slInit, mas abajo.
+static bool g_pathsplugins = false;
+
 static unsigned hk_slInit(void *pref, unsigned long long sdk) {
     if (pref != nullptr) {
         unsigned char *p = (unsigned char *)pref;
         log_num("slInit: structVersion ", (unsigned)*(unsigned long long *)(p + 24));
         const unsigned long long f = *(unsigned long long *)(p + kPrefFlags);
         log_num("  banderas en +88 ", (unsigned)f);
+        // EXPERIMENTO (mfg-pathsplugins.txt): apagar OTA y nombrar NUESTRA
+        // carpeta, para que el plugin manager del interposer DEL JUEGO enumere
+        // ahi y no mire la cache de NGX.
+        //
+        // La disposicion no es una suposicion: sale del header oficial del SDK
+        // 2.12, include/sl_core_types.h, contando desde BaseStructure
+        // (next +0, GUID +8, structVersion +24 = 32):
+        //
+        //   +32 bool showConsole          +40 const wchar_t** pathsToPlugins
+        //   +36 LogLevel logLevel         +48 uint32_t numPathsToPlugins
+        //   +56 pathToLogsAndData         +88 PreferenceFlags flags
+        //
+        // Los dos ceros que se veian en el volcado eran justamente
+        // pathsToPlugins nulo y numPathsToPlugins en 0. Y el +88 de las
+        // banderas, verificado hace tiempo por otro camino, cae en el mismo
+        // lugar: el conteo cierra entero.
+        //
+        // Detras de un flag porque cambia la TOPOLOGIA de carga, que es la
+        // unica parte del diseno que puede romper un juego que hoy anda. Y
+        // porque falta medir algo que el header no dice: el plugin manager,
+        // ante el mismo plugin en dos rutas, se queda con el mas nuevo ("A
+        // duplicate was found, but a newer plugin version was available"). Si
+        // el juego trae 2.13 y nosotros 2.12, puede preferir el suyo aunque
+        // apuntemos aca.
+        if (g_pathsplugins) {
+            static wchar_t buf[MAX_PATH];
+            static const wchar_t *lista[1];
+            static bool armado = false;
+            if (!armado) {
+                const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH - 40);
+                if (n > 0 && n < MAX_PATH - 40) {
+                    int k = (int)n;
+                    const wchar_t *cola = L"\\mfg-unlock\\sdk\\2.12";
+                    for (int i = 0; cola[i] != 0; ++i) buf[k++] = cola[i];
+                    buf[k] = 0;
+                    lista[0] = buf;
+                    armado = true;
+                }
+            }
+            if (armado) {
+                *(const wchar_t ***)(p + 40) = lista;
+                *(unsigned *)(p + 48) = 1;
+                *(unsigned long long *)(p + kPrefFlags) =
+                    f & ~((1ull << 3) | (1ull << 6));   // eAllowOTA, eLoadDownloadedPlugins
+                log_line("  pathsToPlugins apuntado a nuestra carpeta (mfg-pathsplugins.txt)");
+                log_num("    banderas ahora ",
+                        (unsigned)*(unsigned long long *)(p + kPrefFlags));
+            }
+        }
         // logLevel, a verbose, para que el runtime diga por que corta.
         //
         // beginCommandList (sl.common 0x77AF0) devuelve false por una de dos
@@ -10160,6 +10213,9 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 g_sat_on = false;
                 log_line("sat: deteccion de techo DESACTIVADA (mfg-sinsat.txt)");
             }
+            g_pathsplugins = flag_file(L"mfg-pathsplugins.txt");
+            if (g_pathsplugins)
+                log_line("slInit: se apuntara pathsToPlugins a nuestra carpeta (experimento)");
             g_peralt = flag_file(L"mfg-peralt.txt");
             if (flag_file(L"mfg-sinseis.txt")) {
                 g_seis = false;
