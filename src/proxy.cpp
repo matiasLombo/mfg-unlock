@@ -33,6 +33,7 @@
 #include <MinHook.h>
 #include "cubins.h"
 #include "politica.h"
+#include "config.h"
 
 // The panel's own state, defined here and shared with overlay.h. It is a
 // window of ours now, not something drawn into the game's frame -- see the
@@ -224,6 +225,9 @@ static bool flag_file(const wchar_t *name) {
     beside_dll(p, name);
     return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
 }
+
+// Lo que hay al lado de la dll, leido una vez en DllMain (src/config.h).
+static cfg::Ajustes g_cfg;
 
 // Se abre y se cierra por linea, a proposito. Se probo dejar el handle abierto
 // -- seis llamadas al sistema por linea contra una sola apertura -- y en GTA V
@@ -2744,7 +2748,7 @@ static int patch_subframe_count(unsigned char *base) {
     // this file was taken through, and patching the count field instead of the
     // comparison removed about 525 out-of-order present skips. Refused with
     // mfg-nowic.txt.
-    g_wic_mode = !flag_file(L"mfg-nowic.txt");
+    g_wic_mode = g_cfg.wic;
     if (g_wic_mode) {
         // The comparison patches are exactly what this replaces; leaving
         // them in would put the bound back out of step with the field.
@@ -2904,7 +2908,7 @@ static int patch_subframe_count(unsigned char *base) {
     // and presents 30 -- no generated frames at all -- while sl.log fills with
     // 538 "Out of order frame - will skip the present" against ~30 presents.
     // This patch is the only thing that touches that comparison.
-    if (flag_file(L"mfg-monoidx.txt")) patch_monotonic_index(base, text, len);
+    if (g_cfg.monoidx) patch_monotonic_index(base, text, len);
     // patch_index_count is NOT called. Making the present index agree with the
     // loop stops generation outright: a plain 2.00x control fell to 0.88x with
     // the render loop running free at 188 fps, the same failure as a bound
@@ -5518,93 +5522,36 @@ static void settings_load(void) {
     CloseHandle(h);
     if (!ok || n == 0) return;
     buf[n] = 0;
-    // Two keys, each followed by a number. Anything unrecognised is ignored
-    // rather than treated as zero: a truncated write must not silently turn
-    // into "AUTO, target nothing".
-    for (DWORD i = 0; i < n; ++i) {
-        const bool is_mode = (i + 5 < n) && buf[i] == 'm' && buf[i+1] == 'o' &&
-                             buf[i+2] == 'd' && buf[i+3] == 'e';
-        const bool is_dfps = (i + 7 < n) && buf[i] == 'd' && buf[i+1] == 'y' &&
-                             buf[i+2] == 'n' && buf[i+3] == 'f' &&
-                             buf[i+4] == 'p' && buf[i+5] == 's' && buf[i+6] == ' ';
-        const bool is_hud  = (i + 4 < n) && buf[i] == 'h' &&
-                             buf[i+1] == 'u' && buf[i+2] == 'd' &&
-                             buf[i+3] == ' ';
-        const bool is_tgt  = (i + 7 < n) && buf[i] == 't' && buf[i+1] == 'a' &&
-                             buf[i+2] == 'r' && buf[i+3] == 'g' && buf[i+4] == 'e' &&
-                             buf[i+5] == 't';
-        if (is_dfps) {
-            int v = 0; size_t j = i + 7;
-            while (j < n && buf[j] >= '0' && buf[j] <= '9')
-                v = v * 10 + (buf[j++] - '0');
-            if (v >= 0 && v <= 1000) g_dyn_fps = v;
-            i = j;
-            continue;
-        }
-        if (is_hud) {
-            g_hud_on = buf[i+4] == '1';
-            i += 4;
-            continue;
-        }
-        if (!is_mode && !is_tgt) continue;
-        DWORD j = i + (is_mode ? 4 : 6);
-        while (j < n && (buf[j] == ' ' || buf[j] == '=')) ++j;
-        if (j >= n || buf[j] < '0' || buf[j] > '9') { i = j; continue; }
-        int v = 0;
-        while (j < n && buf[j] >= '0' && buf[j] <= '9' && v < 100000)
-            v = v * 10 + (buf[j++] - '0');
-        if (is_mode) {
-            if (v >= 0 && v < kPanRows) {
-                g_force_sel = v;
-                // La cuenta ES el multiplicador, no los generados.
-                //
-                // Medido en Halo: cuenta 3 entrega 3.00x y cuenta 5 entrega
-                // 5.0x. Con el `- 1`, el modo 6 mandaba 5 y entregaba 5X, y el
-                // modo 4 mandaba 3 y entregaba 3.11x -- que anoche atribui a un
-                // tope del snippet y era esto.
-                //
-                // Detras de mfg-seis.txt hasta medirlo: si la relacion no fuera
-                // esta, cambiarla desplazaria TODOS los modos y seria peor que
-                // el problema que arregla.
-                g_force_generated = (v >= 2 && v <= kSelMaxFixed)
-                                        ? (cuenta_es_multiplicador() ? v : v - 1) : 0;
-                // DYNAMIC has to start somewhere. Restored from disk it landed
-                // on zero generated frames, which asks the plugin to turn
-                // generation on and produce none -- so DLSS-G never started,
-                // and the controller cannot measure a base rate without it
-                // running. It waited for itself. One generated frame is the
-                // seed; the controller moves off it on the first measurement.
-                // La semilla es 2, no 1.
-                //
-                // Con la semantica vieja 1 era un frame generado, o sea 2X. Con
-                // la nueva es 1X: generacion encendida produciendo nada. Y aca
-                // la semantica todavia NO se sabe -- el snippet no mapeo -- asi
-                // que no se puede preguntar: hay que elegir el valor que no
-                // rompe en ninguna de las dos.
-                //
-                // 2 es ese valor. Con la semantica nueva es 2X, el piso de
-                // cualquier modo que genere. Con la vieja son dos frames
-                // generados, o sea 3X: un escalon mas alto de lo ideal durante
-                // la primera ventana, que el controlador baja en la primera
-                // medicion. Arrancar de mas se corrige solo; arrancar en 1X no,
-                // porque sin generacion no hay base que medir y el controlador
-                // se espera a si mismo. Eso fue Halo entero.
-                if (v == kSelDynamic || v == kSelDynFuture)
-                    g_force_generated = 2;
-            }
-        } else if (is_tgt && v >= 0 && v <= kMaxCustom) {
-            // Un ajuste guardado por una version anterior puede traer 150. Se
-            // sube al piso en vez de aceptarlo: el panel ya no ofrece ese valor.
-            //
-            // Con mfg-sub2.txt el piso baja a 110, que es lo mas chico que el
-            // scheduler puede expresar sin que el estado bajo sea todo el ciclo.
-            // Es para medir: el banco escribe el multiplicador por este mismo
-            // archivo, asi que sin esto una corrida a --fractional 150 mide un
-            // 2.00x plano y parece que anduvo. Paso exactamente eso una vez.
-            const int piso = g_sub2 ? 110 : kMinCustom;
-            g_dyn_target = v < piso ? piso : v;
-        }
-        i = j;
+    // El parser vive en src/config.h; lo que no reconoce lo deja en -1 y aca
+    // no se toca: una escritura truncada no puede volverse "AUTO, objetivo
+    // nada". La semilla de la cuenta y el piso del objetivo son politica y
+    // quedan aca.
+    cfg::Ajustes s;
+    cfg::parsear_settings(buf, n, kPanRows, kMaxCustom, s);
+    if (s.dynfps >= 0) g_dyn_fps = s.dynfps;
+    if (s.hud >= 0) g_hud_on = s.hud == 1;
+    if (s.mode >= 0) {
+        const int v = s.mode;
+        g_force_sel = v;
+        // La cuenta ES el multiplicador, no los generados. Medido en Halo:
+        // cuenta 3 entrega 3.00x y cuenta 5 entrega 5.0x.
+        g_force_generated = (v >= 2 && v <= kSelMaxFixed)
+                                ? (cuenta_es_multiplicador() ? v : v - 1) : 0;
+        // La semilla de DYNAMIC es 2, no 1: con la semantica nueva 1 es 1X,
+        // generacion encendida produciendo nada, y sin generacion no hay base
+        // que medir -- el controlador se espera a si mismo. Con la vieja, 2
+        // es 3X por una ventana, que se corrige solo. Ver
+        // [[dynamic-se-espera-a-si-mismo]].
+        if (v == kSelDynamic || v == kSelDynFuture)
+            g_force_generated = 2;
+    }
+    if (s.target >= 0) {
+        // Un ajuste guardado por una version anterior puede traer 150. Se
+        // sube al piso en vez de aceptarlo: el panel ya no ofrece ese valor.
+        // Con mfg-sub2.txt el piso baja a 110, que es lo mas chico que el
+        // scheduler puede expresar; es para medir con el banco.
+        const int piso = g_sub2 ? 110 : kMinCustom;
+        g_dyn_target = s.target < piso ? piso : s.target;
     }
     // Only when something moved, so re-reading twice a second under
     // mfg-watch.txt leaves one marked line per change instead of two per
@@ -10173,108 +10120,55 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
         g_frames[k + 14] = 0;
         for (int i = 0; i < MAX_PATH; ++i) g_frames_base[i] = g_frames[i];
         {
-            wchar_t pb[MAX_PATH];
-            int j = 0;
-            while (g_frames[j] != 0 && j < MAX_PATH - 1) { pb[j] = g_frames[j]; ++j; }
-            while (j > 0 && pb[j - 1] != 0x5C) --j;
-            g_debug = flag_file(L"mfg-debug.txt");
-            // On unless refused, because the person who uses this has the dll
-            // and nothing else. Everything measured tonight was measured with
-            // mfg-frac.txt, mfg-slowalt.txt and mfg-wic.txt beside the dll --
-            // three files that the shipped copy does not come with, so picking
-            // DYNAMIC in the panel did nothing on its own.
-            //
-            // Nothing here starts generating by itself: the scheduler returns
-            // immediately unless the panel is on DYNAMIC (see the guard on
-            // g_force_sel), and the patch only makes its site writable. The
-            // value that changes behaviour is written by the scheduler.
-            //
-            // The old names still work as opt-outs under mfg-nofrac.txt and
-            // mfg-noslowalt.txt.
-            // Opt-in, and the attempt to default it on is recorded here so it
-            // is not tried again the same way.
-            //
-            // The person who uses this has the dll and nothing else, so picking
-            // DYNAMIC in the panel ought to be enough, and everything measured
-            // in this file was measured with mfg-frac.txt beside the dll. But
-            // patch_subframe_count replaces the comparison against the count
-            // field with one against an immediate byte, and only the fractional
-            // scheduler keeps that byte equal to the API count. On an integer
-            // selection the scheduler never runs, the byte goes stale, and a
-            // bound below (API count + 1) stops presentation outright: 3.00x
-            // read 1.000 with the override armed and applied zero times, three
-            // runs out of three, rendering 165 as if nothing were enabled.
-            //
-            // Breaking 3x and 4x for someone who never asked for a fractional
-            // ratio is worse than making them opt in. The real fix is to defer
-            // the patch until DYNAMIC is first selected, so the site is found
-            // at map time but only rewritten once something maintains it.
-            // On unless refused, because the person who uses this has the dll
-            // and nothing else: picking DYNAMIC in the panel has to be enough.
-            //
-            // The first attempt at this broke every integer selection. The
-            // patch replaces the plugin's write of the count with an immediate,
-            // and nothing filled that byte in unless the fractional scheduler
-            // was running, so 3.00x read 1.000 with the override applied zero
-            // times. Arming it by default was not the mistake; leaving the byte
-            // without an owner was. fractional_tick now writes it for the fixed
-            // rows too, and with the patch armed the integers read 1.000, 2.001
-            // and 3.000 while 2.50x reads 2.501.
-            //
-            // Nothing generates by itself: the scheduler still returns before
-            // any cadence work unless the panel is on DYNAMIC.
-            g_watch_settings = flag_file(L"mfg-watch.txt");
-            g_novsync = flag_file(L"mfg-novsync.txt");
-            g_pin_latency = flag_file(L"mfg-pinlatency.txt");
-            g_pace_follow = flag_file(L"mfg-pacefollow.txt");
-            g_frac_enabled = !flag_file(L"mfg-nofrac.txt");
-            g_sub2 = flag_file(L"mfg-sub2.txt");
-            g_twocopies = flag_file(L"mfg-twocopies.txt");
-            g_ceilfirst = flag_file(L"mfg-ceilfirst.txt");
-            g_ota = flag_file(L"mfg-ota.txt");
+            // Toda la configuracion se lee de una, en src/config.h, y de ahi
+            // se reparte a los globales que cada subsistema ya usaba. Lo que
+            // sigue conserva el orden, los avisos y los efectos (arm_slinit
+            // temprano, la cuenta recalculada) que DllMain tenia a mano.
+            cfg::leer_banderas(g_cfg, [](const wchar_t *f) { return flag_file(f); });
+            cfg::leer_numericos(g_cfg, [](const wchar_t *f, char *b, unsigned cap) -> unsigned {
+                wchar_t p[MAX_PATH];
+                beside_dll(p, f);
+                HANDLE h = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (h == INVALID_HANDLE_VALUE) return 0u;
+                DWORD got = 0;
+                const BOOL ok = ReadFile(h, b, cap, &got, nullptr);
+                CloseHandle(h);
+                if (!ok) return 0u;
+                b[got] = 0;
+                return (unsigned)got;
+            });
+            const cfg::Ajustes &a = g_cfg;
+            g_debug = a.debug;
+            g_watch_settings = a.watch;
+            g_novsync = a.novsync;
+            g_pin_latency = a.pinlatency;
+            g_pace_follow = a.pacefollow;
+            g_frac_enabled = a.frac;
+            g_sub2 = a.sub2;
+            g_twocopies = a.twocopies;
+            g_ceilfirst = a.ceilfirst;
+            g_ota = a.ota;
             // Con la bandera puesta hay que llegar antes que la llamada del
             // juego, y el armado del hilo del panel llega tarde en los juegos
             // que importan el interposer estaticamente.
             if (g_ota) arm_slinit_temprano();
-            g_slowalt = !flag_file(L"mfg-noslowalt.txt");
-            g_quiet = flag_file(L"mfg-quiet.txt");
-            g_nullalt = flag_file(L"mfg-nullalt.txt");
-            {
-                // A one-line integer beside the dll; the sweep needs to move
-                // this without a rebuild.
-                wchar_t bp[MAX_PATH];
-                int bj = 0;
-                while (g_log[bj] != 0 && bj < MAX_PATH - 1) { bp[bj] = g_log[bj]; ++bj; }
-                while (bj > 0 && bp[bj - 1] != 0x5C) --bj;
-                const wchar_t *bn = L"mfg-blockms.txt";
-                for (int i = 0; bn[i] != 0; ++i) bp[bj + i] = bn[i];
-                bp[bj + 15] = 0;
-                HANDLE bh = CreateFileW(bp, GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                        OPEN_EXISTING, 0, nullptr);
-                if (bh != INVALID_HANDLE_VALUE) {
-                    char buf[16] = { 0 };
-                    DWORD got = 0;
-                    if (ReadFile(bh, buf, 15, &got, nullptr) && got > 0) {
-                        int v = 0;
-                        for (DWORD i = 0; i < got && buf[i] >= '0' && buf[i] <= '9'; ++i)
-                            v = v * 10 + (buf[i] - '0');
-                        if (v > 0 && v < 100000) {
-                            g_block_ms = v;
-                            log_num("slowalt: block length from file, ms ", (unsigned)v);
-                        }
-                    }
-                    CloseHandle(bh);
-                }
+            g_slowalt = a.slowalt;
+            g_quiet = a.quiet;
+            g_nullalt = a.nullalt;
+            if (a.blockms > 0) {
+                g_block_ms = a.blockms;
+                log_num("slowalt: block length from file, ms ", (unsigned)a.blockms);
             }
-            if (flag_file(L"mfg-sinsat.txt")) {
+            if (!a.sat) {
                 g_sat_on = false;
                 log_line("sat: deteccion de techo DESACTIVADA (mfg-sinsat.txt)");
             }
-            g_pathsplugins = flag_file(L"mfg-pathsplugins.txt");
+            g_pathsplugins = a.pathsplugins;
             if (g_pathsplugins)
                 log_line("slInit: se apuntara pathsToPlugins a nuestra carpeta (experimento)");
-            g_peralt = flag_file(L"mfg-peralt.txt");
-            if (flag_file(L"mfg-sinseis.txt")) {
+            g_peralt = a.peralt;
+            if (!a.seis) {
                 g_seis = false;
                 log_line("tope: 6X DESACTIVADO a mano (mfg-sinseis.txt)");
             }
@@ -10291,185 +10185,83 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                             (unsigned)g_force_generated);
                 }
             }
-            if (flag_file(L"mfg-coninterposer.txt")) {
+            if (a.coninterposer) {
                 g_inter_fuera = false;
                 log_line("base: el interposer TAMBIEN se sustituye (mfg-coninterposer.txt)");
             }
-            if (flag_file(L"mfg-sinbase.txt")) {
+            if (a.sinbase) {
                 g_snippet_on = false;
                 log_line("base: DESACTIVADA a mano (mfg-sinbase.txt)");
             }
             // mfg-mfcmax.txt: sube la constante del snippet. Experimental.
-            if (flag_file(L"mfg-mfcmax.txt")) {
+            if (a.mfcmax) {
                 g_mfcmax = 5;
                 log_line("MultiFrameCountMax: se intentara subir a 5 (mfg-mfcmax.txt)");
             }
-            g_tope_fijo = flag_file(L"mfg-topefijo.txt");
+            g_tope_fijo = a.topefijo;
             if (g_tope_fijo) log_line("tope fijo en 5 (mfg-topefijo.txt): es la LINEA BASE, crashea");
-            g_permitir_x6 = flag_file(L"mfg-x6.txt");
+            g_permitir_x6 = a.x6;
             if (g_permitir_x6) log_line("6X habilitado a mano (mfg-x6.txt): crashea en Halo");
-            g_dyn_diag = flag_file(L"mfg-dyndiag.txt");
+            g_dyn_diag = a.dyndiag;
             if (g_dyn_diag) log_line("dynamic: diagnostico por cambio de ratio ENCENDIDO (mfg-dyndiag.txt)");
-            if (flag_file(L"mfg-nolatch.txt")) { g_latch_reparto = false; log_line("fractional: reparto NO latcheado (mfg-nolatch.txt)"); }
-            if (flag_file(L"mfg-sin-deuda.txt")) { g_usar_deuda = false; log_line("dynamic: integrador de deuda APAGADO (mfg-sin-deuda.txt)"); }
-            g_optsv3 = flag_file(L"mfg-optsv3.txt");
-            { wchar_t mp[MAX_PATH]; beside_dll(mp, L"mfg-markergap.txt");
-              HANDLE mh = CreateFileW(mp, GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-              if (mh != INVALID_HANDLE_VALUE) {
-                  char b4[32]; DWORD r6 = 0;
-                  if (ReadFile(mh, b4, sizeof(b4)-1, &r6, nullptr) && r6 > 0) {
-                      b4[r6] = 0;
-                      int v[4] = {0, 0, 0, 0}; int k = 0; DWORD i = 0;
-                      while (i < r6 && k < 4) {
-                          while (i < r6 && (b4[i] < '0' || b4[i] > '9')) ++i;
-                          if (i >= r6) break;
-                          int n2 = 0;
-                          while (i < r6 && b4[i] >= '0' && b4[i] <= '9')
-                              n2 = n2 * 10 + (b4[i++] - '0');
-                          v[k++] = n2;
-                      }
-                      if (v[0] > 0 && v[1] > 0 && k >= 4) {
-                          g_marker_every = (double)v[0] / 1000.0;
-                          g_marker_for = (double)v[1] / 1000.0;
-                          g_marker_long_every = (double)v[2] / 1000.0;
-                          g_marker_long_for = (double)v[3] / 1000.0;
-                          log_num("bench: marker bursts, ms on ", (unsigned)v[0]);
-                          log_num("  ms off ", (unsigned)v[1]);
-                          log_num("  long blackout every ms ", (unsigned)v[2]);
-                          log_num("  lasting ms ", (unsigned)v[3]);
-                      } else if (v[0] > 0 && v[1] > 0) {
-                          g_marker_every = (double)v[0];
-                          g_marker_for = (double)v[1];
-                          log_num("bench: dropping Reflex/PCL markers every N s, N = ",
-                                  (unsigned)v[0]);
-                          log_num("  for this many seconds ", (unsigned)v[1]);
-                      }
-                  }
-                  CloseHandle(mh);
-              } }
-            g_blockalt = flag_file(L"mfg-blockalt.txt");
-            g_no_waitable = flag_file(L"mfg-nowaitable.txt");
-            { wchar_t sp[MAX_PATH]; beside_dll(sp, L"mfg-slowframe.txt");
-              HANDLE sh = CreateFileW(sp, GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-              if (sh != INVALID_HANDLE_VALUE) {
-                char b3[48]; DWORD r5 = 0;
-                if (ReadFile(sh, b3, sizeof(b3)-1, &r5, nullptr) && r5 > 0) {
-                    b3[r5] = 0;
-                    int v[3] = { 0, 0, 0 }; int k = 0; DWORD q = 0;
-                    while (q < r5 && k < 3) {
-                            while (q < r5 && (b3[q] < '0' || b3[q] > '9')) ++q;
-                        if (q >= r5) break;
-                        int n2 = 0;
-                            while (q < r5 && b3[q] >= '0' && b3[q] <= '9')
-                                n2 = n2 * 10 + (b3[q++] - '0');
-                        v[k++] = n2;
-                    }
-                    if (v[0] > 0 && v[0] <= 100000) {
-                        g_slow_frame_us = v[0];
-                        log_num("bench: frame slowed by us ", (unsigned)v[0]);
-                    }
-                    if (k >= 3 && v[1] > 0 && v[1] <= 100000 && v[2] > 0) {
-                        g_slow_frame_us2 = v[1];
-                        g_slow_step_ms = v[2];
-                        log_num("bench: base steps to us ", (unsigned)v[1]);
-                        log_num("  every ms ", (unsigned)v[2]);
-                    }
-                }
-                CloseHandle(sh);
-              } }
-            { wchar_t jp[MAX_PATH]; beside_dll(jp, L"mfg-jitter.txt");
-              HANDLE jh = CreateFileW(jp, GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-              if (jh != INVALID_HANDLE_VALUE) {
-                  char b4[16]; DWORD r6 = 0;
-                  if (ReadFile(jh, b4, sizeof(b4)-1, &r6, nullptr) && r6 > 0) {
-                      b4[r6] = 0; int v = 0;
-                      for (DWORD k = 0; k < r6 && b4[k] >= '0' && b4[k] <= '9'; ++k)
-                          v = v * 10 + (b4[k] - '0');
-                      if (v > 0 && v <= 90) { g_jitter_pct = v;
-                          log_num("bench: frame jitter pct ", (unsigned)v); }
-                  }
-                  CloseHandle(jh);
-              } }
-            { wchar_t cp[MAX_PATH]; beside_dll(cp, L"mfg-clamplatency.txt");
-              HANDLE ch = CreateFileW(cp, GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-              if (ch != INVALID_HANDLE_VALUE) {
-                  char c2[16]; DWORD r4 = 0;
-                  if (ReadFile(ch, c2, sizeof(c2) - 1, &r4, nullptr) && r4 > 0) {
-                      c2[r4] = 0;
-                      if (c2[0] >= '1' && c2[0] <= '9') g_clamp_latency = c2[0] - '0';
-                  }
-                  CloseHandle(ch);
-              } }
-            // Queue parallelism mode, from mfg-queue.txt. patch_queue_mode has
-            // been in the file with no way to reach it -- g_queue_mode was left
-            // at -1 -- and it is the one knob that touches the pacing subsystem
-            // the throughput law lives in, so it gets a flag before anything is
-            // disassembled.
-            { wchar_t qp[MAX_PATH]; beside_dll(qp, L"mfg-queue.txt");
-              HANDLE qh = CreateFileW(qp, GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-              if (qh != INVALID_HANDLE_VALUE) {
-                  char q2[16]; DWORD r3 = 0;
-                  if (ReadFile(qh, q2, sizeof(q2) - 1, &r3, nullptr) && r3 > 0) {
-                      q2[r3] = 0;
-                      if (q2[0] >= '0' && q2[0] <= '3') g_queue_mode = q2[0] - '0';
-                  }
-                  CloseHandle(qh);
-              } }
-            { wchar_t bp[MAX_PATH]; beside_dll(bp, L"mfg-blocks.txt");
-              HANDLE bh = CreateFileW(bp, GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-              if (bh != INVALID_HANDLE_VALUE) {
-                  char b2[32]; DWORD r2 = 0;
-                  if (ReadFile(bh, b2, sizeof(b2) - 1, &r2, nullptr) && r2 > 0) {
-                      b2[r2] = 0; int v = 0;
-                      for (DWORD k = 0; k < r2 && b2[k] >= '0' && b2[k] <= '9'; ++k)
-                          v = v * 10 + (b2[k] - '0');
-                      if (v >= 2 && v <= 64) { g_blocks = v;
-                          log_num("slowalt: blocks per cycle from file ", (unsigned)v); }
-                  }
-                  CloseHandle(bh);
-              } }
+            if (!a.latch) { g_latch_reparto = false; log_line("fractional: reparto NO latcheado (mfg-nolatch.txt)"); }
+            if (!a.deuda) { g_usar_deuda = false; log_line("dynamic: integrador de deuda APAGADO (mfg-sin-deuda.txt)"); }
+            g_optsv3 = a.optsv3;
+            if (a.marker[0] > 0 && a.marker[1] > 0 && a.marker_n >= 4) {
+                g_marker_every = (double)a.marker[0] / 1000.0;
+                g_marker_for = (double)a.marker[1] / 1000.0;
+                g_marker_long_every = (double)a.marker[2] / 1000.0;
+                g_marker_long_for = (double)a.marker[3] / 1000.0;
+                log_num("bench: marker bursts, ms on ", (unsigned)a.marker[0]);
+                log_num("  ms off ", (unsigned)a.marker[1]);
+                log_num("  long blackout every ms ", (unsigned)a.marker[2]);
+                log_num("  lasting ms ", (unsigned)a.marker[3]);
+            } else if (a.marker[0] > 0 && a.marker[1] > 0) {
+                g_marker_every = (double)a.marker[0];
+                g_marker_for = (double)a.marker[1];
+                log_num("bench: dropping Reflex/PCL markers every N s, N = ",
+                        (unsigned)a.marker[0]);
+                log_num("  for this many seconds ", (unsigned)a.marker[1]);
+            }
+            g_blockalt = a.blockalt;
+            g_no_waitable = a.nowaitable;
+            if (a.slowframe[0] > 0 && a.slowframe[0] <= 100000) {
+                g_slow_frame_us = a.slowframe[0];
+                log_num("bench: frame slowed by us ", (unsigned)a.slowframe[0]);
+            }
+            if (a.slowframe_n >= 3 && a.slowframe[1] > 0 && a.slowframe[1] <= 100000 &&
+                a.slowframe[2] > 0) {
+                g_slow_frame_us2 = a.slowframe[1];
+                g_slow_step_ms = a.slowframe[2];
+                log_num("bench: base steps to us ", (unsigned)a.slowframe[1]);
+                log_num("  every ms ", (unsigned)a.slowframe[2]);
+            }
+            if (a.jitter > 0) {
+                g_jitter_pct = a.jitter;
+                log_num("bench: frame jitter pct ", (unsigned)a.jitter);
+            }
+            if (a.clamplatency > 0) g_clamp_latency = a.clamplatency;
+            // Queue parallelism mode, from mfg-queue.txt: the one knob that
+            // touches the pacing subsystem the throughput law lives in.
+            if (a.queue >= 0) g_queue_mode = a.queue;
+            if (a.blocks > 0) {
+                g_blocks = a.blocks;
+                log_num("slowalt: blocks per cycle from file ", (unsigned)a.blocks);
+            }
             if (g_frac_enabled)
                 log_line("fractional multiplier ON (experimental: can stall the game)");
             if (g_peralt)
                 log_line("slowalt: per-frame error diffusion (mfg-peralt.txt)");
             if (g_debug) log_line("debug: F9 recorder armed (hooks Present)");
-            g_ov_enabled = !flag_file(L"mfg-nopanel.txt");
+            g_ov_enabled = a.panel;
             settings_load();
             log_line(g_ov_enabled ? "panel on (` opens it)" : "panel off");
-            const wchar_t *pn = L"mfg-presetb.txt";
-            for (int i = 0; pn[i] != 0; ++i) pb[j + i] = pn[i];
-            pb[j + 15] = 0;
-            g_preset_b = GetFileAttributesW(pb) != INVALID_FILE_ATTRIBUTES;
-            // On by default now, off with mfg-nocubins.txt. It used to be the
-            // other way round, from when this was believed to be a speed
-            // optimisation -- the script that builds these kernels said in so
-            // many words "a speed change, not an image change", and that was
-            // never verified. It is wrong. Avatar: Frontiers of Pandora at 4x
-            // judders on camera movement without these kernels and is fluid
-            // with them, same build, same snippet, same settings, measured
-            // both ways after nine other explanations had been tried and
-            // discarded. The mvec-estimate kernel is the one that matters,
-            // which fits: it is what camera motion gets reconstructed from.
-            //
-            // Left opt-in, it would have reached nobody. The person installing
-            // this has the DLL and nothing else, so the thing that makes 4x
-            // usable cannot sit behind a file they have to create.
-            const wchar_t *cn = L"mfg-nocubins.txt";
-            for (int i = 0; cn[i] != 0; ++i) pb[j + i] = cn[i];
-            pb[j + 16] = 0;
-            g_cubins = GetFileAttributesW(pb) == INVALID_FILE_ATTRIBUTES;
-            // g_meter_off was declared and read but never assigned, so
-            // mfg-nometer.txt did nothing at all.
-            const wchar_t *mn = L"mfg-nometer.txt";
-            for (int i = 0; mn[i] != 0; ++i) pb[j + i] = mn[i];
-            pb[j + 15] = 0;
-            g_meter_off = GetFileAttributesW(pb) != INVALID_FILE_ATTRIBUTES;
+            g_preset_b = a.presetb;
+            // Los cubins van encendidos por defecto: son lo que hace fluido el
+            // 4x ([[cubins-are-the-fluidity-fix]]), y quien instala esto tiene
+            // la dll y nada mas. mfg-nocubins.txt los apaga.
+            g_cubins = a.cubins;
+            g_meter_off = a.meter_off;
         }
         LARGE_INTEGER f; QueryPerformanceFrequency(&f);
         g_qpc_freq = f.QuadPart ? f.QuadPart : 1;
@@ -10495,14 +10287,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
     // mfg-indicator.txt so the on-screen multiplier can stay on without
     // dragging the log back with it.
     {
-        wchar_t p[MAX_PATH];
-        int j = 0;
-        while (g_log[j] != 0 && j < MAX_PATH - 1) { p[j] = g_log[j]; ++j; }
-        while (j > 0 && p[j - 1] != 0x5C) --j;
-        const wchar_t *fn = L"mfg-sllog.txt";
-        for (int i = 0; fn[i] != 0; ++i) p[j + i] = fn[i];
-        p[j + 13] = 0;
-        if (GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES) {
+        if (g_cfg.sllog) {
             wchar_t dir[MAX_PATH];
             DWORD m = GetModuleFileNameW(self, dir, MAX_PATH);
             while (m > 0 && dir[m - 1] != L'\\') --m;
@@ -10528,10 +10313,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
         int j = 0;
         while (g_log[j] != 0 && j < MAX_PATH - 1) { p[j] = g_log[j]; ++j; }
         while (j > 0 && p[j - 1] != 0x5C) --j;
-        const wchar_t *fn = L"mfg-indicator.txt";
-        for (int i = 0; fn[i] != 0; ++i) p[j + i] = fn[i];
-        p[j + 17] = 0;
-        if (GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES) {
+        if (g_cfg.indicator) {
             SetEnvironmentVariableW(L"__NGX_SHOW_INDICATOR", L"1024");
             SetEnvironmentVariableW(L"__NGX_LOG_LEVEL", L"2");
             if (j > 1) {
