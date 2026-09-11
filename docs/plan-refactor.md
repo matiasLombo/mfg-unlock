@@ -29,18 +29,34 @@ Antes de cada instalacion: `sh tools/test-host.sh`.
   tres juegos medidos (snippet de julio en los tres); no esta derivado del
   binario del juego.
 
-## Que necesita una corrida
+## Corridas hechas (Cyberpunk desde Steam, `tools/run_cp_focus.ps1 -Steam`)
 
-Build 679861 (71aa84c) instalado en los tres el 2026-09-11, mode 6. Trae
-ademas el arreglo del contador de Cyberpunk (a5a35ce). Que mirar:
+El benchmark de Cyberpunk lanzado por Steam es la unica corrida desatendida
+con la topologia real (overlay, sin hook de Present). 2026-09-11, todas con
+foco sostenido, cero `window not focused`:
 
-- Cyberpunk desde Steam: `runtime PresentCount this window` avanza y el HUD
-  muestra fps. La linea nueva `present: vtable ya enganchada; se adopta la
-  instancia nueva` tiene que aparecer despues de `swapchain con ventana nueva`.
-- F0/F1/F2 en los tres: `numFramesToGenerate` recibido == 6, las lineas
-  `force_into:` iguales a las del log `*.pre-refactor-prev.log`, un solo
-  `VEREDICTO ACTIVO` con `ejecuta_cuenta>0 ejecuta_pacer>0`, y ninguna
-  `INVARIANTE`. `config: claves leidas` no aparece (nadie tiene
-  mfg-config.txt todavia).
-- Si algo difiere: bisecar por commit (a5a35ce, 67c76a5, a422a66, 486173e,
-  71aa84c); cada uno compila solo con `sh build-proxy.sh`.
+| build | modo | resultado | log |
+|---|---|---|---|
+| 71aa84c | 6 | adopcion OK; 351 "disagrees", 0 PresentCount: el contador alimentaba la cuenta del hook | `refactor-steam-1-prev` |
+| afd69fe | 6 | 386 ventanas, 58 de juego, base 35, **5.93x** (p10 5.50, p90 6.20), 0 INVARIANTE, 0 excepciones | `cp-6x-steam-ok` |
+| afd69fe | 8 | **crash a los 5.6 s** en ntdll (escritura en 0x36, luego fatal en ntdll+0xfa7d), justo tras la adopcion | `dyn-refactor-crash-prev` |
+| a5a35ce | 8 | corrida entera, 421 ventanas, 0 excepciones (sin PresentCount: bug previo) | `dyn-a5a35ce-ok-prev` |
+| 71aa84c | 8 | corrida entera, 410 ventanas, 0 excepciones (idem) | `dyn-71aa84c-ok-prev` |
+| afd69fe | 8 | corrida entera, 401 ventanas, 65 de juego, presentadas 176 (p10 155, p90 184), **68% dentro del 5% de 180**, 0 INVARIANTE | `cp-dyn-steam-ok` |
+
+Las lineas de politica (`cuenta: el modo fijo pedia 5`, `override:`,
+`numFramesToGenerateMax CAMBIO a 6`) son identicas antes y despues del rewire
+de F0 (hud-cero-prev contra cp-6x-steam-ok). F0-F2 invisibles en Cyberpunk.
+
+**El crash de DYNAMIC (1 de 3 en el mismo binario) no esta explicado.** No se
+reprodujo en dos repeticiones ni en los dos builds anteriores. Primera
+excepcion: ntdll+0x64125 escribiendo en 0x36 con `cuenta pedida 2, aplicada
+-1, byte vivo 1`, a los 5656 ms, entre la adopcion del swapchain descartable y
+el swapchain del juego. Queda como hipotesis abierta, no como causa; si vuelve,
+ese log es el primero que hay que mirar.
+
+## Que necesita una corrida con alguien jugando
+
+- GTA V y Halo con build afd69fe (instalado, mode 6): `VEREDICTO ACTIVO`, 0
+  `INVARIANTE`, `numFramesToGenerate` recibido == 6. GTA V no tiene benchmark
+  ([[gtav-benchmark-roto]]) y Halo no genera en el menu.
