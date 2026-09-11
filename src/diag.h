@@ -21,31 +21,31 @@
 
 namespace diag {
 
-enum class Capa {
-    SESION,         // las fases: ARMADO -> VERIFICADO|PASIVO -> ACTIVO
-    IDENTIDAD,      // capa 0: que copia del plugin ejecuta
-    SUMINISTRO,     // capa 1: que set/snippet se carga y con que parches
-    POLITICA,       // capa 2: que se le pide al plugin (resolve/decidir_force)
-    PRESENTACION,   // capa 3: swapchain, Present, el contador
+enum class Layer {
+    SESSION,         // las fases: ARMADO -> VERIFICADO|PASIVO -> ACTIVO
+    IDENTITY,      // capa 0: que copia del plugin ejecuta
+    SUPPLY,     // capa 1: que set/snippet se carga y con que parches
+    POLICY,       // capa 2: que se le pide al plugin (resolve/decidir_force)
+    PRESENTATION,   // capa 3: swapchain, Present, el contador
 };
 
-inline const char *nombre_capa(Capa c) {
+inline const char *layer_name(Layer c) {
     switch (c) {
-    case Capa::SESION:       return "sesion";
-    case Capa::IDENTIDAD:    return "capa0/identidad";
-    case Capa::SUMINISTRO:   return "capa1/suministro";
-    case Capa::POLITICA:     return "capa2/politica";
-    case Capa::PRESENTACION: return "capa3/presentacion";
+    case Layer::SESSION:       return "sesion";
+    case Layer::IDENTITY:    return "capa0/identidad";
+    case Layer::SUPPLY:   return "capa1/suministro";
+    case Layer::POLICY:     return "capa2/politica";
+    case Layer::PRESENTATION: return "capa3/presentacion";
     }
     return "?";
 }
 
 // Un buffer de linea. Nunca desborda: lo que no entra se corta.
-struct Linea {
+struct Line {
     char b[256];
     int n = 0;
-    Linea() { b[0] = 0; }
-    void txt(const char *s) {
+    Line() { b[0] = 0; }
+    void text(const char *s) {
         while (*s != 0 && n < (int)sizeof(b) - 1) b[n++] = *s++;
         b[n] = 0;
     }
@@ -57,32 +57,32 @@ struct Linea {
         b[n] = 0;
     }
     void snum(long long v) {
-        if (v < 0) { txt("-"); num((unsigned long long)(-v)); } else num((unsigned long long)v);
+        if (v < 0) { text("-"); num((unsigned long long)(-v)); } else num((unsigned long long)v);
     }
     // ` clave=valor`; txtpar para un valor de texto (un 0 literal seria ambiguo)
-    Linea &par(const char *clave, long long v) { txt(" "); txt(clave); txt("="); snum(v); return *this; }
-    Linea &txtpar(const char *clave, const char *v) { txt(" "); txt(clave); txt("="); txt(v); return *this; }
+    Line &pair(const char *key, long long v) { text(" "); text(key); text("="); snum(v); return *this; }
+    Line &text_pair(const char *key, const char *v) { text(" "); text(key); text("="); text(v); return *this; }
 };
 
 // `INVARIANTE <capa> <nombre>: <detalle>` -- despues se le agregan pares.
-inline Linea invariante(Capa c, const char *nombre, const char *detalle) {
-    Linea l;
-    l.txt("INVARIANTE ");
-    l.txt(nombre_capa(c));
-    l.txt(" ");
-    l.txt(nombre);
-    l.txt(": ");
-    l.txt(detalle);
+inline Line invariant(Layer c, const char *name, const char *detail) {
+    Line l;
+    l.text("INVARIANTE ");
+    l.text(layer_name(c));
+    l.text(" ");
+    l.text(name);
+    l.text(": ");
+    l.text(detail);
     return l;
 }
 
 // `VEREDICTO <fase>: <detalle>` -- la decision de la sesion, mismo formato.
-inline Linea veredicto(const char *fase, const char *detalle) {
-    Linea l;
-    l.txt("VEREDICTO ");
-    l.txt(fase);
-    l.txt(": ");
-    l.txt(detalle);
+inline Line verdict(const char *phase, const char *detail) {
+    Line l;
+    l.text("VEREDICTO ");
+    l.text(phase);
+    l.text(": ");
+    l.text(detail);
     return l;
 }
 

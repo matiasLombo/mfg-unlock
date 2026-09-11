@@ -8,49 +8,49 @@
 
 using namespace diag;
 
-static int fallos = 0;
+static int failures = 0;
 
-static void chequear(const char *caso, const char *got, const char *esperado) {
-    const bool ok = strcmp(got, esperado) == 0;
-    if (!ok) ++fallos;
-    printf("  %-40s %s\n", caso, ok ? "ok  " : "FALLA");
-    if (!ok) printf("    dio:      %s\n    esperado: %s\n", got, esperado);
+static void check(const char *label, const char *got, const char *expected) {
+    const bool ok = strcmp(got, expected) == 0;
+    if (!ok) ++failures;
+    printf("  %-40s %s\n", label, ok ? "ok  " : "FALLA");
+    if (!ok) printf("    dio:      %s\n    esperado: %s\n", got, expected);
 }
 
 int main(void) {
     printf("diagnostico -- una linea por invariante\n\n");
     {
-        Linea l = invariante(Capa::POLITICA, "cuenta>=2", "con multiplicador es 1X, no genera");
-        l.par("sel", 8).par("gen", 1).par("objetivo", 255).par("tope", 6).par("correccion", 1);
-        chequear("capa2 con cinco pares", l.b,
+        Line l = invariant(Layer::POLICY, "cuenta>=2", "con multiplicador es 1X, no genera");
+        l.pair("sel", 8).pair("gen", 1).pair("objetivo", 255).pair("tope", 6).pair("correccion", 1);
+        check("capa2 con cinco pares", l.b,
                  "INVARIANTE capa2/politica cuenta>=2: con multiplicador es 1X, no genera"
                  " sel=8 gen=1 objetivo=255 tope=6 correccion=1");
     }
     {
-        Linea l = invariante(Capa::IDENTIDAD, "copia-parcheada", "la copia que ejecuta no tiene todos los parches");
-        l.par("cuenta", 0).par("pacer", 2);
-        chequear("capa0", l.b,
+        Line l = invariant(Layer::IDENTITY, "copia-parcheada", "la copia que ejecuta no tiene todos los parches");
+        l.pair("cuenta", 0).pair("pacer", 2);
+        check("capa0", l.b,
                  "INVARIANTE capa0/identidad copia-parcheada: la copia que ejecuta no tiene todos los parches cuenta=0 pacer=2");
     }
     {
-        Linea l = veredicto("PASIVO", "no se identifico que copia ejecuta");
-        l.par("copias", 2).par("vivas", 1).par("resuelto", 1);
-        chequear("veredicto", l.b,
+        Line l = verdict("PASIVO", "no se identifico que copia ejecuta");
+        l.pair("copias", 2).pair("vivas", 1).pair("resuelto", 1);
+        check("veredicto", l.b,
                  "VEREDICTO PASIVO: no se identifico que copia ejecuta copias=2 vivas=1 resuelto=1");
     }
     {
-        Linea l = invariante(Capa::PRESENTACION, "contador", "GetLastPresentCount fallo");
-        l.par("hr", -2005270527LL).txtpar("modo", "runtime");
-        chequear("negativos y texto", l.b,
+        Line l = invariant(Layer::PRESENTATION, "contador", "GetLastPresentCount fallo");
+        l.pair("hr", -2005270527LL).text_pair("modo", "runtime");
+        check("negativos y texto", l.b,
                  "INVARIANTE capa3/presentacion contador: GetLastPresentCount fallo hr=-2005270527 modo=runtime");
     }
     {
         // Nunca desborda: 300 caracteres de detalle se cortan a 255.
-        char largo[301]; memset(largo, 'x', 300); largo[300] = 0;
-        Linea l = invariante(Capa::SESION, "x", largo);
-        l.par("k", 1);
-        chequear("largo acotado", l.n == 255 && strlen(l.b) == 255 ? "ok" : "mal", "ok");
+        char long_text[301]; memset(long_text, 'x', 300); long_text[300] = 0;
+        Line l = invariant(Layer::SESSION, "x", long_text);
+        l.pair("k", 1);
+        check("largo acotado", l.n == 255 && strlen(l.b) == 255 ? "ok" : "mal", "ok");
     }
-    printf("\n%s\n", fallos == 0 ? "todos los casos en verde" : "HAY CASOS EN ROJO");
-    return fallos ? 1 : 0;
+    printf("\n%s\n", failures == 0 ? "todos los casos en verde" : "HAY CASOS EN ROJO");
+    return failures ? 1 : 0;
 }

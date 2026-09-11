@@ -1197,9 +1197,9 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         static bool dicho_nada = false;
         if (!dicho_nada) {
             dicho_nada = true;
-            diag::Linea l = diag::invariante(diag::Capa::POLITICA, "cuenta-del-juego",
+            diag::Line l = diag::invariant(diag::Layer::POLICY, "cuenta-del-juego",
                                              "sin parche y sin saber que pide el juego: no se toca");
-            l.par("visto", g_last_seen_generated).par("sel", g_force_sel);
+            l.pair("visto", g_last_seen_generated).pair("sel", g_force_sel);
             log_line(l.b);
         }
         return;
@@ -1232,12 +1232,12 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         static LONG dicho = -1;
         if (dicho != s.remains) {
             dicho = s.remains;
-            diag::Linea l = diag::invariante(diag::Capa::POLITICA, "cuenta>=2",
+            diag::Line l = diag::invariant(diag::Layer::POLICY, "cuenta>=2",
                                              s.invariant_fixed
                                                  ? "con multiplicador es 1X; se escribe 2, el piso"
                                                  : "con multiplicador es 1X; manda el freno, NO se corrige");
-            l.par("cuenta", s.remains).par("sel", g_force_sel).par("gen", g_force_generated)
-             .par("objetivo", g_dyn_target).par("tope", kTope);
+            l.pair("cuenta", s.remains).pair("sel", g_force_sel).pair("gen", g_force_generated)
+             .pair("objetivo", g_dyn_target).pair("tope", kTope);
             log_line(l.b);
         }
     }
@@ -5453,9 +5453,9 @@ static void presentes_del_runtime(void) {
         static bool dicho = false;
         if (!dicho) {
             dicho = true;
-            diag::Linea l = diag::invariante(diag::Capa::PRESENTACION, "contador",
+            diag::Line l = diag::invariant(diag::Layer::PRESENTATION, "contador",
                                              "GetLastPresentCount fallo; el contador queda en cero");
-            l.par("hr", (long long)(long)hr);
+            l.pair("hr", (long long)(long)hr);
             log_line(l.b);
         }
         return;
@@ -7329,10 +7329,10 @@ static void copia_que_ejecuta(const void *fn, const char *nombre) {
     // Y lo que importa de verdad: si la que ejecuta no recibio los parches, todo
     // lo que midamos despues es sobre un binario que no tocamos.
     if (g_copias[cual].sitios_cuenta <= 0 || g_copias[cual].sitios_pacer <= 0) {
-        diag::Linea l = diag::invariante(diag::Capa::IDENTIDAD, "copia-parcheada",
+        diag::Line l = diag::invariant(diag::Layer::IDENTITY, "copia-parcheada",
                                          "la copia que ejecuta no tiene todos los parches");
-        l.par("copia", cual).par("cuenta", g_copias[cual].sitios_cuenta)
-         .par("pacer", g_copias[cual].sitios_pacer);
+        l.pair("copia", cual).pair("cuenta", g_copias[cual].sitios_cuenta)
+         .pair("pacer", g_copias[cual].sitios_pacer);
         log_line(l.b);
     } else
         log_line("  la copia que ejecuta tiene cuenta y pacer parcheados");
@@ -7369,15 +7369,15 @@ static void evaluar_invariantes(void) {
     }
     // Una linea con todos los numeros de la topologia, y el veredicto adelante.
     const bool pasivo = g_ejecuta_resuelto && g_copia_ejecuta < 0;
-    diag::Linea l = diag::veredicto(pasivo ? "PASIVO" : "ACTIVO",
+    diag::Line l = diag::verdict(pasivo ? "PASIVO" : "ACTIVO",
                                     pasivo ? "no se identifico que copia ejecuta; no se parchea ni se reescriben opciones"
                                            : "topologia identificada");
-    l.par("copias", g_copias_n).par("vivas", vivas).par("con_cuenta", con_cuenta)
-     .par("con_pacer", con_pacer).par("ejecuta", g_copia_ejecuta)
-     .par("ejecuta_cuenta", g_copia_ejecuta >= 0 ? g_copias[g_copia_ejecuta].sitios_cuenta : -1)
-     .par("ejecuta_pacer", g_copia_ejecuta >= 0 ? g_copias[g_copia_ejecuta].sitios_pacer : -1)
-     .par("multiplicador", cuenta_es_multiplicador() ? 1 : 0)
-     .par("resuelto", g_ejecuta_resuelto ? 1 : 0);
+    l.pair("copias", g_copias_n).pair("vivas", vivas).pair("con_cuenta", con_cuenta)
+     .pair("con_pacer", con_pacer).pair("ejecuta", g_copia_ejecuta)
+     .pair("ejecuta_cuenta", g_copia_ejecuta >= 0 ? g_copias[g_copia_ejecuta].sitios_cuenta : -1)
+     .pair("ejecuta_pacer", g_copia_ejecuta >= 0 ? g_copias[g_copia_ejecuta].sitios_pacer : -1)
+     .pair("multiplicador", cuenta_es_multiplicador() ? 1 : 0)
+     .pair("resuelto", g_ejecuta_resuelto ? 1 : 0);
     log_line(l.b);
     if (pasivo) {
         g_fase = (LONG)Fase::PASIVO;
