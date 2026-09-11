@@ -197,7 +197,7 @@ static void snapshot_window(ClosedWindow &w, double win_elapsed) {
     w.rendered_fps = g_rendered_fps;
     w.api_applied = g_api_applied; w.force_sel = g_force_sel;
     w.force_generated = g_force_generated; w.count_live = g_count_live;
-    w.multiplier = cuenta_es_multiplicador();
+    w.multiplier = count_is_multiplier();
     w.rfx_base = g_rfx_base;
     {
         const LONG now = g_rt_present_count;

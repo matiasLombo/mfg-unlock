@@ -61,8 +61,8 @@ static int g_dyn_said = 0;
 // no llaman nunca con eOn -- en Halo no aparece una sola linea de "the game
 // itself last asked for" en toda la corrida -- y ahi respetar el eOff seria no
 // generar jamas. Sin esa evidencia se mantiene el comportamiento de antes.
-static bool juego_apago_la_generacion(void) {
-    return g_juego_pidio_on != 0 && g_juego_quiere == 0;
+static bool game_turned_off_generation(void) {
+    return g_game_asked_on != 0 && g_game_wants == 0;
 }
 
 static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
@@ -73,19 +73,19 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     // globales, escribir la struct y loguear con el mismo dedupe de siempre.
     // Es el unico punto por el que pasa toda escritura de opciones.
     policy::ForceInput e{};
-    e.passive = fase_pasiva();
-    e.game_asked_on = g_juego_pidio_on != 0;
-    e.game_wants = g_juego_quiere;
+    e.passive = phase_passive();
+    e.game_asked_on = g_game_asked_on != 0;
+    e.game_wants = g_game_wants;
     e.sel = g_force_sel;
     e.force_generated = g_force_generated;
-    e.multiplier = cuenta_es_multiplicador();
-    e.cycle_ceiling = g_ciclo_techo;
-    e.six = g_seis;
+    e.multiplier = count_is_multiplier();
+    e.cycle_ceiling = g_cycle_ceiling;
+    e.six = g_six;
     e.ceilfirst = g_ceilfirst;
     e.interp_on = g_interp_on != 0;
     e.wic_ok = g_wic_ok;
     e.last_seen_generated = g_last_seen_generated;
-    const LONG kTope = tope_cuenta();
+    const LONG kTope = count_cap();
     e.cap = kTope;
     const policy::ForceOutput s = policy::decide_force(e);
 
@@ -127,9 +127,9 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         // Nunca vimos que cuenta pide el juego. Sin ese dato no hay a que
         // espejarse: ni la cuenta ni el modo se tocan. Poner un valor de reserva
         // seria forzar a ciegas, que es lo que hizo crashear a Halo.
-        static bool dicho_nada = false;
-        if (!dicho_nada) {
-            dicho_nada = true;
+        static bool said_none = false;
+        if (!said_none) {
+            said_none = true;
             diag::Line l = diag::invariant(diag::Layer::POLICY, "cuenta-del-juego",
                                              "sin parche y sin saber que pide el juego: no se toca");
             l.pair("visto", g_last_seen_generated).pair("sel", g_force_sel);
@@ -147,13 +147,13 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     }
     if (s.reason == policy::Reason::DYN_ON) {
         // Lo que realmente se escribe, y contra que se recorta.
-        static LONG dicho_e = -1, dicho_t = -1, dicho_g = -1;
-        if (dicho_e != s.to_write || dicho_t != kTope || dicho_g != g_force_generated) {
-            dicho_e = s.to_write; dicho_t = kTope; dicho_g = g_force_generated;
+        static LONG said_e = -1, said_t = -1, said_g = -1;
+        if (said_e != s.to_write || said_t != kTope || said_g != g_force_generated) {
+            said_e = s.to_write; said_t = kTope; said_g = g_force_generated;
             log_num("force_into: g_force_generated ", (unsigned)g_force_generated);
             log_num("  escribir ", (unsigned)s.to_write);
             log_num("  kTope ", (unsigned)kTope);
-            log_num("  g_max_declarado ", (unsigned)g_max_declarado);
+            log_num("  g_max_declarado ", (unsigned)g_max_declared);
             log_num("  queda ", (unsigned)s.remains);
         }
     }
@@ -255,9 +255,9 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
         raw_mode = *(LONG *)(p + 32);
         raw_cnt = *n;
         if (raw_mode == 0 || raw_mode == 1) {
-            if (raw_mode == 1) g_juego_pidio_on = 1;
-            if (g_juego_quiere != raw_mode) {
-                g_juego_quiere = raw_mode;
+            if (raw_mode == 1) g_game_asked_on = 1;
+            if (g_game_wants != raw_mode) {
+                g_game_wants = raw_mode;
                 log_num("el juego pide generacion (0 no, 1 si) ", (unsigned)raw_mode);
             }
         }
@@ -308,9 +308,9 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
             g_cap_vp = viewport;
         }
     }
-    leer_max_generados();      // antes de la llamada
+    read_max_generated();      // antes de la llamada
     const unsigned r = g_orig_setoptions(viewport, options_for_call(options));
-    leer_max_generados();      // y despues: si la llamada lo cambia, se ve
+    read_max_generated();      // y despues: si la llamada lo cambia, se ve
     if (p != nullptr && memcmp(p + 8, kDlssgOptionsGuid, 16) == 0) {
         g_api_applied = *(LONG *)(p + 36);
         set_count_now(g_api_applied);
@@ -373,36 +373,36 @@ static void apply_override_now(void) {
     // Lo que no se cumple no se pierde: g_opt_pending queda puesto y el envio
     // sale en el Present siguiente que pase las tres.
     {
-        static LARGE_INTEGER frec = { };
-        static LONGLONG ultimo = 0;
-        static LONG pres_ultimo = 0;
-        static LONG enviado_ultimo = -1;
-        if (frec.QuadPart == 0) QueryPerformanceFrequency(&frec);
+        static LARGE_INTEGER freq = { };
+        static LONGLONG last = 0;
+        static LONG last_pres_count = 0;
+        static LONG last_sent = -1;
+        if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
         LARGE_INTEGER now_qpc;
         QueryPerformanceCounter(&now_qpc);
-        if (ultimo != 0 && frec.QuadPart > 0) {
-            const double ms = (double)(now_qpc.QuadPart - ultimo) * 1000.0 /
-                              (double)frec.QuadPart;
+        if (last != 0 && freq.QuadPart > 0) {
+            const double ms = (double)(now_qpc.QuadPart - last) * 1000.0 /
+                              (double)freq.QuadPart;
             if (ms < 150.0) return;                                  // (1)
-            if (g_present_count - pres_ultimo < 8) return;           // (2)
-            if (enviado_ultimo >= 0 && g_api_applied != enviado_ultimo) {
+            if (g_present_count - last_pres_count < 8) return;           // (2)
+            if (last_sent >= 0 && g_api_applied != last_sent) {
                 static LONG said = -1;                              // (3)
-                if (said != enviado_ultimo) {
-                    said = enviado_ultimo;
+                if (said != last_sent) {
+                    said = last_sent;
                     log_num("latch: el cambio anterior aun no se observo; se espera. pedido ",
-                            (unsigned)enviado_ultimo);
+                            (unsigned)last_sent);
                     log_num("  aplicado en la API ", (unsigned)g_api_applied);
                 }
                 return;
             }
         }
-        ultimo = now_qpc.QuadPart;
-        pres_ultimo = g_present_count;
-        enviado_ultimo = g_force_generated;
+        last = now_qpc.QuadPart;
+        last_pres_count = g_present_count;
+        last_sent = g_force_generated;
     }
     // Lo mismo que en force_into: si el juego la apago, el reenvio la volveria a
     // encender por la puerta de atras.
-    if (juego_apago_la_generacion()) return;
+    if (game_turned_off_generation()) return;
     // The game already spoke for this frame; ours would be the repeated call.
     if (g_game_set_this_frame != 0) return;
     // Says which precondition is missing instead of returning quietly. Three
@@ -515,9 +515,9 @@ static void apply_override_now(void) {
     // byte antes de la llamada, nunca hay un momento con el byte por encima. Al
     // subir el orden correcto es el contrario, y ya es el que hay: la linea de
     // abajo lo sube recien cuando el plugin reservo.
-    if (cuenta_es_multiplicador()) {
-        const LONG ap = g_api_applied, quiere = g_force_generated;
-        if (ap >= 1 && quiere >= 1 && quiere < ap) set_count_now(quiere);
+    if (count_is_multiplier()) {
+        const LONG ap = g_api_applied, wants = g_force_generated;
+        if (ap >= 1 && wants >= 1 && wants < ap) set_count_now(wants);
     }
     g_orig_setoptions(g_vp_copy, options_for_call(g_opt_copy));
     // El byte del bound se escribe ACA, pegado a la llamada.
@@ -599,7 +599,7 @@ static LONG loop_bound_for(LONG n) {
 static void set_count_now(LONG n) {
     // La mitad del byte del tope de 6X. Ver tope_cuenta.
     {
-        const LONG t = tope_cuenta();
+        const LONG t = count_cap();
         if (n > t) n = t;
     }
     // El byte parcheado es el limite del bucle; la cuenta de la API dimensiona
@@ -613,16 +613,16 @@ static void set_count_now(LONG n) {
     //
     // Las dos mitades tienen que frenarse juntas o ninguna.
     if (!g_wic_ok) {
-        const LONG suyo = g_last_seen_generated;
-        const LONG tope = (suyo >= 1 && suyo <= 5) ? suyo : 0;
-        if (n > tope) {
+        const LONG theirs = g_last_seen_generated;
+        const LONG cap = (theirs >= 1 && theirs <= 5) ? theirs : 0;
+        if (n > cap) {
             static LONG said = -1;
-            if (said != tope) {
-                said = tope;
+            if (said != cap) {
+                said = cap;
                 log_num("freno: el byte de la cuenta tambien se limita a ",
-                        (unsigned)tope);
+                        (unsigned)cap);
             }
-            n = tope;
+            n = cap;
         }
     }
     if (g_wic_mode) {
@@ -630,12 +630,12 @@ static void set_count_now(LONG n) {
         // is n + 1.
         if (g_wic_n > 0) {
             if (n < 0) n = 0;
-            { const LONG t6 = (g_seis || cuenta_es_multiplicador()) ? 6 : 5; if (n > t6) n = t6; }
+            { const LONG t6 = (g_six || count_is_multiplier()) ? 6 : 5; if (n > t6) n = t6; }
             // Solo si el parche esta PUESTO. Con el parche sacado esa
             // direccion ya no es un inmediato: es el byte 0x42 de
             // mov eax,[rdx+4], y escribirle corrompe la instruccion del plugin.
             // Medido: con el parche sacado por modo, cero ventanas de medicion.
-            if (g_wic_puesto != 0) {
+            if (g_wic_set != 0) {
                 // Ultima linea de defensa: el byte nunca por encima de la
                 // reserva viva. Sin esperas ni frenos -- si la reserva es 3, se
                 // escribe 3. Se pierde multiplicador en ese frame; no se pierde
@@ -644,7 +644,7 @@ static void set_count_now(LONG n) {
                 LONG w = n;
                 const LONG ap = g_api_applied;
                 if (ap >= 1 && w > ap) w = ap;
-                sitio_write(g_wic_sitios, g_wic_n, (unsigned char)w);
+                site_write(g_wic_sites, g_wic_n, (unsigned char)w);
             }
             // The pacer waits on its own copy. Without this it keeps waiting
             // for the ceiling the API was told, which is the whole throughput
@@ -659,10 +659,10 @@ static void set_count_now(LONG n) {
     }
     if (g_imm_n == 0) return;
     if (n < 0) n = 0;                    // zero is legal: the loop is skipped
-    { const LONG t6 = (g_seis || cuenta_es_multiplicador()) ? 6 : 5; if (n > t6) n = t6; }                    // the plugin's own ceiling
+    { const LONG t6 = (g_six || count_is_multiplier()) ? 6 : 5; if (n > t6) n = t6; }                    // the plugin's own ceiling
     // The guard first, so a frame can never see a raised bound with the old
     // gate still shut, or the reverse.
-    sitio_write(g_imm2_sitios, g_imm2_n, (unsigned char)loop_bound_for(n));
+    site_write(g_imm2_sites, g_imm2_n, (unsigned char)loop_bound_for(n));
     // The same number as the loop, zero included. Clamping this to one "just
     // in case" was the whole mismatch coming back: the metering programmed a
     // batch for one generated frame while the loop produced none, and the
@@ -673,7 +673,7 @@ static void set_count_now(LONG n) {
     // this carrying the cadence, 1.50x still presented 30 rather than 22.5.
     // Whatever the loop produces is presented regardless of this byte, so the
     // fraction cannot be moved here. Kept in agreement with the loop.
-    sitio_write(g_imm3_sitios, g_imm3_n, (unsigned char)n);
+    site_write(g_imm3_sites, g_imm3_n, (unsigned char)n);
     // Held on. Measured both ways at 1.50x, base 80: following the count gives
     // 20.6 fps and 361 state changes, holding it on gives 39.3 fps and one.
     // Neither reaches the 120 the ratio asks for -- the rate tracks how often
@@ -689,7 +689,7 @@ static void set_count_now(LONG n) {
         *g_lat_allow = 0;
         log_line("fractional: frame latency now left alone");
     }
-    sitio_write(g_imm_sitios, g_imm_n, (unsigned char)loop_bound_for(n));
+    site_write(g_imm_sites, g_imm_n, (unsigned char)loop_bound_for(n));
     g_count_live = n;
 }
 
@@ -749,10 +749,10 @@ static scheduler::State g_sched;
 // buena 153-160, mala 274 con deuda y sesgo clavados en el riel). Se
 // deja detras de mfg-sin-deuda.txt para el A/B; la regla esta en
 // controlador.h.
-static bool g_usar_deuda = true;
+static bool g_use_debt = true;
 
 static bool g_dyn_diag = false;        // mfg-dyndiag.txt: diagnostico por cambio de ratio
-static bool g_latch_reparto = true;    // mfg-nolatch.txt lo apaga, ver fractional_tick
+static bool g_latch_schedule = true;    // mfg-nolatch.txt lo apaga, ver fractional_tick
 // Saturacion: el ratio mas barato que sostiene las presentadas que ya se logran.
 //
 // Arriba de cierto punto, subir el multiplicador NO compra frames. La base se
@@ -794,7 +794,7 @@ struct ControllerLog {
 static void dyn_control(double base_fps, double presented_fps) {
     if (g_force_sel != kSelDynFuture) return;
     ControllerLog log;
-    const controller::Config c{ g_sat_on, g_usar_deuda };
+    const controller::Config c{ g_sat_on, g_use_debt };
     controller::control(g_ctrl, c, base_fps, presented_fps, log);
 }
 
@@ -808,8 +808,8 @@ static void dyn_apply(double base_fps) {
     if (g_force_sel != kSelDynFuture) return;
     if (base_fps <= 1.0) return;
     if (g_ctrl_fps > 0.0 && g_ctrl_n < kCtrlMinMuestras) {
-        static int callado = 0;
-        if (++callado % 240 == 1) {
+        static int muted = 0;
+        if (++muted % 240 == 1) {
             log_num("dynamic: base sin asentar, no se decide. muestras ",
                     (unsigned)g_ctrl_n);
             log_num("  base que habria usado ", (unsigned)(base_fps + 0.5));
@@ -832,7 +832,7 @@ static void dyn_apply(double base_fps) {
     in.pc = g_rt_present_count;
     in.dyn_target = g_dyn_target;
     ControllerLog log;
-    const controller::Config c{ g_sat_on, g_usar_deuda };
+    const controller::Config c{ g_sat_on, g_use_debt };
     const controller::ApplyOutput s = controller::apply(g_ctrl, c, in, log);
     if (!s.changes) return;
     const LONG cur = g_dyn_target;
@@ -909,7 +909,7 @@ static void fractional_tick(void) {
         was_sel = g_force_sel;
         // Un solo canal por modo: en enteros manda la API, en fraccionales el
         // byte. Ver wic_parche.
-        if (g_wic_n > 0) wic_parche(sel_is_frac());
+        if (g_wic_n > 0) wic_patch(sel_is_frac());
         g_frac_acc = 0.0;
         g_token_fps = 0.0;        // the previous mode's readings say nothing
         g_token_dt = 0.0;
@@ -961,7 +961,7 @@ static void fractional_tick(void) {
     // Es el mismo desfasaje que dejo 2X sin generar y que hizo que el modo 6
     // pidiera 5. Este era el ultimo lugar donde faltaba. Ver
     // cuenta_es_multiplicador.
-    const double kBase = cuenta_es_multiplicador() ? 0.0 : 1.0;
+    const double kBase = count_is_multiplier() ? 0.0 : 1.0;
     double per_frame = (double)g_dyn_target / 100.0 - kBase;
     // DYNAMIC sin ratio decidido todavia: piso 2.0, no 0.
     //
@@ -1023,7 +1023,7 @@ static void fractional_tick(void) {
     // has no such conflict: the count of high frames is what carries the
     // fraction, and it is exact over each period.
     const LONG lo = (LONG)per_frame;
-    g_ciclo_techo = lo + 1;   // A1: el maximo que este ciclo va a pedir
+    g_cycle_ceiling = lo + 1;   // A1: el maximo que este ciclo va a pedir
     const double frac = per_frame - (double)lo;
 
     static int pos = 0;
@@ -1042,7 +1042,7 @@ static void fractional_tick(void) {
                 dt = (double)(now_qpc.QuadPart - prev_qpc) / (double)g_qpc_freq;
             prev_qpc = now_qpc.QuadPart;
         }
-        const scheduler::Config sched_cfg{ g_block_ms, g_blocks, g_latch_reparto,
+        const scheduler::Config sched_cfg{ g_block_ms, g_blocks, g_latch_schedule,
                               g_peralt, g_nullalt, g_blockalt };
         const scheduler::Input sched_in{ per_frame, lo, frac, dt, g_last_dt };
         ControllerLog sched_log;
@@ -1060,7 +1060,7 @@ static void fractional_tick(void) {
         // Con la semantica nueva el byte NO lleva la cadencia: la lleva la
         // cuenta de la API, y el byte solo tiene que ir en el mismo escalon.
         // Lo escribe set_count_now con g_api_aplicada, pegado a la llamada.
-        if (!cuenta_es_multiplicador()) set_count_now(api);
+        if (!count_is_multiplier()) set_count_now(api);
         return;
     }
 
@@ -1125,15 +1125,15 @@ static void fractional_tick(void) {
     // Es el mismo desfasaje que dejo 2X sin generar. Ver cuenta_es_multiplicador.
     // per_frame ya viene en la escala correcta (ver kBase arriba), asi que el
     // techo del ratio es directamente su parte entera hacia arriba.
-    const double para_techo = per_frame;
-    const LONG ceil_n = (LONG)(para_techo + 0.999);
+    const double for_ceiling = per_frame;
+    const LONG ceil_n = (LONG)(for_ceiling + 0.999);
     // Varying the API count at runtime crashes, in every arrangement tried:
     // per frame, in blocks of eight, and in blocks with the loop bound clamped
     // to what the plugin had actually applied so the two could never be out of
     // step. All three end in 0xC0000005. The count is fixed for the life of the
     // run at the ceiling of the ratio.
     {
-        const LONG t = (g_seis || cuenta_es_multiplicador()) ? 6 : 5;
+        const LONG t = (g_six || count_is_multiplier()) ? 6 : 5;
         g_force_generated = ceil_n < 1 ? 1 : (ceil_n > t ? t : ceil_n);
     }
     // Dicho una vez, porque si no es una mentira silenciosa.
@@ -1144,7 +1144,7 @@ static void fractional_tick(void) {
     // slDLSSGSetOptions por frame y 100 ms de enfriamiento cada una, que es
     // generacion apagada. El fraccional necesita bloques, o sea g_slowalt, que
     // viene encendido salvo que mfg-noslowalt.txt lo apague.
-    if (cuenta_es_multiplicador() && g_dyn_target % 100 != 0) {
+    if (count_is_multiplier() && g_dyn_target % 100 != 0) {
         static bool said = false;
         if (!said) {
             said = true;

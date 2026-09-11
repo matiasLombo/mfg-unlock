@@ -101,7 +101,7 @@ static void copia_que_ejecuta(const void *fn, const char *nombre);
 enum class Fase { ARMADO, VERIFICADO, ACTIVO, PASIVO };
 static volatile LONG g_fase = (LONG)Fase::ARMADO;
 static inline bool fase_activa(void) { return g_fase == (LONG)Fase::ACTIVO; }
-static inline bool fase_pasiva(void) { return g_fase == (LONG)Fase::PASIVO; }
+static inline bool phase_passive(void) { return g_fase == (LONG)Fase::PASIVO; }
 static void evaluar_invariantes(void);
 // Alimenta g_present_count desde el runtime cuando no hay hook de Present.
 static void runtime_presents(void);
@@ -174,7 +174,7 @@ static bool g_twocopies = false;      // mfg-twocopies.txt
 // no habia techo que levantar -- lo que tapaba el resultado era la ventana sin
 // foco (ver dlssg-needs-window-focus en las memorias).
 static bool g_ceilfirst = false;      // mfg-ceilfirst.txt
-static volatile LONG g_ciclo_techo = 0;   // lo+1 del ciclo en curso
+static volatile LONG g_cycle_ceiling = 0;   // lo+1 del ciclo en curso
 // Encendida o no. No hay consulta directa que sirva: slDLSSGGetState avisa que
 // hay que sincronizarla con el hilo de present. Se deduce de que lo presentado
 // supere a la base de Reflex, que es la medida honesta que ya tenemos.
@@ -658,8 +658,8 @@ static volatile LONG g_opt_pending = 0;
 //
 // g_juego_quiere: su ultimo modo, 0 = eOff, 1 = eOn, -1 = todavia no lo vimos.
 // g_juego_pidio_on: si alguna vez lo vimos pedir eOn en esta corrida.
-static volatile LONG g_juego_quiere = -1;
-static volatile LONG g_juego_pidio_on = 0;
+static volatile LONG g_game_wants = -1;
+static volatile LONG g_game_asked_on = 0;
 // La cuenta que el plugin tiene REALMENTE aplicada, no la que queremos.
 //
 // bound y reserva tienen que moverse juntos: bound = API + 1 anda, bound mayor
@@ -713,7 +713,7 @@ static bool g_permitir_x6 = false;
 // patch_snippet_max solo corre si la semantica dice que el snippet es el nuestro
 // -- forzar 6 sobre la build de julio, que topa en 3 por arquitectura, es
 // exactamente lo que hizo crashear a Halo.
-static bool g_seis = true;             // mfg-sinseis.txt lo apaga
+static bool g_six = true;             // mfg-sinseis.txt lo apaga
 
 // Con NUESTRO snippet, la cuenta ES el multiplicador.
 //
@@ -738,7 +738,7 @@ static bool g_seis = true;             // mfg-sinseis.txt lo apaga
 // tiene ese problema.
 static volatile LONG g_snippet_cargado = 0;
 
-static bool cuenta_es_multiplicador(void) {
+static bool count_is_multiplier(void) {
     return g_snippet_cargado != 0;
 }
 
@@ -787,28 +787,28 @@ static void detectar_semantica(unsigned char *base) {
                        : "semantica: la cuenta es el MULTIPLICADOR");
 }
 
-static volatile unsigned char *g_seis_sitios[4] = { nullptr, nullptr, nullptr, nullptr };
-static int g_seis_n = 0;
-static volatile LONG g_max_declarado = 0;   // 0 = todavia no se leyo
+static volatile unsigned char *g_six_sites[4] = { nullptr, nullptr, nullptr, nullptr };
+static int g_six_n = 0;
+static volatile LONG g_max_declared = 0;   // 0 = todavia no se leyo
 // mfg-topefijo.txt: vuelve al tope de 5 de antes, para poder MEDIR la linea
 // base sin recompilar. Diagnostico local, nunca el arreglo: sin el archivo el
 // dll se comporta como se envia.
 static bool g_tope_fijo = false;
 
-static LONG tope_cuenta(void) {
+static LONG count_cap(void) {
     (void)g_permitir_x6;
     if (g_tope_fijo) return 5;
     // Lo que el plugin declara, si se pudo leer; 5 mientras tanto, que es como
     // venia. Ver leer_max_generados: pedir por encima de esto no entrega mas
     // frames, entrega CERO -- NGX rechaza la evaluacion entera.
-    const LONG d = g_max_declarado;
+    const LONG d = g_max_declared;
     // Hasta 6: el array de sub-frames tiene SEIS ranuras, asi que 6X es el
     // maximo estructural. El 5 de antes era un clamp nuestro y era el que
     // topaba una vez que el snippet y el plugin ya reportaban 6.
     // Sin mfg-seis.txt esto se comporta como siempre. El 6 es experimental y
     // dejarlo incondicional fue un error: rompio 2X sin que sacar el flag lo
     // devolviera.
-    const LONG techo = (g_seis || cuenta_es_multiplicador()) ? 6 : 5;
+    const LONG techo = (g_six || count_is_multiplier()) ? 6 : 5;
     return (d >= 1 && d <= techo) ? d : 5;
 }
 // Base del sl.dlss_g que estamos parcheando, para poder leerle campos.
@@ -1020,7 +1020,7 @@ static void sonda_vtable(void) {
 // 5 sin tocar nada.
 // g_max_declarado se define arriba, junto a tope_cuenta.
 
-static void leer_max_generados(void) {
+static void read_max_generated(void) {
     if (g_dlssg_base == nullptr) return;
     unsigned char *ctx = nullptr;
     if (!leer_ok(g_dlssg_base + 0x8f1e8, &ctx, sizeof(ctx)) || ctx == nullptr) return;
@@ -1042,15 +1042,15 @@ static void leer_max_generados(void) {
     // Importa: si el 3 lo pone una consulta de capacidad de la GPU, es el techo
     // de Ada y no hay nada que subir. Si lo pone una tabla o una comprobacion
     // de version, si lo hay.
-    if (g_max_declarado != v) {
+    if (g_max_declared != v) {
         log_num("max: numFramesToGenerateMax CAMBIO a ", (unsigned)v);
         // Los bytes parcheados, tal como estan AHORA en memoria.
-        for (int q = 0; q < g_seis_n; ++q) {
-            if (g_seis_sitios[q] == nullptr) continue;
-            log_num("  sitio del tope, byte vivo ", (unsigned)*g_seis_sitios[q]);
+        for (int q = 0; q < g_six_n; ++q) {
+            if (g_six_sites[q] == nullptr) continue;
+            log_num("  sitio del tope, byte vivo ", (unsigned)*g_six_sites[q]);
         }
-        log_num("  venia de ", (unsigned)g_max_declarado);
-        g_max_declarado = v;
+        log_num("  venia de ", (unsigned)g_max_declared);
+        g_max_declared = v;
     }
 }
 
@@ -1501,15 +1501,15 @@ static void query_state(void);
 //
 // Escribir en una copia que no se usa es inofensivo: es un byte en su .text que
 // nadie lee. Buscar cual es la buena seria adivinar; escribir en todas no.
-static const int kMaxSitios = 4;
-static void sitio_add(volatile unsigned char **lista, int *n, volatile unsigned char *q) {
+static const int kMaxSites = 4;
+static void site_add(volatile unsigned char **lista, int *n, volatile unsigned char *q) {
     for (int i = 0; i < *n; ++i) if (lista[i] == q) return;
-    if (*n < kMaxSitios) lista[(*n)++] = q;
+    if (*n < kMaxSites) lista[(*n)++] = q;
 }
-static void sitio_write(volatile unsigned char **lista, int n, unsigned char v) {
+static void site_write(volatile unsigned char **lista, int n, unsigned char v) {
     for (int i = 0; i < n; ++i) if (lista[i] != nullptr) *lista[i] = v;
 }
-static volatile unsigned char *g_wic_sitios[kMaxSitios] = { nullptr, nullptr, nullptr, nullptr };
+static volatile unsigned char *g_wic_sites[kMaxSites] = { nullptr, nullptr, nullptr, nullptr };
 static int g_wic_n = 0;
 
 // Poner y sacar el parche del byte segun el modo.
@@ -1534,11 +1534,11 @@ static int g_wic_n = 0;
 // Se escribe sobre codigo del plugin con el juego corriendo. Los tres bytes se
 // escriben de atras hacia adelante para que el opcode quede ultimo: asi ningun
 // hilo puede leer una instruccion a medio formar.
-static volatile LONG g_wic_puesto = 1;   // el parche arranca aplicado
-static void wic_parche(bool poner) {
-    if ((g_wic_puesto != 0) == poner) return;
+static volatile LONG g_wic_set = 1;   // el parche arranca aplicado
+static void wic_patch(bool poner) {
+    if ((g_wic_set != 0) == poner) return;
     for (int i = 0; i < g_wic_n; ++i) {
-        volatile unsigned char *imm = g_wic_sitios[i];
+        volatile unsigned char *imm = g_wic_sites[i];
         if (imm == nullptr) continue;
         unsigned char *q = (unsigned char *)(imm - 1);   // el opcode
         DWORD old = 0;
@@ -1567,7 +1567,7 @@ static void wic_parche(bool poner) {
         }
         VirtualProtect(q, 3, old, &old);
     }
-    g_wic_puesto = poner ? 1 : 0;
+    g_wic_set = poner ? 1 : 0;
     log_line(poner ? "wic: parche PUESTO (modo fraccional)"
                    : "wic: parche SACADO (modo entero, manda la API)");
 }
@@ -1628,7 +1628,7 @@ static int patch_work_item_count(unsigned char *text, size_t len) {
     q[0] = 0x6A;    // push imm8
     q[1] = 1;       // NN
     q[2] = 0x58;    // pop rax
-    sitio_add(g_wic_sitios, &g_wic_n, q + 1);
+    site_add(g_wic_sites, &g_wic_n, q + 1);
     log_line("  work item count is ours (bound, index and metering agree)");
 
     // El SEGUNDO campo, doce bytes mas adelante. Sin este, todo lo demas falla.
@@ -1672,7 +1672,7 @@ static int patch_work_item_count(unsigned char *text, size_t len) {
                 q2[0] = 0x6A;
                 q2[1] = 1;
                 q2[2] = 0x58;
-                sitio_add(g_wic_sitios, &g_wic_n, q2 + 1);
+                site_add(g_wic_sites, &g_wic_n, q2 + 1);
                 log_line("  fill count is ours too (el llenado sigue al bound)");
             }
         } else {
@@ -1683,11 +1683,11 @@ static int patch_work_item_count(unsigned char *text, size_t len) {
     return 1;
 }
 
-static volatile unsigned char *g_imm_sitios[kMaxSitios] = { nullptr, nullptr, nullptr, nullptr };
+static volatile unsigned char *g_imm_sites[kMaxSites] = { nullptr, nullptr, nullptr, nullptr };
 static int g_imm_n = 0;
-static volatile unsigned char *g_imm2_sitios[kMaxSitios] = { nullptr, nullptr, nullptr, nullptr };
+static volatile unsigned char *g_imm2_sites[kMaxSites] = { nullptr, nullptr, nullptr, nullptr };
 static int g_imm2_n = 0;
-static volatile unsigned char *g_imm3_sitios[kMaxSitios] = { nullptr, nullptr, nullptr, nullptr };
+static volatile unsigned char *g_imm3_sites[kMaxSites] = { nullptr, nullptr, nullptr, nullptr };
 static int g_imm3_n = 0;
 static volatile unsigned char *g_gen_flag = nullptr;    // 1 generating, 0 not
 static volatile unsigned char *g_lat_allow = nullptr;   // 1 reconfigure, 0 leave alone
@@ -2307,7 +2307,7 @@ static int patch_subframe_count(unsigned char *base) {
     // calling VirtualProtect that often would be both slow and pointless.
     DWORD ignored = 0;
     VirtualProtect(p + 2, 1, PAGE_EXECUTE_READWRITE, &ignored);
-    sitio_add(g_imm_sitios, &g_imm_n, p + 2);
+    site_add(g_imm_sites, &g_imm_n, p + 2);
 
     // And the count the flip metering is programmed with.
     //
@@ -2346,7 +2346,7 @@ static int patch_subframe_count(unsigned char *base) {
                 VirtualProtect(m, 4, om, &om);
                 DWORD ig = 0;
                 VirtualProtect(m + 1, 1, PAGE_EXECUTE_READWRITE, &ig);
-                sitio_add(g_imm3_sitios, &g_imm3_n, m + 1);
+                site_add(g_imm3_sites, &g_imm3_n, m + 1);
                 log_line("  metering count made writable too");
             }
         } else {
@@ -2471,7 +2471,7 @@ static int patch_subframe_count(unsigned char *base) {
             VirtualProtect(q, 6, o2, &o2);
             DWORD ig = 0;
             VirtualProtect(q + 2, 1, PAGE_EXECUTE_READWRITE, &ig);
-            sitio_add(g_imm2_sitios, &g_imm2_n, q + 2);
+            site_add(g_imm2_sites, &g_imm2_n, q + 2);
         }
     } else {
         log_num("  ! loop entry guard not unique, sites: ", (unsigned)g_found);
@@ -2619,7 +2619,7 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     // bloque de flags no alcanzo (ordenes distintos en cada juego). Aca se
     // compara cada frame y se corrige si hace falta: cuesta una comparacion y
     // es cierto siempre.
-    if (cuenta_es_multiplicador() && g_force_sel >= 2 && g_force_sel <= kSelMaxFixed &&
+    if (count_is_multiplier() && g_force_sel >= 2 && g_force_sel <= kSelMaxFixed &&
         g_force_generated != g_force_sel) {
         log_num("cuenta: el modo fijo pedia ", (unsigned)g_force_generated);
         log_num("  con nuestro snippet corresponde ", (unsigned)g_force_sel);
@@ -2627,7 +2627,7 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
         g_opt_pending = 1;
     }
     // Una vez por frame: el plugin lo puede recalcular al cambiar de modo.
-    leer_max_generados();
+    read_max_generated();
     note_rendered_frame();
     g_game_set_this_frame = 0;      // a new frame; the last one is settled
     reflex_poll();
@@ -2818,7 +2818,7 @@ static void settings_load(void) {
         // La cuenta ES el multiplicador, no los generados. Medido en Halo:
         // cuenta 3 entrega 3.00x y cuenta 5 entrega 5.0x.
         g_force_generated = (v >= 2 && v <= kSelMaxFixed)
-                                ? (cuenta_es_multiplicador() ? v : v - 1) : 0;
+                                ? (count_is_multiplier() ? v : v - 1) : 0;
         // La semilla de DYNAMIC es 2, no 1: con la semantica nueva 1 es 1X,
         // generacion encendida produciendo nada, y sin generacion no hay base
         // que medir -- el controlador se espera a si mismo. Con la vieja, 2
@@ -3270,7 +3270,7 @@ static int patch_multiframe_max(unsigned char *base) {
 // g_seis se declara arriba, junto a g_seis_sitios.
 
 static int patch_tope_seis(unsigned char *base) {
-    if (!g_seis) return 0;
+    if (!g_six) return 0;
     auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
     auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
@@ -3300,7 +3300,7 @@ static int patch_tope_seis(unsigned char *base) {
             if (VirtualProtect(byte, 1, PAGE_EXECUTE_READWRITE, &old)) {
                 *byte = 6;
                 VirtualProtect(byte, 1, old, &old);
-                if (g_seis_n < 4) g_seis_sitios[g_seis_n++] = byte;
+                if (g_six_n < 4) g_six_sites[g_six_n++] = byte;
                 ++hits;
             }
         }
@@ -3750,7 +3750,7 @@ static DWORD WINAPI recorder(LPVOID) {
                             // Con nuestro snippet la cuenta ES el
                             // multiplicador. Ver cuenta_es_multiplicador.
                             g_force_generated = g_ov_hot >= 2
-                                ? (cuenta_es_multiplicador() ? g_ov_hot : g_ov_hot - 1)
+                                ? (count_is_multiplier() ? g_ov_hot : g_ov_hot - 1)
                                 : 0;
                             arm_frametoken_hook();
                             g_opt_pending = 1;
@@ -4669,7 +4669,7 @@ static void evaluar_invariantes(void) {
      .pair("con_pacer", con_pacer).pair("ejecuta", g_copia_ejecuta)
      .pair("ejecuta_cuenta", g_copia_ejecuta >= 0 ? g_copias[g_copia_ejecuta].sitios_cuenta : -1)
      .pair("ejecuta_pacer", g_copia_ejecuta >= 0 ? g_copias[g_copia_ejecuta].sitios_pacer : -1)
-     .pair("multiplicador", cuenta_es_multiplicador() ? 1 : 0)
+     .pair("multiplicador", count_is_multiplier() ? 1 : 0)
      .pair("resuelto", g_ejecuta_resuelto ? 1 : 0);
     log_line(l.b);
     if (pasivo) {
@@ -4929,10 +4929,10 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         const unsigned char *b = (const unsigned char *)d->DllBase;
         const size_t largo = (size_t)d->SizeOfImage;
         const int antes = g_wic_n + g_imm_n + g_imm2_n + g_imm3_n;
-        sitio_drop(g_wic_sitios,  &g_wic_n,  b, largo);
-        sitio_drop(g_imm_sitios,  &g_imm_n,  b, largo);
-        sitio_drop(g_imm2_sitios, &g_imm2_n, b, largo);
-        sitio_drop(g_imm3_sitios, &g_imm3_n, b, largo);
+        sitio_drop(g_wic_sites,  &g_wic_n,  b, largo);
+        sitio_drop(g_imm_sites,  &g_imm_n,  b, largo);
+        sitio_drop(g_imm2_sites, &g_imm2_n, b, largo);
+        sitio_drop(g_imm3_sites, &g_imm3_n, b, largo);
         copia_descargada(b, largo);
         const int now_qpc = g_wic_n + g_imm_n + g_imm2_n + g_imm3_n;
         if (now_qpc != antes) {
@@ -5018,7 +5018,7 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         if (g_twocopies) g_twocopies_pending = 1;
         {
             g_dlssg_base = reinterpret_cast<const unsigned char *>(d->DllBase);
-            if (g_seis) {
+            if (g_six) {
                 const int t6 = patch_tope_seis(reinterpret_cast<unsigned char *>(d->DllBase));
                 log_num("  tope del plugin subido a 6, sitios: ", (unsigned)t6);
                 if (t6 < 2) log_line("  ! faltan sitios: uno solo no alcanza");
@@ -5120,11 +5120,11 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
     //
     // Sobre la build de julio esto seria el crash de Halo otra vez: topa en 3
     // por arquitectura, y pedirle mas entrega CERO frames, no menos.
-    if (g_seis && cuenta_es_multiplicador()) {
+    if (g_six && count_is_multiplier()) {
         const int sm = patch_snippet_max(reinterpret_cast<unsigned char *>(d->DllBase), 6);
         log_num("  tope del snippet subido a 6, sitios: ", (unsigned)sm);
         if (sm == 0) log_line("  ! no se encontro el sitio: el maximo sigue en 5");
-    } else if (g_seis) {
+    } else if (g_six) {
         log_line("  tope del snippet NO se toca: no es nuestra build");
     }
     if (g_mfcmax >= 2) {
@@ -6512,10 +6512,10 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 log_line("slInit: se apuntara pathsToPlugins a nuestra carpeta (experimento)");
             g_peralt = a.peralt;
             if (!a.seis) {
-                g_seis = false;
+                g_six = false;
                 log_line("tope: 6X DESACTIVADO a mano (mfg-sinseis.txt)");
             }
-            if (g_seis) {
+            if (g_six) {
                 log_line("tope: 6X activo");
                 // El archivo de settings se lee ANTES que este flag, asi que un
                 // modo fijo restaurado de disco ya aplico el mapeo viejo (v-1) y
@@ -6547,8 +6547,8 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
             if (g_permitir_x6) log_line("6X habilitado a mano (mfg-x6.txt): crashea en Halo");
             g_dyn_diag = a.dyndiag;
             if (g_dyn_diag) log_line("dynamic: diagnostico por cambio de ratio ENCENDIDO (mfg-dyndiag.txt)");
-            if (!a.latch) { g_latch_reparto = false; log_line("fractional: reparto NO latcheado (mfg-nolatch.txt)"); }
-            if (!a.deuda) { g_usar_deuda = false; log_line("dynamic: integrador de deuda APAGADO (mfg-sin-deuda.txt)"); }
+            if (!a.latch) { g_latch_schedule = false; log_line("fractional: reparto NO latcheado (mfg-nolatch.txt)"); }
+            if (!a.deuda) { g_use_debt = false; log_line("dynamic: integrador de deuda APAGADO (mfg-sin-deuda.txt)"); }
             g_optsv3 = a.optsv3;
             if (a.marker[0] > 0 && a.marker[1] > 0 && a.marker_n >= 4) {
                 g_marker_every = (double)a.marker[0] / 1000.0;
