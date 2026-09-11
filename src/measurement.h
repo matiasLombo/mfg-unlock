@@ -149,6 +149,254 @@ static volatile LONG g_present_mismatch = 0;   // windows where we disagree
 //   0: <0.5   1: 0.5-2   2: 2-4   3: 4-8   4: 8-16   5: >=16
 static int g_gap_hist[6] = {0,0,0,0,0,0};
 static int g_raw_calls = 0;
+// ---- la ventana cerrada, en tres pasos: foto, volcado, acciones ---------
+//
+// Antes esto era un solo bloque de 300 lineas donde cada log_num iba
+// pegado al reset del contador que imprimia y a las acciones (HUD,
+// controlador) que dependian de el. Ahora: snapshot_window() saca la foto de
+// TODOS los contadores; dump_window() imprime esa foto, en el MISMO orden
+// de lineas que antes; y close_window() hace las acciones y los resets. Lo
+// unico que cambia en el log es que las lineas del controlador ("dynbias:",
+// "sat:") salen despues del volcado en vez de en el medio.
+
+// Los dos contadores acumulados de la ventana anterior. Eran estaticos de
+// funcion; viven aca para que la foto los pueda leer y avanzar.
+static LONG g_win_last_pres = 0;
+static LONG g_win_last_hook = 0;
+
+struct ClosedWindow {
+    double elapsed;            // segundos de la ventana
+    double rendered_fps;
+    LONG   api_aplicada, force_sel, force_generated, count_live;
+    bool   multiplicador;
+    double rfx_base;
+    LONG   dp, rt_dp;          // presentaciones del runtime y del hook
+    bool   mismatch;           // los dos difieren en mas de 2
+    LONG   mismatch_total;     // g_present_mismatch ya incrementado
+    int    raw_calls;
+    double token_block_us, present_block_us;
+    int    clamp_latency; LONG smfl_calls, token_calls, frames_gated;
+    LONG   paso_igual, paso_uno, paso_salta, paso_atras;
+    int    gap_hist[6];
+    int    pres_n; double pres_ms_sum, pres_ms_max; int pres_hitch;
+    LONG   rfx_n; double rfx_gpu, rfx_drv, rfx_ft; unsigned rfx_min, rfx_max;
+    bool   in_front; LONG cap_mode, cap_cnt;
+    int    near_n, near_bad, far_n, far_bad;
+    int    cv_n; double cv_sum, cv_sq;
+    int    hitch_near, hitch_far;
+    int    pres_bucket[6];
+    int    disp_changes, disp_presents; double disp_ms_sum, disp_ms_max;
+    int    disp_hitch, disp_skip; unsigned ref_first, ref_last; double ref_seg;
+    int    disp_bucket[6];
+};
+
+// La foto. Lee todo lo que el volcado imprime, antes de que nadie lo resetee,
+// y avanza los dos contadores acumulados.
+static void snapshot_window(ClosedWindow &w, double win_elapsed) {
+    w.elapsed = win_elapsed;
+    w.rendered_fps = g_rendered_fps;
+    w.api_aplicada = g_api_aplicada; w.force_sel = g_force_sel;
+    w.force_generated = g_force_generated; w.count_live = g_count_live;
+    w.multiplicador = cuenta_es_multiplicador();
+    w.rfx_base = g_rfx_base;
+    {
+        const LONG now = g_rt_present_count;
+        w.dp = now - g_win_last_pres;
+        g_win_last_pres = now;
+        const LONG hook_now = g_present_count;
+        w.rt_dp = hook_now - g_win_last_hook;
+        g_win_last_hook = hook_now;
+    }
+    w.mismatch = w.rt_dp > 0 && (w.dp - w.rt_dp > 2 || w.rt_dp - w.dp > 2);
+    w.mismatch_total = g_present_mismatch;
+    w.raw_calls = g_raw_calls;
+    w.token_block_us = g_token_block_us; w.present_block_us = g_present_block_us;
+    w.clamp_latency = g_clamp_latency; w.smfl_calls = g_smfl_calls;
+    w.token_calls = g_token_calls; w.frames_gated = g_frames_gated;
+    w.paso_igual = g_paso_igual; w.paso_uno = g_paso_uno;
+    w.paso_salta = g_paso_salta; w.paso_atras = g_paso_atras;
+    for (int i = 0; i < 6; ++i) w.gap_hist[i] = g_gap_hist[i];
+    w.pres_n = g_pres_n; w.pres_ms_sum = g_pres_ms_sum; w.pres_ms_max = g_pres_ms_max;
+    w.pres_hitch = g_pres_hitch;
+    w.rfx_n = g_rfx_n; w.rfx_gpu = g_rfx_gpu; w.rfx_drv = g_rfx_drv; w.rfx_ft = g_rfx_ft;
+    w.rfx_min = g_rfx_min; w.rfx_max = g_rfx_max;
+    w.in_front = g_game_hwnd != nullptr &&
+                 GetForegroundWindow() == GetAncestor(g_game_hwnd, GA_ROOT);
+    w.cap_mode = g_cap_mode; w.cap_cnt = g_cap_cnt;
+    w.near_n = g_near_n; w.near_bad = g_near_bad; w.far_n = g_far_n; w.far_bad = g_far_bad;
+    w.cv_n = g_cv_n; w.cv_sum = g_cv_sum; w.cv_sq = g_cv_sq;
+    w.hitch_near = g_hitch_near; w.hitch_far = g_hitch_far;
+    for (int b = 0; b < 6; ++b) w.pres_bucket[b] = g_pres_bucket[b];
+    w.disp_changes = g_disp_changes; w.disp_presents = g_disp_presents;
+    w.disp_ms_sum = g_disp_ms_sum; w.disp_ms_max = g_disp_ms_max;
+    w.disp_hitch = g_disp_hitch; w.disp_skip = g_disp_skip;
+    w.ref_first = g_ref_first; w.ref_last = g_ref_last;
+    w.ref_seg = 0.0;
+    if (g_ref_qpc0 != 0 && g_qpc_freq > 0 && g_ref_last > g_ref_first) {
+        LARGE_INTEGER ahora;
+        QueryPerformanceCounter(&ahora);
+        w.ref_seg = (double)(ahora.QuadPart - g_ref_qpc0) / (double)g_qpc_freq;
+    }
+    for (int b = 0; b < 6; ++b) w.disp_bucket[b] = g_disp_bucket[b];
+}
+
+// El volcado: las mismas lineas, en el mismo orden, con las mismas guardas
+// (mfg-quiet.txt y dp > 0). No toca ningun contador.
+static void dump_window(const ClosedWindow &w) {
+    if (!g_quiet)
+    log_num("measured: rendered fps ", (unsigned)(int)(w.rendered_fps + 0.5));
+    {
+        sonda_vtable();
+        const LONG p4168 = sonda_4168();
+        log_num("  [global+0x4168] ", (unsigned)p4168);
+        log_num("  techo declarado a la API ", (unsigned)w.api_aplicada);
+        log_num("  g_force_sel ", (unsigned)w.force_sel);
+        log_num("  g_force_generated ", (unsigned)w.force_generated);
+        log_num("  cuenta_es_multiplicador ", (unsigned)(w.multiplicador ? 1 : 0));
+        log_num("  byte vivo (la cadencia) ", (unsigned)w.count_live);
+    }
+    if (!g_quiet)
+    log_num("  base por Reflex ", (unsigned)(int)(w.rfx_base + 0.5));
+    if (w.mismatch && !g_quiet)
+        log_num("  WARNING present count disagrees, windows so far ",
+                (unsigned)w.mismatch_total);
+    if (!(w.dp > 0 && !g_quiet)) return;
+    log_num("  runtime PresentCount this window ", (unsigned)w.dp);
+    log_num("  our hook count this window ", (unsigned)(w.rt_dp > 0 ? w.rt_dp : 0));
+    log_num("  raw token calls ", (unsigned)w.raw_calls);
+    log_num("  blocked in the token call, ms ", (unsigned)(w.token_block_us / 1000.0));
+    log_num("  blocked in Present, ms ", (unsigned)(w.present_block_us / 1000.0));
+    log_num("  window elapsed, ms ", (unsigned)(w.elapsed * 1000.0));
+    if (w.clamp_latency > 0)
+        log_num("  SetMaximumFrameLatency calls so far ", (unsigned)w.smfl_calls);
+    log_num("  hook calls total ", (unsigned)w.token_calls);
+    log_num("  frames past the gate ", (unsigned)w.frames_gated);
+    log_num("    salto igual ", (unsigned)w.paso_igual);
+    log_num("    salto +1 ", (unsigned)w.paso_uno);
+    log_num("    salto adelante ", (unsigned)w.paso_salta);
+    log_num("    salto atras ", (unsigned)w.paso_atras);
+    {
+        static const char *kG[6] = {
+            "    gap <0.5ms ", "    gap 0.5-2ms ",
+            "    gap 2-4ms ", "    gap 4-8ms ",
+            "    gap 8-16ms ", "    gap >=16ms " };
+        for (int i = 0; i < 6; ++i)
+            if (w.gap_hist[i] > 0) log_num(kG[i], (unsigned)w.gap_hist[i]);
+    }
+    if (w.pres_n > 0) {
+        log_num("  present ms avg x10 ", (unsigned)(w.pres_ms_sum / (double)w.pres_n * 10.0));
+        log_num("  present ms max x10 ", (unsigned)(w.pres_ms_max * 10.0));
+        log_num("  hitches over 33ms ", (unsigned)w.pres_hitch);
+    }
+    if (w.rfx_n > 0) {
+        log_num("  latency sim to gpu end us ", (unsigned)(w.rfx_gpu / w.rfx_n));
+        log_num("  latency sim to driver end us ", (unsigned)(w.rfx_drv / w.rfx_n));
+        log_num("  reflex frame time us ", (unsigned)(w.rfx_ft / w.rfx_n));
+        log_num("    driver latency min us ", (unsigned)w.rfx_min);
+        log_num("    driver latency max us ", (unsigned)w.rfx_max);
+        log_num("    frames reported ", (unsigned)w.rfx_n);
+    }
+    log_num("  game window in front (1 = yes, NO CONFIABLE en cp2077) ", (unsigned)(w.in_front ? 1 : 0));
+    log_num("  the game itself last asked for mode ", (unsigned)w.cap_mode);
+    log_num("    with count ", (unsigned)w.cap_cnt);
+    if (w.near_n + w.far_n > 0) {
+        log_num("    off-refresh near a change x1000 ",
+                (unsigned)(w.near_n ? (unsigned long long)w.near_bad * 1000ULL / (unsigned)w.near_n : 0));
+        log_num("      of presents ", (unsigned)w.near_n);
+        log_num("    off-refresh away x1000 ",
+                (unsigned)(w.far_n ? (unsigned long long)w.far_bad * 1000ULL / (unsigned)w.far_n : 0));
+        log_num("      of presents ", (unsigned)w.far_n);
+    }
+    if (w.cv_n > 2) {
+        const double media = w.cv_sum / (double)w.cv_n;
+        const double var = w.cv_sq / (double)w.cv_n - media * media;
+        if (media > 0.0 && var > 0.0) {
+            double sd = var;
+            for (int it = 0; it < 20; ++it) sd = 0.5 * (sd + var / sd);
+            log_num("  cadencia: desvio relativo x1000 ", (unsigned)(sd / media * 1000.0));
+        }
+    }
+    if (w.hitch_near + w.hitch_far > 0) {
+        log_num("    at a count change ", (unsigned)w.hitch_near);
+        log_num("    away from one ", (unsigned)w.hitch_far);
+    }
+    for (int b = 0; b < 6; ++b)
+        if (w.pres_bucket[b] > 0) {
+            log_num("    bucket ", (unsigned)b);
+            log_num("      count ", (unsigned)w.pres_bucket[b]);
+        }
+    if (w.disp_changes > 0) {
+        log_num("  PANTALLA cambios de imagen ", (unsigned)w.disp_changes);
+        log_num("    presentaciones ", (unsigned)w.disp_presents);
+        log_num("    presentaciones por cambio x100 ",
+                (unsigned)((unsigned long long)w.disp_presents * 100ULL / (unsigned)w.disp_changes));
+        log_num("    display ms avg x10 ", (unsigned)(w.disp_ms_sum / (double)w.disp_changes * 10.0));
+        log_num("    display ms max x10 ", (unsigned)(w.disp_ms_max * 10.0));
+        log_num("    hitches de pantalla over 33ms ", (unsigned)w.disp_hitch);
+        log_num("    refreshes salteados ", (unsigned)w.disp_skip);
+        if (w.ref_seg > 0.05) {
+            log_num("    refreshes del panel por seg ",
+                    (unsigned)((double)(w.ref_last - w.ref_first) / w.ref_seg));
+            log_num("    presentaciones por refresh x100 ",
+                    (unsigned)((double)w.disp_presents * 100.0 / (double)(w.ref_last - w.ref_first)));
+        }
+        for (int b = 0; b < 6; ++b)
+            if (w.disp_bucket[b] > 0) {
+                log_num("    dbucket ", (unsigned)b);
+                log_num("      count ", (unsigned)w.disp_bucket[b]);
+            }
+    }
+    log_num("  counted multiplier x100 ", (unsigned)((unsigned long long)w.dp * 100ULL / 45ULL));
+}
+
+// Las acciones y los resets, con las mismas guardas que tenian. El
+// log_burst_end() sigue en note_rendered_frame, una vez por frame, como
+// estaba.
+static void close_window(double win_elapsed) {
+    // Todo el volcado de la ventana en una sola apertura.
+    log_burst_begin();
+    ClosedWindow w;
+    snapshot_window(w, win_elapsed);
+    if (w.mismatch) {
+        InterlockedIncrement(&g_present_mismatch);
+        w.mismatch_total = g_present_mismatch;
+    }
+    dump_window(w);
+    if (w.dp > 0 && !g_quiet) {
+        g_token_block_us = 0.0;
+        if (win_elapsed > 0.0)
+            g_hud_fps_x10 = (LONG)(w.dp * 10.0 / win_elapsed + 0.5);
+        if (g_rfx_base > 1.0)
+            g_hud_base_x10 = (LONG)(g_rfx_base * 10.0 + 0.5);
+        if (win_elapsed > 0.0)
+            dyn_control(g_ctrl_fps > 0.0 ? g_ctrl_fps : g_base_fps,
+                        w.dp / win_elapsed);
+        if (win_elapsed > 0.0 && g_rfx_base > 1.0)
+            g_interp_on = (w.dp / win_elapsed) > g_rfx_base * 1.3 ? 1 : 0;
+        g_present_block_us = 0.0;
+        g_raw_calls = 0;
+        for (int i = 0; i < 6; ++i) g_gap_hist[i] = 0;
+        if (w.rfx_n > 0) {
+            g_hud_lat_us = (LONG)(w.rfx_drv / w.rfx_n);
+            g_rfx_gpu = 0.0; g_rfx_drv = 0.0;
+            g_rfx_ft = 0.0; g_rfx_n = 0;
+            g_rfx_min = 0xFFFFFFFFu; g_rfx_max = 0;
+        }
+        if (w.near_n + w.far_n > 0) { g_near_n = 0; g_near_bad = 0; g_far_n = 0; g_far_bad = 0; }
+        if (w.cv_n > 2) { g_cv_sum = 0.0; g_cv_sq = 0.0; g_cv_n = 0; }
+        if (w.hitch_near + w.hitch_far > 0) { g_hitch_near = 0; g_hitch_far = 0; }
+        g_pres_ms_sum = 0.0; g_pres_ms_max = 0.0;
+        g_pres_n = 0; g_pres_hitch = 0;
+        for (int b = 0; b < 6; ++b) g_pres_bucket[b] = 0;
+        if (w.disp_changes > 0) {
+            g_ref_first = 0; g_ref_last = 0; g_ref_qpc0 = 0;
+            g_disp_ms_sum = 0.0; g_disp_ms_max = 0.0;
+            g_disp_changes = 0; g_disp_presents = 0; g_disp_hitch = 0;
+            g_disp_skip = 0;
+            for (int b = 0; b < 6; ++b) g_disp_bucket[b] = 0;
+        }
+    }
+}
 static void note_rendered_frame(void) {
     LARGE_INTEGER t;
     QueryPerformanceCounter(&t);
@@ -200,302 +448,7 @@ static void note_rendered_frame(void) {
                 g_rendered_fps = (double)g_win_frames / g_win_time;
                 g_win_frames = 0;
                 g_win_time = 0.0;
-                // Todo el volcado de la ventana en una sola apertura.
-                log_burst_begin();
-                // Silenced by mfg-quiet.txt. log_line opens, seeks, writes and
-                // closes the file for every line, on the render thread, and the
-                // alternating arm emits more lines than the integer one -- so
-                // part of the 10% throughput gap could be this rather than the
-                // cadence. Running both arms silent settles which.
-                if (!g_quiet)
-                log_num("measured: rendered fps ", (unsigned)(int)(g_rendered_fps + 0.5));
-            {
-                sonda_vtable();
-                const LONG p4168 = sonda_4168();
-                log_num("  [global+0x4168] ", (unsigned)p4168);
-                log_num("  techo declarado a la API ", (unsigned)g_api_aplicada);
-                // Las tres variables juntas, para no descartar de a una.
-                log_num("  g_force_sel ", (unsigned)g_force_sel);
-                log_num("  g_force_generated ", (unsigned)g_force_generated);
-                log_num("  cuenta_es_multiplicador ", (unsigned)(cuenta_es_multiplicador() ? 1 : 0));
-                log_num("  byte vivo (la cadencia) ", (unsigned)g_count_live);
-            }
-                // Las dos bases, lado a lado, una vez por ventana. La de
-                // Reflex es el contador del driver; la de arriba cuenta
-                // llamadas al token y depende de como llame el juego. En el
-                // banco y en GTA V tienen que coincidir; donde se separen,
-                // la que miente es la del token.
-                if (!g_quiet)
-                log_num("  base por Reflex ", (unsigned)(int)(g_rfx_base + 0.5));
-                {
-                    // Frames that left the swap chain over frames the game
-                    // rendered, both counted over the same window of 45
-                    // rendered frames. Neither number is chosen by us.
-                    // The multiplier is measured with PresentCount, a counter
-                    // this file does not maintain, sampled once per rendered
-                    // frame from the token hook.
-                    //
-                    // Counting in the Present hook cannot be made reliable
-                    // either way. A byte detour catches every caller including
-                    // DLSS-G's pacer thread, but shares its bytes with Steam's
-                    // overlay and gets displaced -- one 1.50x run read 45
-                    // presents per window against the runtime's 66. Swapping
-                    // the vtable slot is stable and is this project's rule, but
-                    // the pacer cached the function pointer before we swapped,
-                    // so it never comes through us: a 2.00x control then read
-                    // 1.000 while rendering at 83, having missed exactly the
-                    // generated half.
-                    //
-                    // PresentCount is a running total, so sampling it at any
-                    // moment gives the true cumulative count no matter which
-                    // calls we intercept. Our own hook count stays as the
-                    // cross-check, not as the measurement.
-                    // Sampled in the present hook, never here. Calling
-                    // GetFrameStatistics from the frame-token thread crashed
-                    // the sample within ten seconds on four runs out of four --
-                    // one window logged and gone. It is not needed either: the
-                    // app's own present still comes through the swapped slot
-                    // once per frame, and PresentCount is a running total, so
-                    // sampling it there already includes the pacer's presents
-                    // that never reach us.
-                    static LONG last_pres = 0;
-                    static LONG last_hook = 0;
-                    const LONG now = g_rt_present_count;
-                    const LONG dp = now - last_pres;
-                    last_pres = now;
-                    const LONG hook_now = g_present_count;
-                    const LONG rt_dp_unused = hook_now - last_hook;
-                    last_hook = hook_now;
-                    const LONG rt_dp = rt_dp_unused;   // the hook's count
-                    // Say it out loud when the two disagree. The comparison
-                    // was already being logged and no analysis script read it,
-                    // so a run whose present hook had been displaced still got
-                    // reported as a result.
-                    if (rt_dp > 0 && (dp - rt_dp > 2 || rt_dp - dp > 2)) {
-                        InterlockedIncrement(&g_present_mismatch);
-                        if (!g_quiet)
-                            log_num("  WARNING present count disagrees, windows so far ",
-                                    (unsigned)g_present_mismatch);
-                    }
-                    if (dp > 0 && !g_quiet) {
-                        // Named for which counter each one is, because the
-                        // string is what every analysis script keys on and the
-                        // meaning of "presents this window" changed identity
-                        // between two builds without a rename -- it was the
-                        // hook's count, then it was PresentCount. That is the
-                        // silent instrument swap this project keeps warning
-                        // itself about.
-                        log_num("  runtime PresentCount this window ", (unsigned)dp);
-                        log_num("  our hook count this window ",
-                                (unsigned)(rt_dp > 0 ? rt_dp : 0));
-                        log_num("  raw token calls ", (unsigned)g_raw_calls);
-                        // Against the window's own elapsed time, so the ratio
-                        // says what fraction of the producer's life is spent
-                        // waiting inside Present.
-                        log_num("  blocked in the token call, ms ",
-                                (unsigned)(g_token_block_us / 1000.0));
-                        g_token_block_us = 0.0;
-                        log_num("  blocked in Present, ms ",
-                                (unsigned)(g_present_block_us / 1000.0));
-                        log_num("  window elapsed, ms ",
-                                (unsigned)(win_elapsed * 1000.0));
-                        // Alimenta el HUD con lo mismo que se registra, no con
-                        // una segunda cuenta: dos medidas del mismo numero se
-                        // separan y despues no se sabe cual creer.
-                        if (win_elapsed > 0.0)
-                            g_hud_fps_x10 = (LONG)(dp * 10.0 / win_elapsed + 0.5);
-                        // La base del HUD sale de Reflex, no de nuestro gate.
-                        //
-                        // g_rendered_fps cuenta el gate de frames, que dispara
-                        // varias veces por frame renderizado -- en Cyberpunk da
-                        // 113 donde la base real es 39. Ese numero en pantalla
-                        // seria una mentira prolija. g_rfx_base es la que el
-                        // propio Reflex reporta, y es la que este archivo ya
-                        // trata como honesta unas lineas mas abajo.
-                        if (g_rfx_base > 1.0)
-                            g_hud_base_x10 = (LONG)(g_rfx_base * 10.0 + 0.5);
-                        // El controlador de DYNAMIC come de aca por la misma
-                        // razon: la base y lo presentado ya estan medidos con
-                        // el instrumento honesto, y una segunda cuenta propia
-                        // seria un numero mas que puede discrepar.
-                        // La MISMA base con la que planifica dyn_apply, no
-                        // g_rendered_fps. El sesgo se aprende comparando lo
-                        // pedido contra lo entregado, y lo entregado sale de
-                        // dividir por esta base: si las dos funciones dividen
-                        // por numeros distintos, el sesgo corrige una
-                        // discrepancia que no existe.
-                        //
-                        // En Cyberpunk g_rendered_fps da 113 donde la base real
-                        // es 39, porque el gate de frames dispara unas tres
-                        // veces por frame renderizado. Con eso, dyn_control veia
-                        // 216/113 = 1.9 entregado contra 5.2 pedido, concluia
-                        // que faltaba muchisimo y empujaba el sesgo a su tope de
-                        // 1.25. Medido: ratio crudo 4.15, sesgo 1.25, pedido
-                        // 5.19, presentadas 216 contra un objetivo de 165.
-                        if (win_elapsed > 0.0)
-                            dyn_control(g_ctrl_fps > 0.0 ? g_ctrl_fps : g_base_fps,
-                                        dp / win_elapsed);
-                        // A1 necesita saber si la interpolacion arranco. La
-                        // base honesta es la de Reflex; si lo presentado la
-                        // supera con holgura, esta generando.
-                        if (win_elapsed > 0.0 && g_rfx_base > 1.0)
-                            g_interp_on = (dp / win_elapsed) > g_rfx_base * 1.3 ? 1 : 0;
-                        g_present_block_us = 0.0;
-                        if (g_clamp_latency > 0)
-                            log_num("  SetMaximumFrameLatency calls so far ",
-                                    (unsigned)g_smfl_calls);
-                        log_num("  hook calls total ", (unsigned)g_token_calls);
-                        log_num("  frames past the gate ", (unsigned)g_frames_gated);
-                        log_num("    salto igual ", (unsigned)g_paso_igual);
-                        log_num("    salto +1 ", (unsigned)g_paso_uno);
-                        log_num("    salto adelante ", (unsigned)g_paso_salta);
-                        log_num("    salto atras ", (unsigned)g_paso_atras);
-                        {
-                            static const char *kG[6] = {
-                                "    gap <0.5ms ", "    gap 0.5-2ms ",
-                                "    gap 2-4ms ", "    gap 4-8ms ",
-                                "    gap 8-16ms ", "    gap >=16ms " };
-                            for (int i = 0; i < 6; ++i)
-                                if (g_gap_hist[i] > 0) log_num(kG[i], (unsigned)g_gap_hist[i]);
-                        }
-                        g_raw_calls = 0;
-                        for (int i = 0; i < 6; ++i) g_gap_hist[i] = 0;
-                        // Solo las tres lineas de Present dependen de NUESTRO
-                        // hook. Todo lo demas de este bloque -- la latencia
-                        // por Reflex, el foco, lo que pidio el juego, la
-                        // cadencia -- se media igual sin el, y estaba adentro
-                        // del mismo `if`: con el overlay de Steam (sin hook)
-                        // la latencia desaparecio del log y del HUD en los tres
-                        // juegos, desde 2f0d758.
-                        {
-                            if (g_pres_n > 0) {
-                                log_num("  present ms avg x10 ",
-                                        (unsigned)(g_pres_ms_sum / (double)g_pres_n * 10.0));
-                                log_num("  present ms max x10 ", (unsigned)(g_pres_ms_max * 10.0));
-                                log_num("  hitches over 33ms ", (unsigned)g_pres_hitch);
-                            }
-                            // Dos datos que separan "el juego estaba en el
-                            // menu" de "se apago solo mientras jugabas".
-                            if (g_rfx_n > 0) {
-                                log_num("  latency sim to gpu end us ",
-                                        (unsigned)(g_rfx_gpu / g_rfx_n));
-                                log_num("  latency sim to driver end us ",
-                                        (unsigned)(g_rfx_drv / g_rfx_n));
-                                g_hud_lat_us = (LONG)(g_rfx_drv / g_rfx_n);
-                                log_num("  reflex frame time us ",
-                                        (unsigned)(g_rfx_ft / g_rfx_n));
-                                log_num("    driver latency min us ",
-                                        (unsigned)g_rfx_min);
-                                log_num("    driver latency max us ",
-                                        (unsigned)g_rfx_max);
-                                log_num("    frames reported ", (unsigned)g_rfx_n);
-                                g_rfx_gpu = 0.0; g_rfx_drv = 0.0;
-                                g_rfx_ft = 0.0; g_rfx_n = 0;
-                                g_rfx_min = 0xFFFFFFFFu; g_rfx_max = 0;
-                            }
-                            // NO CONFIABLE en Cyberpunk. Dio 0 en 1406 de 1413
-                            // ventanas con el juego al frente y Streamline sin
-                            // una sola queja de foco en toda la corrida. Se
-                            // probaron dos arreglos y los dos fallaron: seguir
-                            // la ventana vigente en vez de la primera (el juego
-                            // crea un solo swapchain, asi que no cambia nada) y
-                            // comparar contra GetAncestor(GA_ROOT) por si el
-                            // swapchain colgaba de una hija. El HWND esta
-                            // capturado, no es nulo.
-                            //
-                            // No se toca mas. Para saber si el foco apago la
-                            // generacion, la autoridad es la queja del plugin en
-                            // sl.log ("DLSS-G disabled: window not focused"), que
-                            // es la que de verdad la apaga. Este numero se deja
-                            // porque en GTA V si sigue al foco, pero NO se puede
-                            // descartar una ventana de Cyberpunk por el.
-                            log_num("  game window in front (1 = yes, NO CONFIABLE en cp2077) ",
-                                    (unsigned)(g_game_hwnd != nullptr &&
-                                               GetForegroundWindow() ==
-                                                   GetAncestor(g_game_hwnd, GA_ROOT)
-                                               ? 1 : 0));
-                            log_num("  the game itself last asked for mode ",
-                                    (unsigned)g_cap_mode);
-                            log_num("    with count ", (unsigned)g_cap_cnt);
-                            if (g_near_n + g_far_n > 0) {
-                                log_num("    off-refresh near a change x1000 ",
-                                        (unsigned)(g_near_n ? (unsigned long long)g_near_bad * 1000ULL / (unsigned)g_near_n : 0));
-                                log_num("      of presents ", (unsigned)g_near_n);
-                                log_num("    off-refresh away x1000 ",
-                                        (unsigned)(g_far_n ? (unsigned long long)g_far_bad * 1000ULL / (unsigned)g_far_n : 0));
-                                log_num("      of presents ", (unsigned)g_far_n);
-                                g_near_n = 0; g_near_bad = 0; g_far_n = 0; g_far_bad = 0;
-                            }
-                            // Cadencia sin escala: desvio relativo de los
-                            // intervalos contra la media de ESTA ventana.
-                            if (g_cv_n > 2) {
-                                const double media = g_cv_sum / (double)g_cv_n;
-                                const double var = g_cv_sq / (double)g_cv_n - media * media;
-                                if (media > 0.0 && var > 0.0) {
-                                    double sd = var;
-                                    for (int it = 0; it < 20; ++it) sd = 0.5 * (sd + var / sd);
-                                    log_num("  cadencia: desvio relativo x1000 ",
-                                            (unsigned)(sd / media * 1000.0));
-                                }
-                                g_cv_sum = 0.0; g_cv_sq = 0.0; g_cv_n = 0;
-                            }
-                            if (g_hitch_near + g_hitch_far > 0) {
-                                log_num("    at a count change ", (unsigned)g_hitch_near);
-                                log_num("    away from one ", (unsigned)g_hitch_far);
-                                g_hitch_near = 0;
-                                g_hitch_far = 0;
-                            }
-                            for (int b = 0; b < 6; ++b)
-                                if (g_pres_bucket[b] > 0) {
-                                    log_num("    bucket ", (unsigned)b);
-                                    log_num("      count ", (unsigned)g_pres_bucket[b]);
-                                }
-                            g_pres_ms_sum = 0.0; g_pres_ms_max = 0.0;
-                            g_pres_n = 0; g_pres_hitch = 0;
-                            for (int b = 0; b < 6; ++b) g_pres_bucket[b] = 0;
-                        }
-                        // PANTALLA: el mismo analisis sobre el reloj que se ve.
-                        // Se emite aparte y con los mismos baldes a proposito,
-                        // para poder comparar los dos relojes lado a lado.
-                        if (g_disp_changes > 0) {
-                            log_num("  PANTALLA cambios de imagen ", (unsigned)g_disp_changes);
-                            log_num("    presentaciones ", (unsigned)g_disp_presents);
-                            log_num("    presentaciones por cambio x100 ",
-                                    (unsigned)((unsigned long long)g_disp_presents * 100ULL
-                                               / (unsigned)g_disp_changes));
-                            log_num("    display ms avg x10 ",
-                                    (unsigned)(g_disp_ms_sum / (double)g_disp_changes * 10.0));
-                            log_num("    display ms max x10 ", (unsigned)(g_disp_ms_max * 10.0));
-                            log_num("    hitches de pantalla over 33ms ", (unsigned)g_disp_hitch);
-                            log_num("    refreshes salteados ", (unsigned)g_disp_skip);
-                            if (g_ref_qpc0 != 0 && g_qpc_freq > 0 && g_ref_last > g_ref_first) {
-                                LARGE_INTEGER ahora;
-                                QueryPerformanceCounter(&ahora);
-                                const double seg = (double)(ahora.QuadPart - g_ref_qpc0)
-                                                 / (double)g_qpc_freq;
-                                if (seg > 0.05) {
-                                    log_num("    refreshes del panel por seg ",
-                                            (unsigned)((double)(g_ref_last - g_ref_first) / seg));
-                                    log_num("    presentaciones por refresh x100 ",
-                                            (unsigned)((double)g_disp_presents * 100.0
-                                                       / (double)(g_ref_last - g_ref_first)));
-                                }
-                            }
-                            g_ref_first = 0; g_ref_last = 0; g_ref_qpc0 = 0;
-                            for (int b = 0; b < 6; ++b)
-                                if (g_disp_bucket[b] > 0) {
-                                    log_num("    dbucket ", (unsigned)b);
-                                    log_num("      count ", (unsigned)g_disp_bucket[b]);
-                                }
-                            g_disp_ms_sum = 0.0; g_disp_ms_max = 0.0;
-                            g_disp_changes = 0; g_disp_presents = 0; g_disp_hitch = 0;
-                            g_disp_skip = 0;
-                            for (int b = 0; b < 6; ++b) g_disp_bucket[b] = 0;
-                        }
-                        log_num("  counted multiplier x100 ",
-                                (unsigned)((unsigned long long)dp * 100ULL / 45ULL));
-                    }
-                }
+                close_window(win_elapsed);
             }
             log_burst_end();
         }
