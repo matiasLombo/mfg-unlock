@@ -48,6 +48,13 @@ foco sostenido, cero `window not focused`:
 | 5c518e6 (F4) | 7 (CUSTOM 2.55) | 421 ventanas, 70 de juego, base 42, **2.55 mediana** (p10 1.93, p90 2.97 por ventana), 134 cambios por lado, 0 INVARIANTE | `cp-custom255-f4-ok-prev` |
 | 2f02034 (F5) | 6 | 415 ventanas, 54 de juego, base 35, **5.98** (p10 4.32, p90 6.58), conteos de sitios identicos (2/2/2/1/1/1/1), 0 INVARIANTE | `cp-6x-f5-ok` |
 
+| a0e8a88 (final) | 8 | dos corridas: **46%** y **58%** dentro del 5% de 180 (medianas 170 y 174), 0 excepciones | `dyn-final-2-prev`, `dyn-final-3-prev` |
+| 3ac6c14 (pre-F4) | 8 | dos corridas: **74%** y **58%** (medianas 176 y 172), 0 excepciones | `dyn-pref4-1`, `dyn-pref4-2` |
+
+DYNAMIC va de 46% a 74% en banda con el MISMO binario (58% aparece en los
+dos); es ruido de corrida, no F4/F5 ([[measure-the-noise-first]]). Con seis
+corridas DYNAMIC mas, el crash del inicio no volvio: 1 de 8.
+
 Las lineas de politica (`cuenta: el modo fijo pedia 5`, `override:`,
 `numFramesToGenerateMax CAMBIO a 6`) son identicas antes y despues del rewire
 de F0 (hud-cero-prev contra cp-6x-steam-ok). F0-F2 invisibles en Cyberpunk.
