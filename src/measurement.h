@@ -72,7 +72,7 @@ static double g_pres_ms_sum = 0.0;
 static double g_pres_ms_max = 0.0;
 static int    g_pres_n = 0;
 static int    g_pres_hitch = 0;             // intervals over 33 ms
-static int    g_freeze_dichos = 0;          // tope de lineas del diagnostico
+static int    g_freeze_said = 0;          // tope de lineas del diagnostico
 static int    g_pres_bucket[6] = { 0, 0, 0, 0, 0, 0 };
 // El reloj de la PANTALLA, que es otro que el de Present.
 //
@@ -138,7 +138,7 @@ static double g_token_block_us = 0.0;     // blocked inside slGetNewFrameToken
 static volatile LONG g_rt_present_count = 0;
 // Forma del salto de indice entre llamadas consecutivas al token, para saber si
 // el gate se rompe por intercalado de hilos.
-static volatile LONG g_paso_igual = 0, g_paso_uno = 0, g_paso_salta = 0, g_paso_atras = 0;
+static volatile LONG g_step_same = 0, g_step_plus_one = 0, g_step_forward = 0, g_step_back = 0;
 // The swap chain, kept so the runtime's own present counter can be sampled
 // from anywhere -- specifically from the frame-token hook, once per rendered
 // frame, off the present path entirely.
@@ -167,8 +167,8 @@ static LONG g_win_last_hook = 0;
 struct ClosedWindow {
     double elapsed;            // segundos de la ventana
     double rendered_fps;
-    LONG   api_aplicada, force_sel, force_generated, count_live;
-    bool   multiplicador;
+    LONG   api_applied, force_sel, force_generated, count_live;
+    bool   multiplier;
     double rfx_base;
     LONG   dp, rt_dp;          // presentaciones del runtime y del hook
     bool   mismatch;           // los dos difieren en mas de 2
@@ -176,7 +176,7 @@ struct ClosedWindow {
     int    raw_calls;
     double token_block_us, present_block_us;
     int    clamp_latency; LONG smfl_calls, token_calls, frames_gated;
-    LONG   paso_igual, paso_uno, paso_salta, paso_atras;
+    LONG   step_same, step_plus_one, step_forward, step_back;
     int    gap_hist[6];
     int    pres_n; double pres_ms_sum, pres_ms_max; int pres_hitch;
     LONG   rfx_n; double rfx_gpu, rfx_drv, rfx_ft; unsigned rfx_min, rfx_max;
@@ -195,9 +195,9 @@ struct ClosedWindow {
 static void snapshot_window(ClosedWindow &w, double win_elapsed) {
     w.elapsed = win_elapsed;
     w.rendered_fps = g_rendered_fps;
-    w.api_aplicada = g_api_aplicada; w.force_sel = g_force_sel;
+    w.api_applied = g_api_applied; w.force_sel = g_force_sel;
     w.force_generated = g_force_generated; w.count_live = g_count_live;
-    w.multiplicador = cuenta_es_multiplicador();
+    w.multiplier = cuenta_es_multiplicador();
     w.rfx_base = g_rfx_base;
     {
         const LONG now = g_rt_present_count;
@@ -213,8 +213,8 @@ static void snapshot_window(ClosedWindow &w, double win_elapsed) {
     w.token_block_us = g_token_block_us; w.present_block_us = g_present_block_us;
     w.clamp_latency = g_clamp_latency; w.smfl_calls = g_smfl_calls;
     w.token_calls = g_token_calls; w.frames_gated = g_frames_gated;
-    w.paso_igual = g_paso_igual; w.paso_uno = g_paso_uno;
-    w.paso_salta = g_paso_salta; w.paso_atras = g_paso_atras;
+    w.step_same = g_step_same; w.step_plus_one = g_step_plus_one;
+    w.step_forward = g_step_forward; w.step_back = g_step_back;
     for (int i = 0; i < 6; ++i) w.gap_hist[i] = g_gap_hist[i];
     w.pres_n = g_pres_n; w.pres_ms_sum = g_pres_ms_sum; w.pres_ms_max = g_pres_ms_max;
     w.pres_hitch = g_pres_hitch;
@@ -233,9 +233,9 @@ static void snapshot_window(ClosedWindow &w, double win_elapsed) {
     w.ref_first = g_ref_first; w.ref_last = g_ref_last;
     w.ref_seg = 0.0;
     if (g_ref_qpc0 != 0 && g_qpc_freq > 0 && g_ref_last > g_ref_first) {
-        LARGE_INTEGER ahora;
-        QueryPerformanceCounter(&ahora);
-        w.ref_seg = (double)(ahora.QuadPart - g_ref_qpc0) / (double)g_qpc_freq;
+        LARGE_INTEGER now_qpc;
+        QueryPerformanceCounter(&now_qpc);
+        w.ref_seg = (double)(now_qpc.QuadPart - g_ref_qpc0) / (double)g_qpc_freq;
     }
     for (int b = 0; b < 6; ++b) w.disp_bucket[b] = g_disp_bucket[b];
 }
@@ -249,10 +249,10 @@ static void dump_window(const ClosedWindow &w) {
         sonda_vtable();
         const LONG p4168 = sonda_4168();
         log_num("  [global+0x4168] ", (unsigned)p4168);
-        log_num("  techo declarado a la API ", (unsigned)w.api_aplicada);
+        log_num("  techo declarado a la API ", (unsigned)w.api_applied);
         log_num("  g_force_sel ", (unsigned)w.force_sel);
         log_num("  g_force_generated ", (unsigned)w.force_generated);
-        log_num("  cuenta_es_multiplicador ", (unsigned)(w.multiplicador ? 1 : 0));
+        log_num("  cuenta_es_multiplicador ", (unsigned)(w.multiplier ? 1 : 0));
         log_num("  byte vivo (la cadencia) ", (unsigned)w.count_live);
     }
     if (!g_quiet)
@@ -271,10 +271,10 @@ static void dump_window(const ClosedWindow &w) {
         log_num("  SetMaximumFrameLatency calls so far ", (unsigned)w.smfl_calls);
     log_num("  hook calls total ", (unsigned)w.token_calls);
     log_num("  frames past the gate ", (unsigned)w.frames_gated);
-    log_num("    salto igual ", (unsigned)w.paso_igual);
-    log_num("    salto +1 ", (unsigned)w.paso_uno);
-    log_num("    salto adelante ", (unsigned)w.paso_salta);
-    log_num("    salto atras ", (unsigned)w.paso_atras);
+    log_num("    salto igual ", (unsigned)w.step_same);
+    log_num("    salto +1 ", (unsigned)w.step_plus_one);
+    log_num("    salto adelante ", (unsigned)w.step_forward);
+    log_num("    salto atras ", (unsigned)w.step_back);
     {
         static const char *kG[6] = {
             "    gap <0.5ms ", "    gap 0.5-2ms ",
@@ -308,12 +308,12 @@ static void dump_window(const ClosedWindow &w) {
         log_num("      of presents ", (unsigned)w.far_n);
     }
     if (w.cv_n > 2) {
-        const double media = w.cv_sum / (double)w.cv_n;
-        const double var = w.cv_sq / (double)w.cv_n - media * media;
-        if (media > 0.0 && var > 0.0) {
+        const double mean = w.cv_sum / (double)w.cv_n;
+        const double var = w.cv_sq / (double)w.cv_n - mean * mean;
+        if (mean > 0.0 && var > 0.0) {
             double sd = var;
             for (int it = 0; it < 20; ++it) sd = 0.5 * (sd + var / sd);
-            log_num("  cadencia: desvio relativo x1000 ", (unsigned)(sd / media * 1000.0));
+            log_num("  cadencia: desvio relativo x1000 ", (unsigned)(sd / mean * 1000.0));
         }
     }
     if (w.hitch_near + w.hitch_far > 0) {
@@ -495,10 +495,10 @@ static void note_rendered_frame(void) {
                 static double prev_dt = 0.0;
                 const double lo = g_token_dt_fast * 0.75;
                 const double hi = g_token_dt_fast * 1.33;
-                const bool lejos = dt < lo || dt > hi;
-                const bool igual = prev_dt > 0.0 &&
+                const bool far_off = dt < lo || dt > hi;
+                const bool similar = prev_dt > 0.0 &&
                                    dt > prev_dt * 0.88 && dt < prev_dt * 1.12;
-                if (lejos && igual) g_token_dt_fast = dt;
+                if (far_off && similar) g_token_dt_fast = dt;
                 else g_token_dt_fast = g_token_dt_fast * 0.75 + dt * 0.25;
                 prev_dt = dt;
             }

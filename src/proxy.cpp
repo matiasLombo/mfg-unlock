@@ -813,7 +813,7 @@ static LONG tope_cuenta(void) {
 }
 // Base del sl.dlss_g que estamos parcheando, para poder leerle campos.
 static const unsigned char *g_dlssg_base = nullptr;
-static volatile LONG g_api_aplicada = -1;
+static volatile LONG g_api_applied = -1;
 static void set_count_now(LONG n);   // definida mas abajo
 
 // Que sigue [global+0x4168]: el techo declarado a la API, o lo generado?
@@ -1336,8 +1336,8 @@ static void ctrl_feed_dt(double dt) {
     // de arrastrar ocho frames de la carga anterior.
     static double prev2 = 0.0;
     if (prev2 > 0.0 && rn > 1) {
-        const double media = rsum / (double)rn;
-        const bool lejos2 = dt < media * 0.75 || dt > media * 1.33;
+        const double mean = rsum / (double)rn;
+        const bool lejos2 = dt < mean * 0.75 || dt > mean * 1.33;
         const bool igual2 = dt > prev2 * 0.88 && dt < prev2 * 1.12;
         if (lejos2 && igual2) {
             ring[0] = dt; ri = 1; rn = 1; rsum = dt;
@@ -1495,8 +1495,8 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
     const unsigned r = g_orig_setoptions(viewport, options_for_call(options));
     leer_max_generados();      // y despues: si la llamada lo cambia, se ve
     if (p != nullptr && memcmp(p + 8, kDlssgOptionsGuid, 16) == 0) {
-        g_api_aplicada = *(LONG *)(p + 36);
-        set_count_now(g_api_aplicada);
+        g_api_applied = *(LONG *)(p + 36);
+        set_count_now(g_api_applied);
     }
     if (saved >= 0) {
         *(LONG *)(p + 36) = saved;
@@ -1561,25 +1561,25 @@ static void apply_override_now(void) {
         static LONG pres_ultimo = 0;
         static LONG enviado_ultimo = -1;
         if (frec.QuadPart == 0) QueryPerformanceFrequency(&frec);
-        LARGE_INTEGER ahora;
-        QueryPerformanceCounter(&ahora);
+        LARGE_INTEGER now_qpc;
+        QueryPerformanceCounter(&now_qpc);
         if (ultimo != 0 && frec.QuadPart > 0) {
-            const double ms = (double)(ahora.QuadPart - ultimo) * 1000.0 /
+            const double ms = (double)(now_qpc.QuadPart - ultimo) * 1000.0 /
                               (double)frec.QuadPart;
             if (ms < 150.0) return;                                  // (1)
             if (g_present_count - pres_ultimo < 8) return;           // (2)
-            if (enviado_ultimo >= 0 && g_api_aplicada != enviado_ultimo) {
+            if (enviado_ultimo >= 0 && g_api_applied != enviado_ultimo) {
                 static LONG dicho = -1;                              // (3)
                 if (dicho != enviado_ultimo) {
                     dicho = enviado_ultimo;
                     log_num("latch: el cambio anterior aun no se observo; se espera. pedido ",
                             (unsigned)enviado_ultimo);
-                    log_num("  aplicado en la API ", (unsigned)g_api_aplicada);
+                    log_num("  aplicado en la API ", (unsigned)g_api_applied);
                 }
                 return;
             }
         }
-        ultimo = ahora.QuadPart;
+        ultimo = now_qpc.QuadPart;
         pres_ultimo = g_present_count;
         enviado_ultimo = g_force_generated;
     }
@@ -1699,7 +1699,7 @@ static void apply_override_now(void) {
     // subir el orden correcto es el contrario, y ya es el que hay: la linea de
     // abajo lo sube recien cuando el plugin reservo.
     if (cuenta_es_multiplicador()) {
-        const LONG ap = g_api_aplicada, quiere = g_force_generated;
+        const LONG ap = g_api_applied, quiere = g_force_generated;
         if (ap >= 1 && quiere >= 1 && quiere < ap) set_count_now(quiere);
     }
     g_orig_setoptions(g_vp_copy, options_for_call(g_opt_copy));
@@ -1713,10 +1713,10 @@ static void apply_override_now(void) {
     //
     // Escribirlo inmediatamente despues de que las opciones salieron deja a las
     // dos en el mismo instante desde el punto de vista del plugin.
-    g_api_aplicada = *(LONG *)(g_opt_copy + 36);
-    set_count_now(g_api_aplicada);
+    g_api_applied = *(LONG *)(g_opt_copy + 36);
+    set_count_now(g_api_applied);
     // Recien ahora el plugin reservo esta cuenta: el byte ya puede subir.
-    g_api_aplicada = *(LONG *)(g_opt_copy + 36);
+    g_api_applied = *(LONG *)(g_opt_copy + 36);
     log_num("override applied now, selection ", (unsigned)g_force_sel);
 }
 
@@ -3105,7 +3105,7 @@ static void set_count_now(LONG n) {
                 // el juego. Todo crash de esta noche fue el byte pidiendo mas
                 // ranuras de las reservadas.
                 LONG w = n;
-                const LONG ap = g_api_aplicada;
+                const LONG ap = g_api_applied;
                 if (ap >= 1 && w > ap) w = ap;
                 sitio_write(g_wic_sitios, g_wic_n, (unsigned char)w);
             }
@@ -3504,11 +3504,11 @@ static void fractional_tick(void) {
         double dt = 0.0;
         {
             static LONGLONG prev_qpc = 0;
-            LARGE_INTEGER ahora;
-            QueryPerformanceCounter(&ahora);
+            LARGE_INTEGER now_qpc;
+            QueryPerformanceCounter(&now_qpc);
             if (prev_qpc != 0 && g_qpc_freq > 0)
-                dt = (double)(ahora.QuadPart - prev_qpc) / (double)g_qpc_freq;
-            prev_qpc = ahora.QuadPart;
+                dt = (double)(now_qpc.QuadPart - prev_qpc) / (double)g_qpc_freq;
+            prev_qpc = now_qpc.QuadPart;
         }
         const scheduler::Config sched_cfg{ g_block_ms, g_blocks, g_latch_reparto,
                               g_peralt, g_nullalt, g_blockalt };
@@ -3777,10 +3777,10 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
         // de 39. Se cuenta la forma del salto para saber si es eso.
         if (idx != nullptr && have) {
             const unsigned d = *idx - last_idx;      // sin signo, a proposito
-            if (*idx == last_idx)      ++g_paso_igual;
-            else if (d == 1u)          ++g_paso_uno;
-            else if (d < 0x80000000u)  ++g_paso_salta;
-            else                       ++g_paso_atras;
+            if (*idx == last_idx)      ++g_step_same;
+            else if (d == 1u)          ++g_step_plus_one;
+            else if (d < 0x80000000u)  ++g_step_forward;
+            else                       ++g_step_back;
         }
         last_idx = (idx != nullptr) ? *idx : last_idx;
         last_tok = tok;
@@ -4869,8 +4869,8 @@ static void presentes_del_runtime(void) {
     //
     // GetLastPresentCount devuelve el contador del runtime sin depender del
     // modo de presentacion, que es justo lo que hace falta aca.
-    UINT ahora = 0;
-    const HRESULT hr = g_swapchain->GetLastPresentCount(&ahora);
+    UINT now_qpc = 0;
+    const HRESULT hr = g_swapchain->GetLastPresentCount(&now_qpc);
     if (FAILED(hr)) {
         static bool dicho = false;
         if (!dicho) {
@@ -4894,7 +4894,7 @@ static void presentes_del_runtime(void) {
     //
     // GetLastPresentCount es un total acumulado, igual que el PresentCount
     // que el hook muestrea de GetFrameStatistics: se asigna, no se suma.
-    g_rt_present_count = (LONG)ahora;
+    g_rt_present_count = (LONG)now_qpc;
 }
 
 static void note_display(IDXGISwapChain *sc) {
@@ -5123,13 +5123,13 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
                     //
                     // Umbral alto y tope de lineas: esto escribe al log desde el
                     // hilo de Present, y log_line abre el archivo por linea.
-                    if (ms > 60.0 && g_freeze_dichos < 40) {
-                        ++g_freeze_dichos;
+                    if (ms > 60.0 && g_freeze_said < 40) {
+                        ++g_freeze_said;
                         log_num("CONGELAMIENTO: present ms x10 ", (unsigned)(ms * 10.0));
                         log_num("  presentaciones desde el ultimo cambio de cuenta ",
                                 (unsigned)since);
                         log_num("  byte vivo ", (unsigned)g_count_live);
-                        log_num("  cuenta aplicada en la API ", (unsigned)g_api_aplicada);
+                        log_num("  cuenta aplicada en la API ", (unsigned)g_api_applied);
                         log_num("  cuenta pedida ", (unsigned)g_force_generated);
                         log_num("  seleccion ", (unsigned)g_force_sel);
                         log_num("  interpolacion encendida ", (unsigned)(g_interp_on ? 1 : 0));
@@ -7063,10 +7063,10 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         sitio_drop(g_imm2_sitios, &g_imm2_n, b, largo);
         sitio_drop(g_imm3_sitios, &g_imm3_n, b, largo);
         copia_descargada(b, largo);
-        const int ahora = g_wic_n + g_imm_n + g_imm2_n + g_imm3_n;
-        if (ahora != antes) {
+        const int now_qpc = g_wic_n + g_imm_n + g_imm2_n + g_imm3_n;
+        if (now_qpc != antes) {
             log_line("modulo descargado: se retiran sus sitios parcheados");
-            log_num("  sitios que quedan ", (unsigned)ahora);
+            log_num("  sitios que quedan ", (unsigned)now_qpc);
         }
         return;
     }
@@ -7469,11 +7469,11 @@ static bool version_soportada(const wchar_t *ruta, unsigned *may_out, unsigned *
         const int klen = 11;
         for (DWORD i = 0; i + (DWORD)(klen * 2) + 128 < n; i += 2) {
             const wchar_t *w = (const wchar_t *)(buf + i);
-            bool igual = true;
+            bool similar = true;
             for (int k = 0; k < klen; ++k) {
-                if (w[k] != kClave[k]) { igual = false; break; }
+                if (w[k] != kClave[k]) { similar = false; break; }
             }
-            if (!igual) continue;
+            if (!similar) continue;
             // El valor viene despues, con relleno de ceros en el medio.
             unsigned may = 0, men = 0, campo = 0, acum = 0;
             bool en_numero = false, listo = false;
@@ -8530,7 +8530,7 @@ static LONG CALLBACK testigo_excepcion(EXCEPTION_POINTERS *info) {
     }
     log_num("  seleccion en curso ", (unsigned)g_force_sel);
     log_num("  cuenta pedida ", (unsigned)g_force_generated);
-    log_num("  cuenta aplicada en la API ", (unsigned)g_api_aplicada);
+    log_num("  cuenta aplicada en la API ", (unsigned)g_api_applied);
     log_num("  byte vivo en el sitio ", (unsigned)g_count_live);
     // Solo para la lectura de [nulo+0x40], que es el fallo que se repite. En
     // cualquier otro los registros no significan lo mismo y el volcado seria
