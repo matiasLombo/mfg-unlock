@@ -18,6 +18,18 @@
 // Sin estado y sin dependencias de Windows a proposito: se compila igual dentro
 // del dll y dentro de tools/test_resolve.cpp, asi que los tres se reproducen en
 // milisegundos. Ver docs/arquitectura-por-capas.md, capa 2.
+//
+// ESTADO (2026-09-11, F6): resolve() NO es lo que corre. Lo que corre es
+// decidir_force() en politica.h, que usa los helpers de dialecto de aca.
+// tools/test_politica.cpp los compara caso por caso: coinciden en los modos
+// fijos y en la pausa de GTA V, y divergen en dos cosas medibles --
+//   1. un juego que escribe eOff sin haber pedido eOn nunca (Halo): resolve
+//      pasaria eOff y no generaria; decidir fuerza eOn y Halo entrego 4.02.
+//      A resolve le falta esa entrada.
+//   2. sin seleccion, resolve traduce la cuenta del juego a nuestro dialecto;
+//      decidir no escribe nada. Con snippet sustituido resolve tiene razon.
+// Unificarlas es un cambio de comportamiento y necesita el juego que lo
+// distingue (Halo para 1, cualquiera con la base sustituida y sel 0 para 2).
 #pragma once
 
 namespace pol {

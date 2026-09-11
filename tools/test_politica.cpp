@@ -159,6 +159,45 @@ int main(void) {
         chequear("generados a generados: se espeja 3 sin traducir", decidir_force(e).cuenta, 3);
     }
 
+    // ---- F6: resolve() (la politica que se quiere) contra decidir_force()
+    // (la que corre), sobre la misma entrada. Donde coinciden, sobra una; donde
+    // no, la diferencia queda escrita y pinchada: unificarlas es un cambio de
+    // comportamiento que necesita el juego que lo distingue.
+    printf("\nF6 -- resolve() contra decidir_force()\n");
+    {
+        // Modo fijo 4 con el juego pidiendo eOn y count 1 (generados): iguales.
+        EntradaForce e = base(); e.sel = 4; e.juego_pidio_on = true; e.juego_quiere = 1;
+        e.last_seen_generated = 1;
+        SalidaForce d = decidir_force(e);
+        PedidoPlugin r = resolve(PedidoJuego{ kOn, 1 }, Dialecto::GENERADOS,
+                                 Dialecto::MULTIPLICADOR, Decision{ 400, 6 });
+        chequear("fijo 4X: las dos escriben eOn", d.modo == r.modo ? 1 : 0, 1);
+        chequear("  y cuenta 4", d.cuenta == r.cuenta ? d.cuenta : -1, 4);
+        // GTA V en pausa: el juego pidio eOn antes y ahora eOff. Iguales en
+        // efecto: ninguna enciende (decidir no escribe, resolve pasa eOff).
+        e.juego_quiere = 0;
+        d = decidir_force(e);
+        r = resolve(PedidoJuego{ kOff, 3 }, Dialecto::GENERADOS, Dialecto::MULTIPLICADOR, Decision{ 400, 6 });
+        chequear("pausa de GTA V: decidir no escribe, resolve pasa eOff", (!d.escribir_modo && r.modo == kOff) ? 1 : 0, 1);
+        // DIVERGENCIA 1: Halo escribe eOff sin haber pedido eOn nunca.
+        // decidir fuerza eOn (asi entrego 4.02); resolve pasaria eOff y Halo
+        // no generaria jamas. resolve() esta mal aca: le falta la entrada
+        // "alguna vez pidio eOn".
+        e.juego_pidio_on = false;
+        d = decidir_force(e);
+        chequear("Halo (eOff sin eOn previo): decidir fuerza eOn", d.modo, kOn);
+        chequear("  DIVERGENCIA: resolve pasaria eOff (medido: Halo 4.02 con eOn forzado)", r.modo, kOff);
+        // DIVERGENCIA 2: sin objetivo, resolve respeta la cuenta del juego
+        // traducida (1 -> 2); decidir con sel 0 no escribe nada. Sin snippet
+        // sustituido da lo mismo; con snippet sustituido resolve tiene razon
+        // y decidir deja 1 (= 1X). Sin medir en un juego.
+        e.sel = 0; e.juego_pidio_on = true; e.juego_quiere = 1;
+        d = decidir_force(e);
+        r = resolve(PedidoJuego{ kOn, 1 }, Dialecto::GENERADOS, Dialecto::MULTIPLICADOR, Decision{ 0, 6 });
+        chequear("sin seleccion: decidir no escribe", d.escribir_cuenta ? 1 : 0, 0);
+        chequear("  DIVERGENCIA: resolve traduciria 1 -> 2", r.cuenta, 2);
+    }
+
     printf("\n%s\n", fallos == 0 ? "todos los casos en verde" : "HAY CASOS EN ROJO");
     return fallos ? 1 : 0;
 }
