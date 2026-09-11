@@ -20,6 +20,7 @@
 // paso siguiente. Reglas que este archivo carga: [[never-byte-detour-present]]
 // y [[measure-with-the-runtime-counter]].
 #pragma once
+#include "present_policy.h"
 
 // Globales que solo usa este modulo (movidas de proxy.cpp).
 // El reloj de la PANTALLA, que es otro que el de Present.
@@ -582,6 +583,40 @@ static IDXGISwapChain *live_swapchain(void) {
     return nullptr;
 }
 
+
+// ---- el unico escritor de slots de vtable ---------------------------------
+//
+// Toda escritura sobre una vtable compartida (dxgi.dll, el proxy de SL) pasa
+// por aca, con la guarda adentro (present_policy::slot_writable): no sobre el
+// slot de otro modulo, no con el overlay de Steam en el proceso, salvo el
+// proxy de Streamline en modo host. El 11/09 un hook de Release escrito a
+// mano sin la guarda tiro Cyberpunk (0xC00000FD en gameoverlayrenderer64);
+// con esto no compila una escritura que no pase por aca (grep: cero "vt[" =
+// fuera de write_slot).
+static present_policy::SlotOwner slot_owner_of(const void *fn, const void *ours) {
+    if (fn == ours) return present_policy::SlotOwner::Ours;
+    HMODULE m = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)fn, &m) || m == nullptr)
+        return present_policy::SlotOwner::Unknown;
+    if (m == GetModuleHandleW(L"dxgi.dll")) return present_policy::SlotOwner::Dxgi;
+    if (m == GetModuleHandleW(L"sl.interposer.dll")) return present_policy::SlotOwner::Interposer;
+    return present_policy::SlotOwner::Other;
+}
+static bool overlay_present(void) { return GetModuleHandleW(L"gameoverlayrenderer64.dll") != nullptr; }
+// Escribe vt[idx] = hook y deja el anterior en *orig. false si la guarda dice
+// que no, o si la pagina no se deja escribir.
+static bool write_slot(void **vt, int idx, void *hook, void **orig) {
+    const present_policy::SlotOwner owner = slot_owner_of(vt[idx], hook);
+    if (!present_policy::slot_writable(owner, overlay_present(), g_host_on)) return false;
+    DWORD prot = 0;
+    if (!VirtualProtect(&vt[idx], sizeof(void *), PAGE_READWRITE, &prot)) return false;
+    if (orig != nullptr) *orig = vt[idx];
+    vt[idx] = hook;
+    VirtualProtect(&vt[idx], sizeof(void *), prot, &prot);
+    return true;
+}
+
 static HRESULT STDMETHODCALLTYPE hk_smfl(IUnknown *self, UINT n) {
     InterlockedIncrement(&g_smfl_calls);
     if (g_clamp_latency > 0 && (int)n > g_clamp_latency) n = (UINT)g_clamp_latency;
@@ -607,210 +642,102 @@ static void hook_frame_latency(void *sc) {
         return;
     }
     void **vt = *reinterpret_cast<void ***>(sc2);
-    DWORD prot = 0;
-    if (VirtualProtect(&vt[31], sizeof(void *), PAGE_READWRITE, &prot)) {
-        g_orig_smfl = reinterpret_cast<PFN_SMFL>(vt[31]);
-        vt[31] = reinterpret_cast<void *>(&hk_smfl);
-        VirtualProtect(&vt[31], sizeof(void *), prot, &prot);
+    void *orig = nullptr;
+    if (write_slot(vt, 31, reinterpret_cast<void *>(&hk_smfl), &orig)) {
+        g_orig_smfl = reinterpret_cast<PFN_SMFL>(orig);
         log_num("  frame latency clamped to ", (unsigned)g_clamp_latency);
+    } else {
+        log_line("  clamp: el slot 31 no se escribe (otro dueno u overlay); sin clamp");
     }
     sc2->Release();
+}
+
+// Que decidio present_policy y por que, una vez por motivo. Las mediciones
+// que respaldan cada regla estan en present_policy.h y en el test.
+// Quien tiene el slot de Present, si no es dxgi: se dice una vez, sea cual
+// sea la razon (con el overlay en el proceso la razon es Overlay, y el nombre
+// del otro dueno -- ReShade.asi en GTA V -- igual importa).
+static void log_slot_owner(const void *slot) {
+    static bool said = false;
+    if (said) return;
+    HMODULE m = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)slot, &m) || m == nullptr) return;
+    if (m == GetModuleHandleW(L"dxgi.dll")) return;
+    said = true;
+    wchar_t name_w[MAX_PATH] = { 0 };
+    GetModuleFileNameW(m, name_w, MAX_PATH);
+    char short_name[96];
+    int c = 0, start = 0;
+    for (int i = 0; name_w[i] != 0; ++i) if (name_w[i] == 92 || name_w[i] == 47) start = i + 1;
+    for (int i = start; name_w[i] != 0 && c < 94; ++i) short_name[c++] = (char)(name_w[i] < 128 ? name_w[i] : '?');
+    short_name[c] = 0;
+    log_line("present: el slot de Present apunta a otro modulo:");
+    log_line(short_name);
+}
+static void log_hook_reason(present_policy::Reason r, const void *slot) {
+    using present_policy::Reason;
+    log_slot_owner(slot);
+    static bool said[8] = { false, false, false, false, false, false, false, false };
+    const int k = (int)r;
+    if (r == Reason::AlreadyRegistered) { log_line("present: vtable ya enganchada; se adopta la instancia nueva"); return; }
+    if (k < 0 || k >= 8 || said[k]) return;
+    said[k] = true;
+    switch (r) {
+    case Reason::OurHookNoOrig: log_line("recorder: vtable con nuestro hook puesto y sin original registrado; no se toca"); break;
+    case Reason::TableFull: log_line("recorder: tabla de vtables llena; este swapchain no se engancha"); break;
+    case Reason::HostProxy: log_line("present: el slot es del proxy de Streamline (modo host); se escribe"); break;
+    case Reason::Overlay:
+        log_line("present: overlay de Steam presente; NO se escribe el slot");
+        log_line("  hace byte-detour de la funcion, asi que llamar al original nos devuelve a nosotros;");
+        log_line("  las presentaciones se cuentan con PresentCount del runtime. La instancia se adopta igual.");
+        break;
+    case Reason::OtherOwner:
+        log_line("present: el slot YA lo engancho otro; no nos apilamos (apilarse forma un lazo)");
+        log_line("  la instancia se adopta igual: PresentCount del runtime y HUD");
+        break;
+    case Reason::Clean: break;
+    default: break;
+    }
 }
 
 static void hook_swapchain_present(void *sc) {
     if (sc == nullptr) return;
     void **vt = *reinterpret_cast<void ***>(sc);
-    // Una vtable ya enganchada no se toca: su original ya esta en la tabla y
-    // volver a leer vt[8] guardaria nuestro propio hook como "original", que
-    // es una recursion garantizada. Esto cubre tambien el caso de la adopcion
-    // ganandole la carrera al juego (medido en Cyberpunk: el descartable a los
-    // 6,5 s, el del juego a los 10,6 s, misma vtable): la segunda llegada
-    // simplemente no hace nada, y el contador ya cuenta por esa vtable.
-    for (LONG i = 0; i < g_vt_present_n; ++i)
-        if (g_vt_present[i].vt == vt) {
-            // La vtable ya esta hecha, pero la INSTANCIA es nueva y lo que es
-            // por instancia se toma igual. Medido en Cyberpunk desde Steam: la
-            // adopcion registra la vtable desde el descartable y lo suelta
-            // (g_swapchain = nullptr); el swapchain real del juego llegaba
-            // aca, salia por este return, y presentes_del_runtime se quedaba
-            // sin swapchain que leer: cero lineas de PresentCount y el HUD en
-            // cero. La ultima instancia gana, igual que en hk_cscfh.
-            adopt_swapchain(sc);
-            hook_frame_latency(sc);
-            log_line("present: vtable ya enganchada; se adopta la instancia nueva");
-            return;
-        }
-    if (vt[8] == reinterpret_cast<void *>(&hk_dxgi_present)) {
-        // Slot nuestro en una vtable que no registramos: no puede pasar salvo
-        // que la tabla se haya llenado o que alguien haya copiado la vtable.
-        // En cualquier caso no hay original que guardar y no se toca.
-        log_line("recorder: vtable con nuestro hook puesto y sin original registrado; no se toca");
-        return;
+    // Los hechos, y la decision es de present_policy (tools/test_present_policy.cpp
+    // tiene una fila por incidente medido). Aca solo se ejecuta y se loguea.
+    present_policy::Input in{};
+    for (LONG i = 0; i < g_vt_present_n; ++i) if (g_vt_present[i].vt == vt) in.vtable_registered = true;
+    in.table_full = g_vt_present_n >= (LONG)(sizeof(g_vt_present) / sizeof(g_vt_present[0]));
+    in.owner = slot_owner_of(vt[8], reinterpret_cast<void *>(&hk_dxgi_present));
+    in.overlay_present = overlay_present();
+    in.host_on = g_host_on;
+    const present_policy::Output out = present_policy::decide_hook(in);
+    log_hook_reason(out.reason, vt[8]);
+    if (out.register_vtable) {
+        if (g_orig_dxgi_present != nullptr)
+            log_line("recorder: aparecio otro swapchain con vtable distinta; se engancha tambien");
+        g_vt_present[g_vt_present_n].vt = vt;
+        g_vt_present[g_vt_present_n].orig = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
+        InterlockedIncrement(&g_vt_present_n);
+        if (g_orig_dxgi_present == nullptr) g_orig_dxgi_present = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
     }
-    if (g_vt_present_n >= (LONG)(sizeof(g_vt_present) / sizeof(g_vt_present[0]))) {
-        log_line("recorder: tabla de vtables llena; este swapchain no se engancha");
-        return;
+    if (out.adopt) {
+        adopt_swapchain(sc);
+        hook_frame_latency(sc);
     }
-    if (g_orig_dxgi_present != nullptr)
-        log_line("recorder: aparecio otro swapchain con vtable distinta; se engancha tambien");
-    // The slot, not the bytes. This used to call MH_CreateHook on vt[8], which
-    // detours the Present implementation itself -- the one thing this project
-    // has a standing rule against, because Steam's overlay detours the same
-    // bytes and whoever installs second wins.
-    //
-    // It cost a measurement. In one 1.50x run our counter read exactly 45
-    // presents in 86 of 86 windows while the runtime's own PresentCount
-    // advanced 66 to 69 in each, so the run reported 1.00 where the runtime
-    // said 1.49. The failure is silent and reads as a clean integer, which at
-    // 1.10x would be indistinguishable from a correct answer.
-    // Con el overlay de Steam en el proceso NO se engancha Present. Punto.
-    //
-    // El overlay no toma el slot de la vtable: hace byte-detour de la funcion.
-    // Nuestro "original" apunta a la funcion real, cuyos primeros bytes ahora
-    // saltan al overlay, y el overlay presenta por la vtable -- que somos
-    // nosotros. El lazo es invisible desde el slot, y por eso la guarda de
-    // "quien es el dueno de vt[8]" no lo ve: medido, cuatro enganches, misma
-    // vtable, cero dueños ajenos, y recursion igual.
-    //
-    //   present: RECURSION, profundidad 4249
-    //   EXCEPCION 0xC00000FD en gameoverlayrenderer64.dll
-    //
-    // [[never-byte-detour-present]] ya decia que el overlay de Steam engancha
-    // los mismos bytes y que quien instala segundo gana. Lo que faltaba era
-    // sacar la conclusion: con el overlay presente no hay forma segura de
-    // llamar al original, asi que no se engancha.
-    //
-    // El costo es instrumentacion, no funcionalidad. Las presentaciones se
-    // cuentan con PresentCount del runtime ([[measure-with-the-runtime-counter]]),
-    // que es el instrumento honesto igual, y el pacer propio queda apagado en
-    // esa configuracion.
-    // No enganchar NO es abandonar: el swapchain y el hook de frame latency se
-    // toman igual. De esa cadena cuelga el HUD entero -- fps y latencia -- y la
-    // primera version de esta guarda hacia return aca y lo dejaba en cero.
-    // Perder el contador propio es aceptable; perder el HUD no lo es.
-    // En modo host el swapchain que nos interesa es el PROXY de Streamline: su
-    // Present vive en sl.interposer.dll, no en dxgi.dll, asi que el byte-detour
-    // del overlay no lo alcanza y el slot se puede escribir. El chain REAL que
-    // el proxy envuelve sigue siendo de dxgi.dll y ahi valen las dos guardas de
-    // siempre: medido en Metro 2026-09-11, exceptuar los dos dio RECURSION.
-    HMODULE slot_owner = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       (LPCWSTR)vt[8], &slot_owner);
-    const bool host_proxy = g_host_on && slot_owner != nullptr &&
-                            slot_owner == GetModuleHandleW(L"sl.interposer.dll");
-    bool no_hook = false;
-    {
-        static bool said = false;
-        if (GetModuleHandleW(L"gameoverlayrenderer64.dll") != nullptr && !host_proxy) {
-            no_hook = true;
-            if (!said) {
-                said = true;
-                log_line("present: overlay de Steam presente; NO se escribe el slot");
-                log_line("  hace byte-detour de la funcion, asi que llamar al");
-                log_line("  original nos devuelve a nosotros: recursion sin fin.");
-                log_line("  Las presentaciones pasan a contarse con PresentCount");
-                log_line("  del runtime, que es el instrumento honesto igual.");
-            }
-        }
-    }
-    // Solo se engancha un slot que TODAVIA apunta a dxgi.dll.
-    //
-    // Si ahi ya hay otro hook, apilarnos encima forma un lazo: nuestro hook
-    // llama a lo que guardamos como original -- el hook del otro -- y ese llama
-    // a lo que guardo EL como original, que es el slot, que ahora somos
-    // nosotros. Cada present se llama a si mismo hasta agotar la pila.
-    //
-    // Medido en Cyberpunk lanzado desde Steam, 2026-09-11:
-    //
-    //   present: RECURSION, profundidad 4244
-    //   EXCEPCION 0xC00000FD en gameoverlayrenderer64.dll
-    //
-    // El overlay de Steam engancha el mismo slot. Con el exe lanzado directo no
-    // se inyecta, y el mismo juego corria 170 s sin una excepcion. Esa
-    // diferencia estuvo a la vista horas y la descarte porque el log no nombraba
-    // al overlay; lo nombro recien cuando el freno de recursion dejo la
-    // profundidad escrita.
-    //
-    // [[never-byte-detour-present]] ya decia que el overlay de Steam engancha
-    // esto mismo. Lo que faltaba era la guarda en ESTE camino.
-    //
-    // Perder el hook cuesta instrumentacion, no funcionalidad: las
-    // presentaciones se cuentan con PresentCount del runtime, que es el
-    // instrumento honesto de todas formas ([[measure-with-the-runtime-counter]]).
-    //
-    // Y "no apilarse" es NO escribir el slot, igual que con el overlay: la
-    // instancia se adopta igual (g_swapchain, frame latency), porque de eso
-    // cuelga PresentCount y el HUD. La primera version hacia return aca y
-    // en GTA V con ReShade.asi en el slot el contador del HUD quedaba vacio
-    // (2026-09-11: ventanas sin "runtime PresentCount", el usuario lo vio
-    // como "el contador no andaba"). El mismo defecto que ya se habia
-    // arreglado en la rama del overlay, en la otra rama.
-    {
-        HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
-        HMODULE owner = slot_owner;
-        if (owner != nullptr && dxgi != nullptr && owner != dxgi && !host_proxy &&
-            vt[8] != (void *)&hk_dxgi_present) {
-            no_hook = true;
-            static bool said = false;
-            if (!said) {
-                said = true;
-                // El nombre del modulo, en ASCII, sin depender de log_ruta
-                // que se define mas abajo en el archivo.
-                wchar_t name_w[MAX_PATH] = { 0 };
-                GetModuleFileNameW(owner, name_w, MAX_PATH);
-                char short_name[96];
-                int c = 0, start = 0;
-                for (int i = 0; name_w[i] != 0; ++i)
-                    if (name_w[i] == 92 || name_w[i] == 47) start = i + 1;
-                for (int i = start; name_w[i] != 0 && c < 94; ++i)
-                    short_name[c++] = (char)(name_w[i] < 128 ? name_w[i] : '?');
-                short_name[c] = 0;
-                log_line("present: el slot YA lo engancho otro; no nos apilamos");
-                log_line(short_name);
-                log_line("  (apilarse forma un lazo entre los dos hooks:");
-                log_line("   medido en Cyberpunk desde Steam, profundidad 4244)");
-                log_line("  la instancia se adopta igual: PresentCount del runtime y HUD");
-            }
-        }
-    }
-    DWORD prot = 0;
-    if (!VirtualProtect(&vt[8], sizeof(void *), PAGE_READWRITE, &prot)) return;
-    // El original de ESTA vtable, registrado antes de escribir el slot. El
-    // hook lo busca por la vtable del objeto que recibe (present_original_de).
-    const PFN_DXGIPresent orig_of_this = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
-    g_vt_present[g_vt_present_n].vt = vt;
-    g_vt_present[g_vt_present_n].orig = orig_of_this;
-    InterlockedIncrement(&g_vt_present_n);
-    if (g_orig_dxgi_present == nullptr) g_orig_dxgi_present = orig_of_this;
-    adopt_swapchain(sc);
-    hook_frame_latency(sc);
-    // What the swap chain was created with, and whether the app takes the
-    // waitable handle.
-    //
-    // 98% of the producer's time is spent outside both of our hooks -- 2% in
-    // Present, 0% in the frame-token call -- so whatever holds it is in the
-    // application's own loop. A swap chain created with
-    // DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT (0x800) is waited on
-    // with WaitForSingleObject before the frame starts, which is exactly the
-    // shape of a gate that never touches us.
-    {
+    if (out.register_vtable) {
         DXGI_SWAP_CHAIN_DESC sd;
-        if (SUCCEEDED(g_swapchain->GetDesc(&sd))) {
+        if (SUCCEEDED(reinterpret_cast<IDXGISwapChain *>(sc)->GetDesc(&sd))) {
             log_num("  swap chain flags ", (unsigned)sd.Flags);
             log_num("  buffers ", (unsigned)sd.BufferCount);
-            log_line((sd.Flags & 0x40u)
-                     ? "  this chain IS frame-latency waitable"
-                     : "  this chain is not waitable");
+            log_line((sd.Flags & 0x40u) ? "  this chain IS frame-latency waitable" : "  this chain is not waitable");
         }
+        if (out.write_slot && write_slot(vt, 8, reinterpret_cast<void *>(&hk_dxgi_present), nullptr))
+            log_line("recorder: present slot swapped (vt[8], not detoured)");
+        g_present_via_runtime = !out.write_slot;
+        log_num("  vtables enganchadas ", (unsigned)g_vt_present_n);
     }
-    if (!no_hook) {
-        vt[8] = reinterpret_cast<void *>(&hk_dxgi_present);
-        log_line("recorder: present slot swapped (vt[8], not detoured)");
-    }
-    VirtualProtect(&vt[8], sizeof(void *), prot, &prot);
-    g_present_via_runtime = no_hook;
-    log_num("  vtables enganchadas ", (unsigned)g_vt_present_n);
 }
 
 // Adoptar el swapchain que el juego YA tiene.
