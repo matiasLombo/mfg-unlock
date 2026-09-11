@@ -179,8 +179,8 @@ static const int kReflexBack = 6;
 static const int kReflexEvery = 4;
 
 // atras=0 es el informe 63, el mas reciente; atras=1 el 62, y asi.
-static void reflex_take(const void *state, int atras) {
-    const unsigned char *q = (const unsigned char *)state + 72 + 152 * (63 - atras);
+static void reflex_take(const void *state, int back) {
+    const unsigned char *q = (const unsigned char *)state + 72 + 152 * (63 - back);
     const unsigned long long id  = *(const unsigned long long *)(q + 0);
     const unsigned long long sim = *(const unsigned long long *)(q + 16);
     const unsigned long long drv = *(const unsigned long long *)(q + 72);
