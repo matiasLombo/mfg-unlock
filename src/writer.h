@@ -402,7 +402,14 @@ static void apply_override_now(void) {
             const double ms = (double)(now_qpc.QuadPart - last) * 1000.0 /
                               (double)freq.QuadPart;
             if (ms < 150.0) return;                                  // (1)
-            if (g_present_count - last_pres_count < 8) return;           // (2)
+            if (g_present_count - last_pres_count < 8) {                 // (2)
+                static LONG said_p = -1;
+                if (said_p != g_force_generated) {
+                    said_p = g_force_generated;
+                    log_num("override: sin 8 presentaciones desde el ultimo envio; se espera. presentes ", (unsigned)(g_present_count - last_pres_count));
+                }
+                return;
+            }
             if (last_sent >= 0 && g_api_applied != last_sent) {
                 static LONG said = -1;                              // (3)
                 if (said != last_sent) {
@@ -416,17 +423,31 @@ static void apply_override_now(void) {
         }
         last = now_qpc.QuadPart;
         last_pres_count = g_present_count;
-        last_sent = g_force_generated;
+        // Un apagado (seleccion 1) escribe solo el modo, no la cuenta, asi que
+        // no hay cuenta nueva que esperar ver en la API: con last_sent = 0 el
+        // latch comparaba contra la cuenta vieja y esperaba para siempre.
+        // Medido en Metro (modo host, 2026-09-11): despues de mode 1, ningun
+        // cambio del panel volvio a salir -- "pedido 0 / aplicado en la API
+        // 4" -- porque ahi nadie mas llama a slDLSSGSetOptions y el juego no
+        // lo destraba como en los otros tres.
+        last_sent = g_force_sel == policy::kSelOff ? -1 : g_force_generated;
     }
     // Lo mismo que en force_into: si el juego la apago, el reenvio la volveria a
     // encender por la puerta de atras.
-    if (game_turned_off_generation()) return;
-    // The game already spoke for this frame; ours would be the repeated call.
-    if (g_game_set_this_frame != 0) return;
-    // Says which precondition is missing instead of returning quietly. Three
-    // can fail and they need different answers: no captured call to replay,
-    // no wrapper installed, or the wrong thread.
+    // Says which precondition is missing instead of returning quietly. Five
+    // can fail and they need different answers: the game turned generation
+    // off, the game spoke this frame, no captured call to replay, no wrapper
+    // installed, or the wrong thread.
     static int said = 0;
+    if (game_turned_off_generation()) {
+        if (said != 4) { said = 4; log_line("override: el juego apago la generacion; no se pisa"); }
+        return;
+    }
+    // The game already spoke for this frame; ours would be the repeated call.
+    if (g_game_set_this_frame != 0) {
+        if (said != 5) { said = 5; log_line("override: el juego escribio opciones en este frame; se espera al siguiente"); }
+        return;
+    }
     if (g_orig_setoptions == nullptr) {
         if (said != 1) { said = 1; log_line("override: nothing wrapped yet"); }
         return;
@@ -663,6 +684,15 @@ static void set_count_now(LONG n) {
                 const LONG ap = g_api_applied;
                 if (ap >= 1 && w > ap) w = ap;
                 site_write(g_wic_sites, g_wic_n, (unsigned char)w);
+                // El pacer y la cuenta viva tampoco pasan la API. El sitio
+                // ya estaba recortado y el pacer no: en Metro (modo host,
+                // 2026-09-11) mode 2 -> 4 dejo el pacer en 3 con la API en 2
+                // durante 2 s -- "RSYNC: Present count mismatch" x400,
+                // "Present queue is empty", "Potential dead-lock in Present"
+                // y el juego cerro. En los otros juegos la API sube en el
+                // mismo frame y la carrera no se ve. [[traducir-la-cuenta-del-juego]]:
+                // al subir, API primero y despues el byte -- todos los bytes.
+                n = w;
             }
             // The pacer waits on its own copy. Without this it keeps waiting
             // for the ceiling the API was told, which is the whole throughput
