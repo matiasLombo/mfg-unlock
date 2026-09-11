@@ -6635,6 +6635,30 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     // los contadores por hook sepa que cuentan los dos niveles; el contador
     // que no depende de esto es PresentCount de GetFrameStatistics.
     PresentAnidado anidado;
+    // FRENO DURO DE RECURSION.
+    //
+    // Con la tabla por vtable el anidamiento deberia ser de DOS niveles y
+    // terminar: el proxy de Streamline presenta, eso entra por el slot del chain
+    // real, y el original de ESE chain es el Present de DXGI, que no vuelve.
+    //
+    // Halo, 2026-09-10, con su interposer 2.7.30: dos vtables enganchadas, cero
+    // "vtable desconocida" -- las dos con original propio -- y 0xC00000FD 16 ms
+    // despues de la primera llamada anidada. Si desborda, la recursion NO esta
+    // acotada en dos, y la tabla sola no alcanza.
+    //
+    // A partir del tercer nivel se llama al original y se vuelve, sin hacer nada
+    // mas: sin contar la presentacion, sin cadencia, sin pacer. Se pierde
+    // instrumentacion en esos frames; no se pierde el proceso. Y la profundidad
+    // queda en el log, que es el dato que falta para entender por que hay mas de
+    // dos niveles.
+    if (g_present_nivel > 2) {
+        static LONG max_visto = 0;
+        if (g_present_nivel > max_visto) {
+            max_visto = g_present_nivel;
+            log_num("present: RECURSION, profundidad ", (unsigned)g_present_nivel);
+        }
+        return orig(self, interval, flags);
+    }
     if (g_present_nivel > 1) {
         InterlockedIncrement(&g_present_anidados);
         static LONG dicho_anidado = 0;
