@@ -37,7 +37,7 @@
 #include "diag.h"
 #include "controller.h"
 #include "scheduler.h"
-#include "sitios.h"
+#include "sites.h"
 
 // The panel's own state, defined here and shared with overlay.h. It is a
 // window of ours now, not something drawn into the game's frame -- see the
@@ -2122,7 +2122,7 @@ static int patch_work_item_count(unsigned char *text, size_t len) {
     // La busqueda esta en src/sitios.h y se corre sobre el archivo real en
     // tools/test_sitios.cpp; aca solo se escribe.
     size_t at = 0;
-    const int found = sit::buscar(text, len, sit::kCuentaWorkItem, &at, 1);
+    const int found = sites::find(text, len, sites::kWorkItemCount, &at, 1);
     if (found != 1) {
         log_num("  ! work item count site not unique, sites: ", (unsigned)found);
         return 0;
@@ -2177,7 +2177,7 @@ static int patch_work_item_count(unsigned char *text, size_t len) {
     // escribe el mismo numero y los dos bucles recorren el mismo rango.
     {
         unsigned char *q2 = q + 12;
-        if (sit::casa(q2, sit::kCuentaFill)) {
+        if (sites::matches(q2, sites::kFillCount)) {
             DWORD o2 = 0;
             if (VirtualProtect(q2, 3, PAGE_EXECUTE_READWRITE, &o2)) {
                 q2[0] = 0x6A;
@@ -2652,7 +2652,7 @@ static int patch_monotonic_index(unsigned char *base, unsigned char *text, size_
 // for its own reasons, and we can only ever turn it off, never on.
 static int patch_generation_flag(unsigned char *base, unsigned char *text, size_t len) {
     size_t at = 0;
-    const int found = sit::buscar(text, len, sit::kFlagGeneracion, &at, 1);
+    const int found = sites::find(text, len, sites::kGenerationFlag, &at, 1);
     if (found != 1) {
         log_num("  ! generation flag site not unique, sites: ", (unsigned)found);
         return 0;
@@ -4910,9 +4910,9 @@ static int patch_snippet_max(unsigned char *base, int valor) {
     int hits = 0;
     {
         size_t at[8];
-        const int n = sit::buscar(text, len, sit::kSnippetMaxA, at, 8);
+        const int n = sites::find(text, len, sites::kSnippetMaxEdi, at, 8);
         for (int k = 0; k < n && k < 8; ++k) {
-            unsigned char *byte = text + at[k] + sit::kSnippetMaxA.escribir;
+            unsigned char *byte = text + at[k] + sites::kSnippetMaxEdi.write_at;
             DWORD old = 0;
             if (!VirtualProtect(byte, 1, PAGE_EXECUTE_READWRITE, &old)) continue;
             *byte = (unsigned char)valor;
@@ -4946,8 +4946,8 @@ static int patch_snippet_max(unsigned char *base, int valor) {
     // kSnippetMaxB en src/sitios.h; es unico, se escribe solo el primero.
     {
         size_t at = 0;
-        if (sit::buscar(text, len, sit::kSnippetMaxB, &at, 1) >= 1) {
-            unsigned char *byte = text + at + sit::kSnippetMaxB.escribir;
+        if (sites::find(text, len, sites::kSnippetMaxEsi, &at, 1) >= 1) {
+            unsigned char *byte = text + at + sites::kSnippetMaxEsi.write_at;
             DWORD old = 0;
             if (VirtualProtect(byte, 1, PAGE_EXECUTE_READWRITE, &old)) {
                 *byte = (unsigned char)valor;
@@ -5046,12 +5046,12 @@ static int patch_tope_seis(unsigned char *base) {
     // Las dos formas estan en src/sitios.h (kTope6A, kTope6B); aca se escribe
     // el 6 sobre el 5 y se anota el sitio para "byte vivo".
     int hits = 0;
-    const sit::Patron *formas[2] = { &sit::kTope6A, &sit::kTope6B };
+    const sites::Pattern *forms[2] = { &sites::kCap6Store, &sites::kCap6Cmov };
     for (int f = 0; f < 2; ++f) {
         size_t at[8];
-        const int n = sit::buscar(text, len, *formas[f], at, 8);
+        const int n = sites::find(text, len, *forms[f], at, 8);
         for (int k = 0; k < n && k < 8; ++k) {
-            unsigned char *byte = text + at[k] + formas[f]->escribir;
+            unsigned char *byte = text + at[k] + forms[f]->write_at;
             DWORD old = 0;
             if (VirtualProtect(byte, 1, PAGE_EXECUTE_READWRITE, &old)) {
                 *byte = 6;
@@ -5086,12 +5086,12 @@ static int patch_gates(unsigned char *base) {
     // Las dos formas del cmp contra 0x1B0 estan en src/sitios.h; aca se
     // escribe el 0 sobre el inmediato.
     int hits = 0;
-    const sit::Patron *formas[2] = { &sit::kGateEax, &sit::kGateReg };
+    const sites::Pattern *forms[2] = { &sites::kGateEax, &sites::kGateReg };
     for (int f = 0; f < 2; ++f) {
         size_t at[8];
-        const int n = sit::buscar(text, len, *formas[f], at, 8);
+        const int n = sites::find(text, len, *forms[f], at, 8);
         for (int k = 0; k < n && k < 8; ++k) {
-            unsigned char *imm = text + at[k] + formas[f]->escribir;
+            unsigned char *imm = text + at[k] + forms[f]->write_at;
             DWORD old = 0;
             if (!VirtualProtect(imm, 4, PAGE_EXECUTE_READWRITE, &old)) continue;
             *reinterpret_cast<unsigned *>(imm) = 0;
@@ -6973,7 +6973,7 @@ static int patch_enable_cpu_pacer(unsigned char *base) {
     {
         // Busqueda en src/sitios.h (pacer_cmovae); aca solo se escribe.
         size_t at[8];
-        const int n = sit::pacer_cmovae(text, len, at, 8);
+        const int n = sites::pacer_cmovae(text, len, at, 8);
         for (int k = 0; k < n && k < 8; ++k) {
             unsigned char *cmov = text + at[k];         // the cmovae
             DWORD old = 0;
@@ -7013,7 +7013,7 @@ static int patch_enable_cpu_pacer(unsigned char *base) {
     {
         // Busqueda en src/sitios.h (pacer_movbl); aca solo se escribe.
         size_t at[8];
-        const int n = sit::pacer_movbl(text, len, at, 8);
+        const int n = sites::pacer_movbl(text, len, at, 8);
         for (int k = 0; k < n && k < 8; ++k) {
             unsigned char *imm = text + at[k];
             DWORD old = 0;

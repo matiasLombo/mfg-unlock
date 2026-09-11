@@ -20,23 +20,23 @@
 #pragma once
 #include <cstddef>
 
-namespace sit {
+namespace sites {
 
 typedef unsigned char u8;
 typedef unsigned short pb;   // (mascara << 8) | valor
 
 constexpr pb X(unsigned v) { return (pb)(0xFF00u | (v & 0xFF)); }   // exacto
 constexpr pb W = 0;                                                  // comodin
-constexpr pb M(unsigned mascara, unsigned v) { return (pb)((mascara << 8) | (v & 0xFF)); }
+constexpr pb M(unsigned mask, unsigned v) { return (pb)((mask << 8) | (v & 0xFF)); }
 
-struct Patron {
-    const char *nombre;
+struct Pattern {
+    const char *name;
     const pb *b;
     int n;
-    int escribir;    // offset dentro del patron del primer byte que se escribe
+    int write_at;    // offset dentro del patron del primer byte que se escribe
 };
 
-inline bool casa(const u8 *t, const Patron &p) {
+inline bool matches(const u8 *t, const Pattern &p) {
     for (int k = 0; k < p.n; ++k) {
         const u8 m = (u8)(p.b[k] >> 8), v = (u8)(p.b[k] & 0xFF);
         if ((t[k] & m) != v) return false;
@@ -46,11 +46,11 @@ inline bool casa(const u8 *t, const Patron &p) {
 
 // Todas las apariciones. Devuelve cuantas hay (aunque no entren en `out`);
 // `out` recibe el offset del PATRON (no del byte a escribir) de las primeras.
-inline int buscar(const u8 *t, size_t len, const Patron &p, size_t *out, int max) {
+inline int find(const u8 *t, size_t len, const Pattern &p, size_t *out, int max) {
     int n = 0;
     if ((size_t)p.n > len) return 0;
     for (size_t i = 0; i + (size_t)p.n <= len; ++i) {
-        if (!casa(t + i, p)) continue;
+        if (!matches(t + i, p)) continue;
         if (n < max) out[n] = i;
         ++n;
     }
@@ -61,27 +61,27 @@ inline int buscar(const u8 *t, size_t len, const Patron &p, size_t *out, int max
 
 // mov eax,[rdx+4]; mov r8d,0xC0; mov [rcx+4],eax -- la cuenta de work items.
 // Unico. Se escribe push imm8 / pop rax sobre los 3 primeros bytes.
-inline const pb kCuentaWorkItemB[] = { X(0x8B), X(0x42), X(0x04), X(0x41), X(0xB8), X(0xC0),
+inline const pb kWorkItemCountBytes[] = { X(0x8B), X(0x42), X(0x04), X(0x41), X(0xB8), X(0xC0),
                                        X(0x00), X(0x00), X(0x00), X(0x89), X(0x41), X(0x04) };
-inline const Patron kCuentaWorkItem = { "cuenta-work-item", kCuentaWorkItemB, 12, 0 };
+inline const Pattern kWorkItemCount = { "cuenta-work-item", kWorkItemCountBytes, 12, 0 };
 // Justo despues (offset +12) puede venir mov eax,[rdx+8]: el llenado.
-inline const pb kCuentaFillB[] = { X(0x8B), X(0x42), X(0x08) };
-inline const Patron kCuentaFill = { "cuenta-fill", kCuentaFillB, 3, 0 };
+inline const pb kFillCountBytes[] = { X(0x8B), X(0x42), X(0x08) };
+inline const Pattern kFillCount = { "cuenta-fill", kFillCountBytes, 3, 0 };
 
 // mov rcx,r14; call rel32; mov [r14+disp32],al -- la bandera de generacion.
 // Unico. Se redirige el call (offset +3).
-inline const pb kFlagGeneracionB[] = { X(0x49), X(0x8B), X(0xCE), X(0xE8), W, W, W, W,
+inline const pb kGenerationFlagBytes[] = { X(0x49), X(0x8B), X(0xCE), X(0xE8), W, W, W, W,
                                        X(0x41), X(0x88), X(0x86), W, W, X(0x00), X(0x00) };
-inline const Patron kFlagGeneracion = { "flag-generacion", kFlagGeneracionB, 15, 3 };
+inline const Pattern kGenerationFlag = { "flag-generacion", kGenerationFlagBytes, 15, 3 };
 
 // El tope 5 del plugin, dos formas: mov [reg+0x45E4], 5 y mov edx,5; cmp
 // ecx,edx; cmovb edx,ecx. Se escribe 6 sobre el 5.
-inline const pb kTope6AB[] = { X(0xC7), M(0xF8, 0x80), X(0xE4), X(0x45), X(0x00), X(0x00),
+inline const pb kCap6StoreBytes[] = { X(0xC7), M(0xF8, 0x80), X(0xE4), X(0x45), X(0x00), X(0x00),
                                X(0x05), X(0x00), X(0x00), X(0x00) };
-inline const Patron kTope6A = { "tope6-store", kTope6AB, 10, 6 };
-inline const pb kTope6BB[] = { X(0xBA), X(0x05), X(0x00), X(0x00), X(0x00),
+inline const Pattern kCap6Store = { "tope6-store", kCap6StoreBytes, 10, 6 };
+inline const pb kCap6CmovBytes[] = { X(0xBA), X(0x05), X(0x00), X(0x00), X(0x00),
                                X(0x3B), X(0xCA), X(0x0F), X(0x42), X(0xD1) };
-inline const Patron kTope6B = { "tope6-cmov", kTope6BB, 10, 1 };
+inline const Pattern kCap6Cmov = { "tope6-cmov", kCap6CmovBytes, 10, 1 };
 
 // El pacer de CPU, dos formas con relaciones entre bytes. Devuelven cuantas
 // y el offset del byte a escribir de las primeras.
@@ -147,24 +147,24 @@ inline int pacer_setae(const u8 *t, size_t len, size_t *out, int max) {
 
 // cmp ebp,imm32; jl rel32; mov edi,5 -- el maximo por arquitectura. Y mov
 // esi,5, que es unico. Se escribe el valor nuevo sobre el 5.
-inline const pb kSnippetMaxAB[] = { X(0x81), X(0xFD), W, W, W, W, X(0x0F), X(0x8C), W, W, W, W,
+inline const pb kSnippetMaxEdiBytes[] = { X(0x81), X(0xFD), W, W, W, W, X(0x0F), X(0x8C), W, W, W, W,
                                     X(0xBF), X(0x05), X(0x00), X(0x00), X(0x00) };
-inline const Patron kSnippetMaxA = { "snippet-max-edi", kSnippetMaxAB, 17, 13 };
-inline const pb kSnippetMaxBB[] = { X(0xBE), X(0x05), X(0x00), X(0x00), X(0x00) };
-inline const Patron kSnippetMaxB = { "snippet-max-esi", kSnippetMaxBB, 5, 1 };
+inline const Pattern kSnippetMaxEdi = { "snippet-max-edi", kSnippetMaxEdiBytes, 17, 13 };
+inline const pb kSnippetMaxEsiBytes[] = { X(0xBE), X(0x05), X(0x00), X(0x00), X(0x00) };
+inline const Pattern kSnippetMaxEsi = { "snippet-max-esi", kSnippetMaxEsiBytes, 5, 1 };
 
 // Las compuertas por arquitectura: cmp eax,0x1B0 y cmp r32,0x1B0 (Blackwell).
 // Se escribe 0 sobre el inmediato: offset +1 y +2 respectivamente.
 inline const unsigned kArchBlackwell = 0x1B0;
-inline const pb kGateEaxB[] = { X(0x3D), X(0xB0), X(0x01), X(0x00), X(0x00) };
-inline const Patron kGateEax = { "gate-eax", kGateEaxB, 5, 1 };
-inline const pb kGateRegB[] = { X(0x81), M(0xF8, 0xF8), X(0xB0), X(0x01), X(0x00), X(0x00) };
-inline const Patron kGateReg = { "gate-reg", kGateRegB, 6, 2 };
+inline const pb kGateEaxBytes[] = { X(0x3D), X(0xB0), X(0x01), X(0x00), X(0x00) };
+inline const Pattern kGateEax = { "gate-eax", kGateEaxBytes, 5, 1 };
+inline const pb kGateRegBytes[] = { X(0x81), M(0xF8, 0xF8), X(0xB0), X(0x01), X(0x00), X(0x00) };
+inline const Pattern kGateReg = { "gate-reg", kGateRegBytes, 6, 2 };
 
 // ---- el .text de un archivo PE, para el test de host --------------------------
 //
 // Devuelve el offset y el largo de .text dentro del archivo (raw), o false.
-inline bool text_del_archivo(const u8 *f, size_t n, size_t *off, size_t *len) {
+inline bool text_of_file(const u8 *f, size_t n, size_t *off, size_t *len) {
     if (n < 0x40 || f[0] != 'M' || f[1] != 'Z') return false;
     const unsigned e_lfanew = *(const unsigned *)(f + 0x3C);
     if (e_lfanew + 0x18 > n || f[e_lfanew] != 'P' || f[e_lfanew + 1] != 'E') return false;
