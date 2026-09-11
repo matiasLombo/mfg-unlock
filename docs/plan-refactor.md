@@ -11,19 +11,19 @@ Antes de cada instalacion: `sh tools/test-host.sh`.
 
 | fase | que se extrae | a donde | test de host | estado |
 |---|---|---|---|---|
-| F0 | la decision de `force_into` | `src/politica.h` | `tools/test_politica.cpp` (30 casos de los logs) | extraido b02a46e, cableado 67c76a5; falta correr los 3 juegos |
+| F0 | la decision de `force_into` | `src/policy.h` | `tools/test_policy.cpp` (30 casos de los logs) | extraido b02a46e, cableado 67c76a5; falta correr los 3 juegos |
 | F1 | configuracion: 43 archivos + `mfg-settings.txt` | `src/config.h` | `tools/test_config.cpp` (carpetas reales) | extraido b60b811, cableado a422a66, `mfg-config.txt` 486173e; falta correr |
 | F2 | diagnostico: una linea por capa e invariante | `src/diag.h` | `tools/test_diag.cpp` (formato exacto) | extraido 9107123, cableado 71aa84c; falta correr |
-| F3 | el controlador DYNAMIC (`dyn_control`, `dyn_apply`, sat, sesgo) | `src/controlador.h` | `tools/test_controlador.cpp` (la tabla de GTA V, 28 casos) | extraido ee4cca5, cableado 3ac6c14; Cyberpunk DYNAMIC 72% en banda |
-| F4 | el reparto por bloques de `fractional_tick` | `src/reparto.h` | `tools/test_reparto.cpp` (juego simulado, 2.10-2.90 al 1%) | extraido c8d7384, cableado 5c518e6; Cyberpunk CUSTOM 2.55 -> 2.55 |
-| F5 | los sitios de los `patch_*` que corren en sesion | `src/sitios.h` | `tools/test_sitios.cpp` (los dll reales de la cache 2.12) | extraido b345fd6, cableado 2f02034; Cyberpunk 6X -> 5.98, mismos conteos |
-| F6 | `resolve.h` contra `politica.h` | -- | en `test_politica`, seccion F6 | a0e8a88: coinciden en fijos y pausa; DOS divergencias pinchadas, no unificadas (necesitan juego) |
+| F3 | el controlador DYNAMIC (`dyn_control`, `dyn_apply`, sat, sesgo) | `src/controller.h` | `tools/test_controller.cpp` (la tabla de GTA V, 28 casos) | extraido ee4cca5, cableado 3ac6c14; Cyberpunk DYNAMIC 72% en banda |
+| F4 | el reparto por bloques de `fractional_tick` | `src/scheduler.h` | `tools/test_scheduler.cpp` (juego simulado, 2.10-2.90 al 1%) | extraido c8d7384, cableado 5c518e6; Cyberpunk CUSTOM 2.55 -> 2.55 |
+| F5 | los sitios de los `patch_*` que corren en sesion | `src/sites.h` | `tools/test_sites.cpp` (los dll reales de la cache 2.12) | extraido b345fd6, cableado 2f02034; Cyberpunk 6X -> 5.98, mismos conteos |
+| F6 | `resolve.h` contra `policy.h` | -- | en `test_policy`, seccion F6 | a0e8a88: coinciden en fijos y pausa; DOS divergencias pinchadas, no unificadas (necesitan juego) |
 
 ## Lo que salio de F0 y no se corrigio (a proposito)
 
 - La guarda "nunca vimos que cuenta pide el juego" solo salta con el snippet de
   julio. Con multiplicador, un 0 del juego se traduce a 1, pasa como dato, y
-  el freno escribe 1 (= 1X). Pinchado en `test_politica`; corregirlo es un
+  el freno escribe 1 (= 1X). Pinchado en `test_policy`; corregirlo es un
   cambio de comportamiento y necesita un juego que lo produzca.
 - `force_into` asume que el juego habla GENERADOS siempre. Es cierto para los
   tres juegos medidos (snippet de julio en los tres); no esta derivado del
@@ -95,3 +95,38 @@ No se midio multiplicador: nadie jugo.
   ([[gtav-benchmark-roto]]) y Halo no genera en el menu.
 - Las dos divergencias de F6 (Halo con eOff sin eOn previo; sel 0 con base
   sustituida) solo se pueden decidir con esos juegos.
+
+
+# Segundo goal (2026-09-11): proxy.cpp deja de ser el modulo
+
+Terminado. Condicion por condicion:
+
+1. `src/proxy.cpp`: 9.417 -> **1.172 lineas**; ninguna funcion pasa las 80
+   (DllMain quedo en 38, en cuatro pasos con nombre).
+2. Cada bloque en su archivo con cabecera entra/sale/depende: `measurement.h`
+   (con la ventana cerrada en foto / volcado / acciones), `reflex.h`,
+   `patches.h`, `loader.h`, `present.h`, `writer.h`, `exceptions.h`,
+   `recorder.h`; ademas `frametoken.h`, `slinit.h` y `config_apply.h`, que
+   eran las tres funciones de mas de 80 lineas que quedaban.
+3. `src/state.h`: 168 globales compartidas con "escribe / lee" generado por
+   `tools/globals_report.py`; las de un solo modulo viven en el. En proxy.cpp
+   quedan nueve propias (el log y el forwarding).
+4. Identificadores en ingles en todo `src/` y `tools/test_*.cpp`
+   (`politica -> policy`, `controlador -> controller`, `reparto -> scheduler`,
+   `sitios -> sites`, `Fase -> Phase`, ...). No se tocaron: comentarios, docs,
+   claves de `mfg-config.txt` / `mfg-settings.txt`, cadenas del log.
+5. `docs/module-map.md`.
+6. `tools/test-host.sh` en verde (7 tests); Cyberpunk desde Steam en cada
+   commit que cambiaba el codigo generado (13 corridas, 5.92-6.00x, mismos
+   sitios, 0 INVARIANTE, 0 excepciones); Halo y GTA V abren con el build
+   final (683159, 7aa23b0): `VEREDICTO ACTIVO`, 0 INVARIANTE, 0 excepciones.
+
+Herramientas que quedaron: `tools/extract_block(s).py` (mover rangos a un
+header), `tools/compare_sections.py` (renombre puro = .text identico),
+`tools/check_run.py` (resumen y comparacion de corridas),
+`tools/list_ids.py` (identificadores por archivo), `tools/globals_report.py`
+y `tools/move_globals.py`.
+
+Lo que un mover no arregla y queda escrito: `state.h` muestra el
+acoplamiento tal cual es (variables con tres o cuatro escritores). Reducirlo
+es cambiar comportamiento, y va con medicion, no con este goal.

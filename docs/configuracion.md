@@ -14,7 +14,7 @@ Polaridad DIRECTA en el archivo: `seis 0` apaga el 6X, `ota 1` enciende OTA.
 El defecto es lo que corre sin ningun archivo; lo que hace funcionar el mod va
 encendido por defecto y una clave solo lo apaga ([[flags-only-disable]]).
 
-Fuente: `src/config.h` (la tabla `kBanderas` y `kNumericos`). Test:
+Fuente: `src/config.h` (la tabla `kFlags` y `kNumerics`). Test:
 `tools/test_config.cpp`.
 
 ## Banderas
