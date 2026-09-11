@@ -16,7 +16,7 @@
 // regla, no la historia.
 #pragma once
 
-namespace ctl {
+namespace controller {
 
 inline int bucket(double ratio) {
     int b = (int)ratio;
@@ -25,39 +25,39 @@ inline int bucket(double ratio) {
     return b;
 }
 
-struct Estado {
+struct State {
     // dyn_control
     double last_base = 0.0;
     double asked_sum = 0.0;
     long   asked_n = 0;
     double bias[6] = { 1.0, 1.0, 1.0, 1.0, 1.0, 1.0 };
-    bool   recortado = false;      // la salida quedo pegada a un tope: no aprender
+    bool   clipped = false;      // la salida quedo pegada a un tope: no aprender
     // sat: el ratio mas barato que sostiene las presentadas
     double sat_pres = 0.0;
     double sat_ratio_max = 0.0;    // 0 = sin limite
     double sat_prev_asked = 0.0, sat_prev_pres = 0.0;
-    bool   sat_quieto = false;
+    bool   sat_frozen = false;
     // dyn_apply
     double debt = 0.0;
-    unsigned long llamadas = 0, frenos_tiron = 0, frenos_base = 0;
-    bool   salida_saturada = false;
+    unsigned long calls = 0, brakes_hitch = 0, brakes_base = 0;
+    bool   output_saturated = false;
     long   last_pc = 0;
     long long last_qpc = 0;
     double base_prev = 0.0;
-    long   dicho_techo = -1;       // dedupe de "recortado al techo medido"
+    long   said_ceiling = -1;       // dedupe de "recortado al techo medido"
     bool   said_hi = false;        // dedupe de "target needs more than 6x"
 };
 
 // Lo que no cambia por tick.
 struct Config {
     bool sat_on = true;            // mfg-sinsat.txt lo apaga
-    bool usar_deuda = true;        // mfg-sin-deuda.txt lo apaga
+    bool use_debt = true;        // mfg-sin-deuda.txt lo apaga
 };
 
-inline void sat_reset(Estado &e) {
+inline void sat_reset(State &e) {
     e.sat_pres = 0.0;
     e.sat_ratio_max = 0.0;
-    e.sat_quieto = false;
+    e.sat_frozen = false;
     e.sat_prev_asked = 0.0;
     e.sat_prev_pres = 0.0;
 }
@@ -65,7 +65,7 @@ inline void sat_reset(Estado &e) {
 // Una vez por ventana de medicion. `log` tiene linea(const char*) y
 // num(const char*, unsigned long long).
 template <class Log>
-inline void control(Estado &e, const Config &c, double base_fps, double presented_fps, Log &log) {
+inline void control(State &e, const Config &c, double base_fps, double presented_fps, Log &log) {
     if (base_fps <= 1.0 || presented_fps <= 1.0) return;
     const bool stable = e.last_base > 1.0 &&
                         (base_fps > e.last_base ? base_fps - e.last_base
@@ -76,11 +76,11 @@ inline void control(Estado &e, const Config &c, double base_fps, double presente
     e.asked_n = 0;
     if (!stable) {
         // Lo aprendido vale para ESTE punto de operacion.
-        if (e.sat_ratio_max > 0.0) log.linea("sat: la base cambio, se olvida el techo");
+        if (e.sat_ratio_max > 0.0) log.line("sat: la base cambio, se olvida el techo");
         sat_reset(e);
         return;
     }
-    if (e.recortado) return;       // salida recortada: el error no es del modelo
+    if (e.clipped) return;       // salida recortada: el error no es del modelo
     if (asked_avg < 2.0) return;
     const double delivered = presented_fps / base_fps;
     if (delivered <= 0.5) return;
@@ -99,7 +99,7 @@ inline void control(Estado &e, const Config &c, double base_fps, double presente
             log.num("  el ratio se limita a x100 ",
                     (unsigned long long)(e.sat_ratio_max * 100.0 + 0.5));
             log.num("  se venia pidiendo x100 ", (unsigned long long)(asked_avg * 100.0 + 0.5));
-        } else if (e.sat_ratio_max > 0.0 && !e.sat_quieto) {
+        } else if (e.sat_ratio_max > 0.0 && !e.sat_frozen) {
             // Con techo: se tantea hacia abajo mientras las presentadas
             // aguanten; el primer paso que duele define el piso y se congela.
             if (presented_fps >= e.sat_pres * 0.98) {
@@ -110,7 +110,7 @@ inline void control(Estado &e, const Config &c, double base_fps, double presente
                 }
             } else if (presented_fps < e.sat_pres * 0.97) {
                 e.sat_ratio_max += 0.10;
-                e.sat_quieto = true;
+                e.sat_frozen = true;
                 log.num("sat: piso encontrado, ratio queda en x100 ",
                         (unsigned long long)(e.sat_ratio_max * 100.0 + 0.5));
             }
@@ -125,7 +125,7 @@ inline void control(Estado &e, const Config &c, double base_fps, double presente
     if (e.bias[bk] > 1.25) e.bias[bk] = 1.25;
 }
 
-struct EntradaAplicar {
+struct ApplyInput {
     double base_fps;
     double target;             // fps presentados que se quieren (dynfps o refresh)
     long long now_qpc;
@@ -134,19 +134,19 @@ struct EntradaAplicar {
     long   dyn_target;         // el ratio en vigor, x100
 };
 
-struct SalidaAplicar {
-    bool   cambia;             // hay ratio nuevo
+struct ApplyOutput {
+    bool   changes;             // hay ratio nuevo
     long   next;               // el ratio nuevo, x100
-    bool   sonda;              // arranco la sonda de caida de ratio
+    bool   probe;              // arranco la sonda de caida de ratio
     // para el diagnostico opcional (mfg-dyndiag.txt)
-    double target_eff, raw, sesgo;
+    double target_eff, raw, bias_used;
 };
 
 // Una vez por frame renderizado. Devuelve si cambia el ratio y a cuanto; el
 // que llama escribe g_dyn_target y arma la sonda. `log` como en control().
 template <class Log>
-inline SalidaAplicar aplicar(Estado &e, const Config &c, const EntradaAplicar &in, Log &log) {
-    SalidaAplicar s{};
+inline ApplyOutput apply(State &e, const Config &c, const ApplyInput &in, Log &log) {
+    ApplyOutput s{};
     const double target = in.target;
     const double base_fps = in.base_fps;
     const long pc = in.pc;
@@ -154,21 +154,21 @@ inline SalidaAplicar aplicar(Estado &e, const Config &c, const EntradaAplicar &i
         const double secs = (double)(in.now_qpc - e.last_qpc) / (double)in.qpc_freq;
         if (secs < 0.5) {              // un salto largo es un cambio de escena
             double inc = target * secs - (double)(pc - e.last_pc);
-            if (e.salida_saturada && inc > 0.0) inc = 0.0;
-            const double esperado = (base_fps > 1.0) ? (1.0 / base_fps) : 0.02;
-            const bool tiron = (secs > esperado * 2.0);
-            bool base_inestable = false;
+            if (e.output_saturated && inc > 0.0) inc = 0.0;
+            const double expected = (base_fps > 1.0) ? (1.0 / base_fps) : 0.02;
+            const bool hitch = (secs > expected * 2.0);
+            bool base_unstable = false;
             if (e.base_prev > 1.0 && base_fps > 1.0) {
                 const double d = (base_fps > e.base_prev)
                                  ? (base_fps - e.base_prev) / e.base_prev
                                  : (e.base_prev - base_fps) / e.base_prev;
-                base_inestable = (d > 0.12);
+                base_unstable = (d > 0.12);
             }
             e.base_prev = base_fps;
-            ++e.llamadas;
-            if ((tiron || base_inestable) && inc > 0.0) {
+            ++e.calls;
+            if ((hitch || base_unstable) && inc > 0.0) {
                 inc = 0.0;
-                if (tiron) ++e.frenos_tiron; else ++e.frenos_base;
+                if (hitch) ++e.brakes_hitch; else ++e.brakes_base;
             }
             e.debt += inc;
             const double lim = target * 0.33;
@@ -180,17 +180,17 @@ inline SalidaAplicar aplicar(Estado &e, const Config &c, const EntradaAplicar &i
     }
     e.last_pc = pc;
     e.last_qpc = in.now_qpc;
-    const double target_eff = c.usar_deuda ? (target + e.debt * 2.0) : target;
+    const double target_eff = c.use_debt ? (target + e.debt * 2.0) : target;
     const double raw = (target_eff > 1.0 ? target_eff : 1.0) / base_fps;
     double want = raw * e.bias[bucket(raw)];
-    e.salida_saturada = (want >= 6.0);
-    e.recortado = (want >= 6.0 || want <= 2.0);
+    e.output_saturated = (want >= 6.0);
+    e.clipped = (want >= 6.0 || want <= 2.0);
     {
-        const double techo = 6.0, piso = 2.0;
-        const double recorte = want > techo ? want - techo
-                             : (want < piso ? want - piso : 0.0);
-        if (recorte != 0.0 && c.usar_deuda) {
-            e.debt -= recorte * base_fps / 2.0;
+        const double ceiling = 6.0, floor = 2.0;
+        const double clip = want > ceiling ? want - ceiling
+                             : (want < floor ? want - floor : 0.0);
+        if (clip != 0.0 && c.use_debt) {
+            e.debt -= clip * base_fps / 2.0;
             const double lim2 = target * 0.33;
             if (e.debt > lim2) e.debt = lim2;
             if (e.debt < -lim2) e.debt = -lim2;
@@ -198,8 +198,8 @@ inline SalidaAplicar aplicar(Estado &e, const Config &c, const EntradaAplicar &i
     }
     if (c.sat_on && e.sat_ratio_max >= 2.0 && want > e.sat_ratio_max) {
         const long q = (long)(e.sat_ratio_max * 100.0 + 0.5);
-        if (e.dicho_techo != q) {
-            e.dicho_techo = q;
+        if (e.said_ceiling != q) {
+            e.said_ceiling = q;
             log.num("dynamic: recortado al techo medido, ratio x100 ", (unsigned long long)q);
         }
         want = e.sat_ratio_max;
@@ -218,14 +218,14 @@ inline SalidaAplicar aplicar(Estado &e, const Config &c, const EntradaAplicar &i
     ++e.asked_n;
     s.target_eff = target_eff;
     s.raw = raw;
-    s.sesgo = e.bias[bucket(raw)];
+    s.bias_used = e.bias[bucket(raw)];
     const long next = (long)(want * 100.0 + 0.5);
     const long cur = in.dyn_target;
     const long diff = next > cur ? next - cur : cur - next;
     if (diff < 10) return s;
-    s.cambia = true;
+    s.changes = true;
     s.next = next;
-    s.sonda = (cur - next > 80);
+    s.probe = (cur - next > 80);
     return s;
 }
 

@@ -20,9 +20,9 @@
 // (siempre 0.0) y cyc_gen/cyc_frames. Comportamiento identico.
 #pragma once
 
-namespace rep {
+namespace scheduler {
 
-struct Estado {
+struct State {
     double sa_clock = 0.0;         // segundos dentro del ciclo
     int    sa_offset = 0;          // bloque donde arranca el tramo alto
     unsigned sa_rng = 0x9E3779B9u; // xorshift para el offset
@@ -44,7 +44,7 @@ struct Config {
     bool   peralt, nullalt, blockalt;
 };
 
-struct Entrada {
+struct Input {
     double per_frame;     // el ratio pedido menos kBase, ya acotado a [0, 6]
     long   lo;            // (long)per_frame
     double frac;          // per_frame - lo
@@ -52,15 +52,15 @@ struct Entrada {
     double last_dt;       // g_last_dt: cuanto duro el ultimo frame
 };
 
-struct Salida {
+struct Output {
     long   want;          // la cuenta que quiere este frame
     long   api;           // acotada a [0, 5]: lo que se manda
-    bool   cierre;        // se cerro un ciclo con datos (se logueo)
+    bool   closed;        // se cerro un ciclo con datos (se logueo)
 };
 
 template <class Log>
-inline Salida tick(Estado &e, const Config &c, const Entrada &in, Log &log) {
-    Salida s{};
+inline Output tick(State &e, const Config &c, const Input &in, Log &log) {
+    Output s{};
     if (in.dt > 0.0 && in.dt < 0.5) e.sa_clock += in.dt;
     const double kBlockSecs = c.block_ms > 0 ? (double)c.block_ms / 1000.0
                                              : (in.lo >= 1 ? 0.024 : 0.016);
@@ -101,7 +101,7 @@ inline Salida tick(Estado &e, const Config &c, const Entrada &in, Log &log) {
             e.hi_frames_seen = 0;
             e.lo_time = 0.0;
             e.hi_time = 0.0;
-            s.cierre = true;
+            s.closed = true;
         }
     }
     double t_frac = in.frac;

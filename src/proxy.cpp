@@ -35,8 +35,8 @@
 #include "policy.h"
 #include "config.h"
 #include "diag.h"
-#include "controlador.h"
-#include "reparto.h"
+#include "controller.h"
+#include "scheduler.h"
 #include "sitios.h"
 
 // The panel's own state, defined here and shared with overlay.h. It is a
@@ -3787,9 +3787,9 @@ static inline bool sel_is_frac(void) {
 // -- justo la forma del residuo que quedaba.
 // El estado del controlador vive en src/controlador.h (ctl::Estado); aca
 // queda una instancia y los dos envoltorios que leen el mundo y aplican.
-static ctl::Estado g_ctl;
+static controller::State g_ctrl;
 // Y el del reparto fraccional por bloques (src/reparto.h).
-static rep::Estado g_rep;
+static scheduler::State g_sched;
 // El integrador de deuda del controlador. Redundante con el sesgo por
 // tramo y el que rompia (dos corridas de Cyberpunk con el mismo binario:
 // buena 153-160, mala 274 con deuda y sesgo clavados en el riel). Se
@@ -3832,16 +3832,16 @@ static bool   g_sat_on = true;
 // seleccion, de base asentada y del refresh son de este lado porque leen
 // el mundo; la regla esta en controlador.h y se pincha en
 // tools/test_controlador.cpp.
-struct CtlLog {
-    void linea(const char *t) { log_line(t); }
+struct ControllerLog {
+    void line(const char *t) { log_line(t); }
     void num(const char *t, unsigned long long v) { log_num(t, v); }
 };
 
 static void dyn_control(double base_fps, double presented_fps) {
     if (g_force_sel != kSelDynFuture) return;
-    CtlLog log;
-    const ctl::Config c{ g_sat_on, g_usar_deuda };
-    ctl::control(g_ctl, c, base_fps, presented_fps, log);
+    ControllerLog log;
+    const controller::Config c{ g_sat_on, g_usar_deuda };
+    controller::control(g_ctrl, c, base_fps, presented_fps, log);
 }
 
 // Muestras minimas antes de que la salida del estimador valga una decision.
@@ -3870,21 +3870,21 @@ static void dyn_apply(double base_fps) {
         log_num("dynamic: refresh is ", (unsigned)g_refresh_hz);
     }
     LARGE_INTEGER qnow; QueryPerformanceCounter(&qnow);
-    ctl::EntradaAplicar in;
+    controller::ApplyInput in;
     in.base_fps = base_fps;
     in.target = (g_dyn_fps > 0) ? (double)g_dyn_fps : (double)g_refresh_hz;
     in.now_qpc = qnow.QuadPart;
     in.qpc_freq = g_qpc_freq;
     in.pc = g_rt_present_count;
     in.dyn_target = g_dyn_target;
-    CtlLog log;
-    const ctl::Config c{ g_sat_on, g_usar_deuda };
-    const ctl::SalidaAplicar s = ctl::aplicar(g_ctl, c, in, log);
-    if (!s.cambia) return;
+    ControllerLog log;
+    const controller::Config c{ g_sat_on, g_usar_deuda };
+    const controller::ApplyOutput s = controller::apply(g_ctrl, c, in, log);
+    if (!s.changes) return;
     const LONG cur = g_dyn_target;
     const LONG next = (LONG)s.next;
     g_dyn_target = next;
-    if (!g_probe_done && g_probe_left == 0 && s.sonda) {
+    if (!g_probe_done && g_probe_left == 0 && s.probe) {
         g_probe_left = 16;
         g_probe_i = 0;
         g_probe_pc0 = g_rt_present_count;
@@ -3896,15 +3896,15 @@ static void dyn_apply(double base_fps) {
     if (!g_dyn_diag) return;
     log_num("dynamic: ratio now x100 ", (unsigned)next);
     log_num("  from base ", (unsigned)(base_fps + 0.5));
-    log_num("  frenos por tiron ", (unsigned long long)g_ctl.frenos_tiron);
-    log_num("  frenos por base inestable ", (unsigned long long)g_ctl.frenos_base);
-    log_num("  llamadas del controlador ", (unsigned long long)g_ctl.llamadas);
+    log_num("  frenos por tiron ", (unsigned long long)g_ctrl.brakes_hitch);
+    log_num("  frenos por base inestable ", (unsigned long long)g_ctrl.brakes_base);
+    log_num("  llamadas del controlador ", (unsigned long long)g_ctrl.calls);
     log_num("  deuda x100 (mas 32768 si es negativa) ",
-            (unsigned)(g_ctl.debt < 0.0 ? 32768u + (unsigned)(-g_ctl.debt * 100.0 + 0.5)
-                                        : (unsigned)(g_ctl.debt * 100.0 + 0.5)));
+            (unsigned)(g_ctrl.debt < 0.0 ? 32768u + (unsigned)(-g_ctrl.debt * 100.0 + 0.5)
+                                        : (unsigned)(g_ctrl.debt * 100.0 + 0.5)));
     log_num("  objetivo efectivo ", (unsigned)(s.target_eff + 0.5));
     log_num("  ratio crudo x100 ", (unsigned)(s.raw * 100.0 + 0.5));
-    log_num("  sesgo x100 ", (unsigned)(s.sesgo * 100.0 + 0.5));
+    log_num("  sesgo x100 ", (unsigned)(s.bias_used * 100.0 + 0.5));
 }
 
 static void dynamic_tick(void) {
@@ -4088,12 +4088,12 @@ static void fractional_tick(void) {
                 dt = (double)(ahora.QuadPart - prev_qpc) / (double)g_qpc_freq;
             prev_qpc = ahora.QuadPart;
         }
-        const rep::Config rc{ g_block_ms, g_blocks, g_latch_reparto,
+        const scheduler::Config sched_cfg{ g_block_ms, g_blocks, g_latch_reparto,
                               g_peralt, g_nullalt, g_blockalt };
-        const rep::Entrada re{ per_frame, lo, frac, dt, g_last_dt };
-        CtlLog rlog;
-        const rep::Salida rs = rep::tick(g_rep, rc, re, rlog);
-        const LONG api = (LONG)rs.api;
+        const scheduler::Input sched_in{ per_frame, lo, frac, dt, g_last_dt };
+        ControllerLog sched_log;
+        const scheduler::Output sched_out = scheduler::tick(g_sched, sched_cfg, sched_in, sched_log);
+        const LONG api = (LONG)sched_out.api;
         if (api != g_force_generated) {
             g_force_generated = api;
             g_opt_pending = 1;
