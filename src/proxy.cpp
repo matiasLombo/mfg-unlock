@@ -978,15 +978,20 @@ static bool name_is(const UNICODE_STRING *s, const wchar_t *want) {
 // lock is how proxies deadlock.
 
 static HMODULE g_real = nullptr;
+// El nombre con el que nos cargaron. El mismo dll sirve como version.dll o
+// como winmm.dll: no todos los juegos importan version.dll (Metro Exodus EE
+// importa winmm.dll y carga dxgi/d3d12 a mano), y el forwarding tiene que ir
+// al dll de sistema que suplantamos. Lo llena DllMain.
+static wchar_t g_own_name[64] = L"version.dll";
 
 static FARPROC real(const char *name) {
     if (g_real == nullptr) {
         wchar_t path[MAX_PATH];
         UINT n = GetSystemDirectoryW(path, MAX_PATH);
-        if (n == 0 || n > MAX_PATH - 16) return nullptr;
-        const wchar_t *tail = L"\\version.dll";
-        for (UINT i = 0; tail[i] != 0; ++i) path[n + i] = tail[i];
-        path[n + 12] = 0;
+        if (n == 0 || n > MAX_PATH - 80) return nullptr;
+        path[n++] = L'\\';
+        for (UINT i = 0; g_own_name[i] != 0 && n < MAX_PATH - 1; ++i) path[n++] = g_own_name[i];
+        path[n] = 0;
         g_real = LoadLibraryW(path);
         if (g_real == nullptr) return nullptr;
     }
@@ -1018,6 +1023,31 @@ FORWARD(DWORD, VerInstallFileW,           (DWORD a, LPWSTR b, LPWSTR c, LPWSTR d
 FORWARD(DWORD, VerLanguageNameA,          (DWORD a, LPSTR b, DWORD c), (a,b,c))
 FORWARD(DWORD, VerLanguageNameW,          (DWORD a, LPWSTR b, DWORD c), (a,b,c))
 FORWARD(BOOL,  GetFileVersionInfoByHandle,(DWORD a, HANDLE b, DWORD c, LPVOID d), (a,b,c,d))
+
+// winmm.dll: los 180 exports del de sistema, como stubs en ensamblador
+// (src/forwards_winmm.S, generado por tools/gen_forwards.py) que resuelven
+// la direccion real la primera vez que alguien los llama. Cuatro forwarders a
+// mano no alcanzaban: cualquier modulo que haga LoadLibrary("winmm.dll") nos
+// recibe a nosotros, y un GetProcAddress que falle tira el proceso.
+#include "forwards_winmm_names.h"
+static HMODULE g_real_winmm = nullptr;
+static FARPROC g_winmm_cache[kWinmmNamesN];
+extern "C" FARPROC forward_resolve(int idx) {
+    if (idx < 0 || idx >= kWinmmNamesN) return nullptr;
+    if (g_winmm_cache[idx] != nullptr) return g_winmm_cache[idx];
+    if (g_real_winmm == nullptr) {
+        wchar_t path[MAX_PATH];
+        UINT n = GetSystemDirectoryW(path, MAX_PATH);
+        if (n == 0 || n > MAX_PATH - 16) return nullptr;
+        const wchar_t *tail = L"\\winmm.dll";
+        for (UINT i = 0; tail[i] != 0; ++i) path[n + i] = tail[i];
+        path[n + 10] = 0;
+        g_real_winmm = LoadLibraryW(path);
+        if (g_real_winmm == nullptr) return nullptr;
+    }
+    g_winmm_cache[idx] = GetProcAddress(g_real_winmm, kWinmmNames[idx]);
+    return g_winmm_cache[idx];
+}
 
 // ---------------------------------------------------------------- attach ---
 
@@ -1135,6 +1165,17 @@ static void register_dll_notifications(void) {
 BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
     if (reason != DLL_PROCESS_ATTACH) return TRUE;
     DisableThreadLibraryCalls(self);
+    {
+        // Con que nombre nos cargaron (version.dll o winmm.dll): el forwarding
+        // va al dll de sistema del mismo nombre.
+        wchar_t me[MAX_PATH];
+        DWORD m = GetModuleFileNameW(self, me, MAX_PATH);
+        while (m > 0 && me[m - 1] != L'\\') --m;
+        int k = 0;
+        for (; me[m + k] != 0 && k < 63; ++k)
+            g_own_name[k] = (me[m + k] >= L'A' && me[m + k] <= L'Z') ? (wchar_t)(me[m + k] + 32) : me[m + k];
+        g_own_name[k] = 0;
+    }
 
     // Log beside this dll, in the game folder.
     DWORD n = GetModuleFileNameW(self, g_log, MAX_PATH);

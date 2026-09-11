@@ -24,7 +24,7 @@ STUB
 fi
 
 g++ -shared -std=c++20 -O2 -DNDEBUG -w -I external/minhook/include \
-  -o version.dll src/proxy.cpp \
+  -o version.dll src/proxy.cpp src/forwards_winmm.S src/exports.def \
   external/minhook/src/hook.c external/minhook/src/buffer.c \
   external/minhook/src/trampoline.c external/minhook/src/hde/hde64.c \
   -static -static-libgcc -static-libstdc++ -Wl,--enable-stdcall-fixup -lkernel32 -luser32 -lgdi32
