@@ -3499,11 +3499,20 @@ static void note_rendered_frame(void) {
                         }
                         g_raw_calls = 0;
                         for (int i = 0; i < 6; ++i) g_gap_hist[i] = 0;
-                        if (g_pres_n > 0) {
-                            log_num("  present ms avg x10 ",
-                                    (unsigned)(g_pres_ms_sum / (double)g_pres_n * 10.0));
-                            log_num("  present ms max x10 ", (unsigned)(g_pres_ms_max * 10.0));
-                            log_num("  hitches over 33ms ", (unsigned)g_pres_hitch);
+                        // Solo las tres lineas de Present dependen de NUESTRO
+                        // hook. Todo lo demas de este bloque -- la latencia
+                        // por Reflex, el foco, lo que pidio el juego, la
+                        // cadencia -- se media igual sin el, y estaba adentro
+                        // del mismo `if`: con el overlay de Steam (sin hook)
+                        // la latencia desaparecio del log y del HUD en los tres
+                        // juegos, desde 2f0d758.
+                        {
+                            if (g_pres_n > 0) {
+                                log_num("  present ms avg x10 ",
+                                        (unsigned)(g_pres_ms_sum / (double)g_pres_n * 10.0));
+                                log_num("  present ms max x10 ", (unsigned)(g_pres_ms_max * 10.0));
+                                log_num("  hitches over 33ms ", (unsigned)g_pres_hitch);
+                            }
                             // Dos datos que separan "el juego estaba en el
                             // menu" de "se apago solo mientras jugabas".
                             if (g_rfx_n > 0) {
