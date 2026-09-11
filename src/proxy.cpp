@@ -97,6 +97,8 @@ static volatile LONG g_fase = (LONG)Fase::ARMADO;
 static inline bool fase_activa(void) { return g_fase == (LONG)Fase::ACTIVO; }
 static inline bool fase_pasiva(void) { return g_fase == (LONG)Fase::PASIVO; }
 static void evaluar_invariantes(void);
+// Alimenta g_present_count desde el runtime cuando no hay hook de Present.
+static void presentes_del_runtime(void);
 extern int g_copia_ejecuta;
 // Presentaciones vistas en el swapchain. Declarada aca porque el latch de
 // apply_override_now la necesita y vive antes que su definicion.
@@ -5433,6 +5435,8 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     }
     // El grafo ya cargo entero: aca se deciden los invariantes, una sola vez.
     evaluar_invariantes();
+    // Y si no hay hook de Present, el contador se alimenta desde aca.
+    presentes_del_runtime();
     // One rendered frame, exactly once.
     //
     // The game asks for the frame token about seven times per frame -- 305.7
@@ -6535,6 +6539,9 @@ typedef HRESULT(STDMETHODCALLTYPE *PFN_DXGIPresent)(IDXGISwapChain *, UINT, UINT
 // enganche" para el codigo que pregunta != nullptr; para llamar al original
 // se usa present_original_de(self), nunca este puntero.
 static PFN_DXGIPresent g_orig_dxgi_present = nullptr;
+// Cierto cuando NO pudimos enganchar Present (overlay de Steam): el contador de
+// presentaciones pasa a leerse del runtime. Ver presentes_del_runtime.
+static bool g_present_por_runtime = false;
 
 // Un original POR VTABLE, no uno por proceso.
 //
@@ -6624,6 +6631,26 @@ static bool g_native_pacer_found = false;  // sticky: one plugin with sites is e
 // interval show up here as a PresentCount that climbs four times while
 // PresentRefreshCount climbs once, which is the difference between frames
 // that were displayed and frames that were paid for and overwritten.
+// Sin hook de Present, el contador sale de donde siempre debio salir.
+//
+// g_present_count lo alimentaba nuestro propio hook. Con el overlay de Steam no
+// lo podemos enganchar, asi que se lee PresentCount de GetFrameStatistics, que
+// es el contador del runtime -- el que este proyecto ya habia concluido que era
+// el honesto ([[measure-with-the-runtime-counter]]). Se llama desde el camino
+// del frame token, que corre igual.
+static void presentes_del_runtime(void) {
+    if (!g_present_por_runtime || g_swapchain == nullptr) return;
+    DXGI_FRAME_STATISTICS st{};
+    if (FAILED(g_swapchain->GetFrameStatistics(&st))) return;
+    static UINT previo = 0;
+    static bool primero = true;
+    if (primero) { primero = false; previo = st.PresentCount; return; }
+    if (st.PresentCount < previo) { previo = st.PresentCount; return; }
+    const UINT delta = st.PresentCount - previo;
+    previo = st.PresentCount;
+    if (delta > 0 && delta < 10000) InterlockedAdd(&g_present_count, (LONG)delta);
+}
+
 static void note_display(IDXGISwapChain *sc) {
     DXGI_FRAME_STATISTICS st{};
     if (sc == nullptr || FAILED(sc->GetFrameStatistics(&st))) return;
@@ -7023,17 +7050,23 @@ static void hook_swapchain_present(void *sc) {
     // cuentan con PresentCount del runtime ([[measure-with-the-runtime-counter]]),
     // que es el instrumento honesto igual, y el pacer propio queda apagado en
     // esa configuracion.
+    // No enganchar NO es abandonar: el swapchain y el hook de frame latency se
+    // toman igual. De esa cadena cuelga el HUD entero -- fps y latencia -- y la
+    // primera version de esta guarda hacia return aca y lo dejaba en cero.
+    // Perder el contador propio es aceptable; perder el HUD no lo es.
+    bool sin_hook = false;
     {
         static bool dicho = false;
         if (GetModuleHandleW(L"gameoverlayrenderer64.dll") != nullptr) {
+            sin_hook = true;
             if (!dicho) {
                 dicho = true;
-                log_line("present: overlay de Steam presente; NO se engancha Present");
+                log_line("present: overlay de Steam presente; NO se escribe el slot");
                 log_line("  hace byte-detour de la funcion, asi que llamar al");
                 log_line("  original nos devuelve a nosotros: recursion sin fin.");
-                log_line("  Las presentaciones se cuentan con PresentCount del runtime.");
+                log_line("  Las presentaciones pasan a contarse con PresentCount");
+                log_line("  del runtime, que es el instrumento honesto igual.");
             }
-            return;
         }
     }
     // Solo se engancha un slot que TODAVIA apunta a dxgi.dll.
@@ -7120,9 +7153,12 @@ static void hook_swapchain_present(void *sc) {
                      : "  this chain is not waitable");
         }
     }
-    vt[8] = reinterpret_cast<void *>(&hk_dxgi_present);
+    if (!sin_hook) {
+        vt[8] = reinterpret_cast<void *>(&hk_dxgi_present);
+        log_line("recorder: present slot swapped (vt[8], not detoured)");
+    }
     VirtualProtect(&vt[8], sizeof(void *), prot, &prot);
-    log_line("recorder: present slot swapped (vt[8], not detoured)");
+    g_present_por_runtime = sin_hook;
     log_num("  vtables enganchadas ", (unsigned)g_vt_present_n);
 }
 
