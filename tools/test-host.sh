@@ -5,7 +5,7 @@
 #   sh tools/test-host.sh
 set -e
 cd "$(dirname "$0")/.."
-for t in test_resolve test_politica test_config; do
+for t in test_resolve test_politica test_config test_diag; do
     g++ -std=c++20 -O2 -Wall -Wextra -I src "tools/$t.cpp" -o "/tmp/$t.exe"
     "/tmp/$t.exe" | tail -1 | sed "s/^/$t: /"
 done
