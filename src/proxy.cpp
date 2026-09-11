@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <MinHook.h>
 #include "cubins.h"
+#include "politica.h"
 
 // The panel's own state, defined here and shared with overlay.h. It is a
 // window of ours now, not something drawn into the game's frame -- see the
@@ -1127,12 +1128,31 @@ static bool juego_apago_la_generacion(void) {
 static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     *savedMode = *(LONG *)(p + 32);
     *savedCount = *(LONG *)(p + 36);
-    // En PASIVO no se reescribe nada: el juego se queda con lo que pidio.
-    //
-    // Es el unico punto por el que pasa toda escritura de opciones, asi que
-    // gatearlo aca alcanza para que un juego con topologia rota corra como si
-    // el mod no estuviera, en vez de crashear. Ver evaluar_invariantes.
-    if (fase_pasiva()) {
+    // La decision vive en src/politica.h, sin globales, y se pincha en
+    // tools/test_politica.cpp. Aca queda lo que no es decision: leer los
+    // globales, escribir la struct y loguear con el mismo dedupe de siempre.
+    // Es el unico punto por el que pasa toda escritura de opciones.
+    pol::EntradaForce e{};
+    e.pasivo = fase_pasiva();
+    e.juego_pidio_on = g_juego_pidio_on != 0;
+    e.juego_quiere = g_juego_quiere;
+    e.sel = g_force_sel;
+    e.force_generated = g_force_generated;
+    e.multiplicador = cuenta_es_multiplicador();
+    e.ciclo_techo = g_ciclo_techo;
+    e.seis = g_seis;
+    e.ceilfirst = g_ceilfirst;
+    e.interp_on = g_interp_on != 0;
+    e.wic_ok = g_wic_ok;
+    e.last_seen_generated = g_last_seen_generated;
+    const LONG kTope = tope_cuenta();
+    e.tope = kTope;
+    const pol::SalidaForce s = pol::decidir_force(e);
+
+    switch (s.razon) {
+    case pol::Razon::PASIVO: {
+        // Un juego con topologia rota corre como si el mod no estuviera, en vez
+        // de crashear. Ver evaluar_invariantes.
         static bool dicho = false;
         if (!dicho) {
             dicho = true;
@@ -1140,7 +1160,8 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         }
         return;
     }
-    if (juego_apago_la_generacion()) {
+    case pol::Razon::JUEGO_APAGO: {
+        // El congelamiento del menu de pausa: ver juego_apago_la_generacion.
         static LONG dicho = -1;
         if (dicho != g_force_sel) {
             dicho = g_force_sel;
@@ -1149,278 +1170,72 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         }
         return;                                // se deja tal cual la dejo el juego
     }
-    const LONG kTope = tope_cuenta();
+    default:
+        break;
+    }
     g_target_written = false;
-    const LONG sel = g_force_sel;
-    if (sel == 1) {
-        *(LONG *)(p + 32) = 0;                 // DLSSGMode::eOff
-    } else if (sel == kSelDynamic || sel == kSelDynFuture) {
-        // Ours, not the plugin's: eOn with the count dynamic_tick chose. The
-        // struct rebuild to version 5 and the eDynamic write below are gone
-        // with it, so nothing here depends on the plugin being 2.11.1.
-        //
-        // Zero generated frames is eOff, not eOn with a count of zero -- the
-        // plugin rejects that outright ("Input data numFramesToGenerate must
-        // be greater than 0") and keeps whatever it had, which is why setting
-        // a target of 30 against a base of 41 computed the right answer and
-        // then changed nothing at all.
-        // eOff for a frame that generates nothing, eOn otherwise.
-        //
-        // This was tried and abandoned once on the strength of a transition
-        // count -- 442 against ten at 2.5x -- without ever measuring the frame
-        // rate it produced. What the disassembly since then shows is that the
-        // "not generating" branch (ctx+0x45da == 0, tested at 0x180046f15) is
-        // the ordinary present path, the one that runs with generation off.
-        // eOn with a count of zero takes the *generation* path instead and
-        // finds nothing to present, which is the collapse to 30 fps: the
-        // render loop spins at 128 while the screen gets 30.
-        //
-        // So the transitions may well be the cheaper of the two. That is a
-        // measurement, not a conclusion, and it has not been made yet.
-        // El techo, no la cuenta de este frame.
-        //
-        // Escribir la cuenta por frame aca -- y alternar el modo entre eOff y
-        // eOn -- hacia 1307 llamadas a slDLSSGSetOptions en 45 segundos, una
-        // por frame. Y cada llamada que cambia la cuenta hace que el plugin
-        // libere sus recursos y arranque un enfriamiento de 100 ms:
-        //
-        //   0x1800497fd  movabs rax, 0x4059000000000000   ; = 100.0
-        //   0x180049807  mov    [rdi+0x4488], rax
-        //   0x18004b1b8  mientras [rdi+0x4488] > 0, devuelve "no interpola"
-        //
-        // Eso es lo que en GTA V aparece como "interpolation state changed from
-        // enabled to disabled (mode=eOn, numFramesToGenerate=2)" con nosotros
-        // pidiendo generacion, y los frames en vuelo de la vuelta son los tres
-        // "Out of order frame - will skip the present".
-        //
-        // El techo es constante mientras no cambie la seleccion, asi que la
-        // llamada se hace una vez y la variacion por frame la lleva el byte
-        // parcheado, que es para lo que existe. bound = byte + 1 <= techo + 1,
-        // que es la condicion que los crashes anteriores violaban.
-        // REVERTIDO. Mandarle el techo constante rompe 2.25x en el juego.
-        //
-        // La idea era buena y el motivo sigue en pie -- 1307 llamadas por
-        // corrida, contra la guia de NVIDIA que dice llamarla en interacciones
-        // de UI y no por frame -- pero viola el invariante que este archivo ya
-        // documentaba: la cuenta de la API decide la generacion Y dimensiona la
-        // reserva, y un bound menor que (cuenta + 1) detiene la presentacion.
-        //
-        // Con techo 2 a 2.25x, los frames cuyo byte vale 1 hacen que el plugin
-        // espere tres presentaciones y reciba dos. Medido jugando: 2.25x pedido
-        // entrego 1.56 con la base subida a 96, o sea la generacion apagada
-        // buena parte del tiempo. El banco no lo vio porque a 2.50x y 2.75x dio
-        // 2.503 y 2.750 -- el defecto aparece cuando la fraccion es baja y el
-        // byte pasa mucho tiempo por debajo del techo.
-        //
-        // Para bajar las llamadas hay que sincronizarlas con el byte, no
-        // desacoplarlas de el.
-        if (g_force_generated <= 0) {
-            *(LONG *)(p + 32) = 0;             // DLSSGMode::eOff
-        } else {
-            *(LONG *)(p + 32) = 1;             // DLSSGMode::eOn
-            LONG escribir = g_force_generated;
-            // A la API se le declara el TECHO del ciclo, no la cuenta por frame.
-            //
-            // El plugin dimensiona sus recursos por sub-frame con lo que recibe
-            // aca. Mandandole la cuenta por frame la reserva se achica cada vez
-            // que el ciclo pasa por el bloque bajo, y el byte del bound -- que
-            // sigue la cadencia -- queda por encima de la reserva. Eso es el
-            // crash: lectura de una ranura sin inicializar, [nulo+0x40] en
-            // sl.dlss_g +0x3ED6F, del dump de UE4SS.
-            //
-            // Medido antes de esto, con objetivo 300: la cuenta de la API
-            // oscilando 1 -> 5 -> 1 y el multiplicador topado en 2.8. Con el
-            // techo declarado quedo estable en 3.00.
-            {
-                // El techo del MODO, no el del ciclo.
-                //
-                // g_ciclo_techo sube y baja con el ratio, asi que la reserva se
-                // mueve con el. Para fraccional y DYNAMIC el techo es 5 -- la
-                // cuenta mas alta que pueden llegar a pedir -- y declarandolo
-                // una vez la reserva queda fija y ninguna llamada la achica.
-                // El techo del ciclo, no un 5 fijo: declarar 5 siempre dejo
-                // la reserva quieta pero clavo el multiplicador en 6.00 --
-                // objetivo 150, entregadas 174. El desfasaje lo resuelve el
-                // recorte del byte contra la reserva viva, no fijar la reserva.
-                //
-                // Todo esto vale mientras la cuenta de la API sea la RESERVA y
-                // el byte por frame sea la generacion. Con nuestro snippet eso
-                // ya no es asi: la cuenta ES el multiplicador y es lo que se
-                // entrega. Subirla al techo del ciclo clava el ratio ahi.
-                //
-                // Medido: pedido 2.55x, la cadencia alternando 2 y 3 como
-                // corresponde, y entregado 3.00 en las 27 ventanas -- mediana,
-                // p90 y maximo iguales, que es la firma de un valor constante y
-                // no de una media. La cuenta a la API era 3 en las 27. El byte
-                // tambien era 3 en las 27, porque lo escribe set_count_now con
-                // g_api_aplicada pegado a la llamada.
-                //
-                // Asi que con la semantica nueva no se sube nada: se declara la
-                // cuenta del bloque y el fraccional sale de alternarla.
-                if (!cuenta_es_multiplicador()) {
-                    const LONG techo = g_ciclo_techo;
-                    if (techo > escribir && techo <= (g_seis ? 6 : 5)) escribir = techo;
-                }
-            }
-            if (g_ceilfirst) {
-                const LONG techo = g_ciclo_techo;
-                if (!g_interp_on && techo > escribir && techo <= ((g_seis || cuenta_es_multiplicador()) ? 6 : 5)) {
-                    escribir = techo;
-                    static bool dicho = false;
-                    if (!dicho) {
-                        dicho = true;
-                        log_num("A1: declarando el techo del ciclo mientras apagado ",
-                                (unsigned)techo);
-                    }
-                }
-            }
-            // Freno de seguridad. Sin el parche del contador no podemos repartir
-            // la cuenta por frame, asi que pedir por la API mas de lo que el
-            // juego pidio no compra nada y arriesga la reserva. Se espeja.
-            if (!g_wic_ok) {
-                // La cuenta del juego esta en la semantica del snippet CON EL QUE
-                // SE COMPILO, que no es el que le pusimos.
-                //
-                // Halo pide `count 1` -- las 66 veces de la sesion. Contra su
-                // propio nvngx_dlssg de julio eso es UN FRAME GENERADO, o sea
-                // 2X. Con nuestro snippet la cuenta es el multiplicador, asi que
-                // ese mismo 1 se lee como 1X: le entregamos la mitad de lo que
-                // pidio, y en su propia semantica.
-                //
-                // Sustituir la base cambia el significado del numero que el
-                // juego escribe. Traducirlo es parte de sustituirla; no hacerlo
-                // es dejar al juego hablando un idioma y al plugin leyendo otro.
-                const LONG suyo = cuenta_es_multiplicador()
-                                      ? g_last_seen_generated + 1
-                                      : g_last_seen_generated;
-                if (suyo < 1 || suyo > 6) {
-                    // Nunca vimos que cuenta pide el juego -- en Halo no hay una
-                    // sola linea de "the game itself last asked for" en toda la
-                    // corrida. Sin ese dato no hay a que espejarse, asi que no se
-                    // escribe la cuenta: se deja la del juego intacta. Poner un
-                    // valor de reserva seria forzar a ciegas, que es exactamente
-                    // lo que hizo crashear a ese juego.
-                    static bool dicho_nada = false;
-                    if (!dicho_nada) {
-                        dicho_nada = true;
-                        log_line("freno: sin parche y sin saber que pide el juego, "
-                                 "no se toca la cuenta");
-                    }
-                    // El modo tambien vuelve como estaba: unas lineas mas
-                    // arriba se escribio eOn, y dejarlo puesto con una cuenta
-                    // que no elegimos seria encender la generacion por nuestra
-                    // cuenta en un plugin que no sabemos manejar.
-                    *(LONG *)(p + 32) = *savedMode;
-                    return;
-                }
-                const LONG tope = suyo;
-                if (escribir > tope) {
-                    static LONG dicho = -1;
-                    if (dicho != tope) {
-                        dicho = tope;
-                        log_num("freno: sin parche, la cuenta se limita a la del juego ",
-                                (unsigned)tope);
-                    }
-                    escribir = tope;
-                }
-            }
-            // Lo que realmente se escribe, y contra que se recorta.
-            {
-                static LONG dicho_e = -1, dicho_t = -1, dicho_g = -1;
-                if (dicho_e != escribir || dicho_t != kTope || dicho_g != g_force_generated) {
-                    dicho_e = escribir; dicho_t = kTope; dicho_g = g_force_generated;
-                    log_num("force_into: g_force_generated ", (unsigned)g_force_generated);
-                    log_num("  escribir ", (unsigned)escribir);
-                    log_num("  kTope ", (unsigned)kTope);
-                    log_num("  g_max_declarado ", (unsigned)g_max_declarado);
-                    log_num("  queda ", (unsigned)(escribir > kTope ? kTope : escribir));
-                }
-            }
-            {
-                const LONG queda = escribir > kTope ? kTope : escribir;
-                // El invariante, en el unico lugar por el que pasa todo.
-                //
-                // Con la semantica de multiplicador una cuenta menor a 2 es 1X:
-                // la generacion queda encendida y no produce un solo frame. Eso
-                // no es un modo, es un defecto, y hasta ahora pasaba EN SILENCIO
-                // -- en Halo fueron 26 escrituras de cuenta 1 sin una linea que
-                // lo dijera, y hubo que deducirlo comparando modos.
-                //
-                // Se corrige Y se deja constancia, ahora que se sabe de donde
-                // viene: es la semilla. La seleccion de DYNAMIC/CUSTOM pone
-                // g_force_generated = 1 al restaurar los ajustes, que era 2X con
-                // la semantica vieja y es 1X con la nueva -- y ahi la semantica
-                // todavia no se sabe, porque el snippet no mapeo. El banco lo
-                // muestra: a los 3.3 s cuenta 1 con g_dyn_target ya en 255, y la
-                // cadencia recien toma el control a los 4.9 s. Segundo y medio
-                // pidiendo 1X. En Halo no se recuperaba nunca.
-                //
-                // 2 es el piso de cualquier modo que genere. La linea queda
-                // igual: si esto aparece seguido, el culpable es otro y hay que
-                // ir a buscarlo.
-                //
-                // NO corrige cuando manda el freno. Sin el parche de la cuenta
-                // no podemos repartirla por frame, asi que el codigo espeja a
-                // proposito lo que pide el juego -- y forzar un valor de reserva
-                // ahi es, palabras del comentario de ese freno, exactamente lo
-                // que hizo crashear a Halo.
-                //
-                // Lo aprendi rompiendolo: la version anterior de esta linea
-                // sobreescribia el freno a 2 y Halo volvio con 24
-                // congelamientos, a cuatro y cinco presentaciones de un cambio
-                // de cuenta y con el byte vivo en 0. Ahi solo se deja constancia.
-                if (cuenta_es_multiplicador() && queda < 2 && g_force_sel >= 2) {
-                    if (g_wic_ok) escribir = 2;
-                    static LONG dicho = -1;
-                    if (dicho != queda) {
-                        dicho = queda;
-                        log_num("INVARIANTE ROTO: cuenta ", (unsigned)queda);
-                        log_line("  con la semantica de multiplicador eso es 1X: no genera nada");
-                        log_num("  seleccion ", (unsigned)g_force_sel);
-                        log_num("  g_force_generated ", (unsigned)g_force_generated);
-                        log_num("  g_dyn_target x100 ", (unsigned)g_dyn_target);
-                        log_num("  kTope ", (unsigned)kTope);
-                        log_line(g_wic_ok
-                                     ? "  se escribe 2, que es el piso de un modo que genera"
-                                     : "  manda el freno (sin parche de la cuenta): NO se corrige");
-                    }
-                }
-                *(LONG *)(p + 36) = escribir > kTope ? kTope : escribir;
-            }
-        }
-    } else if (false) {
-        // eDynamic, with our own frame-rate target.
-        // Both checks: the plugin knows the mode, and this particular options
-        // struct is new enough to carry it.
-        if (g_dynamic_known && g_opts_version >= 5) {
-            if (g_dyn_said != 1) {
-                g_dyn_said = 1;
-                log_num("dynamic: eDynamic written, target fps ", (unsigned)g_dyn_target);
-            }
-            *(LONG *)(p + 32) = 3;
-            // Only from version 5: on an older struct the allocation does not
-            // reach this field and writing it would land on whatever follows.
-            g_saved_target = *(float *)(p + 116);
-            *(float *)(p + 116) = (float)g_dyn_target;
-            g_target_written = true;
-        } else if (!g_dynamic_known && g_dyn_said != 2) {
-            g_dyn_said = 2;
-            log_line("dynamic: NOT applied -- this plugin does not know eDynamic");
-        }
-        // An older struct is not a dead end any more: the call is remade from
-        // a version 5 copy in options_for_call.
-    } else if (sel >= 2) {
-        *(LONG *)(p + 32) = 1;                 // DLSSGMode::eOn
-        // La rama de modos fijos calcula la cuenta de `sel` y NO mira
-        // g_force_generated. Ese fue el escritor que faltaba: con nuestro
-        // snippet la cuenta es el multiplicador, no los generados, y este
-        // `sel - 1` dejaba 2X pidiendo 1 -- o sea nada.
-        // Ver cuenta_es_multiplicador.
-        {
-            const LONG c = cuenta_es_multiplicador() ? sel : sel - 1;
-            *(LONG *)(p + 36) = c > kTope ? kTope : c;
+
+    if (s.a1_declaro) {
+        static bool dicho = false;
+        if (!dicho) {
+            dicho = true;
+            log_num("A1: declarando el techo del ciclo mientras apagado ",
+                    (unsigned)s.a1_techo);
         }
     }
+    if (s.razon == pol::Razon::FRENO_SIN_DATO) {
+        // Nunca vimos que cuenta pide el juego. Sin ese dato no hay a que
+        // espejarse: ni la cuenta ni el modo se tocan. Poner un valor de reserva
+        // seria forzar a ciegas, que es lo que hizo crashear a Halo.
+        static bool dicho_nada = false;
+        if (!dicho_nada) {
+            dicho_nada = true;
+            log_line("freno: sin parche y sin saber que pide el juego, "
+                     "no se toca la cuenta");
+        }
+        return;
+    }
+    if (s.freno_limito) {
+        static LONG dicho = -1;
+        if (dicho != s.freno_tope) {
+            dicho = s.freno_tope;
+            log_num("freno: sin parche, la cuenta se limita a la del juego ",
+                    (unsigned)s.freno_tope);
+        }
+    }
+    if (s.razon == pol::Razon::DYN_ON) {
+        // Lo que realmente se escribe, y contra que se recorta.
+        static LONG dicho_e = -1, dicho_t = -1, dicho_g = -1;
+        if (dicho_e != s.escribir || dicho_t != kTope || dicho_g != g_force_generated) {
+            dicho_e = s.escribir; dicho_t = kTope; dicho_g = g_force_generated;
+            log_num("force_into: g_force_generated ", (unsigned)g_force_generated);
+            log_num("  escribir ", (unsigned)s.escribir);
+            log_num("  kTope ", (unsigned)kTope);
+            log_num("  g_max_declarado ", (unsigned)g_max_declarado);
+            log_num("  queda ", (unsigned)s.queda);
+        }
+    }
+    if (s.invariante_roto) {
+        // Con la semantica de multiplicador una cuenta menor a 2 es 1X. Se
+        // corrige solo cuando manda el parche; con el freno se deja constancia
+        // (corregirlo ahi congelo Halo 24 veces). Si esto aparece seguido, el
+        // culpable es otro y hay que ir a buscarlo.
+        static LONG dicho = -1;
+        if (dicho != s.queda) {
+            dicho = s.queda;
+            log_num("INVARIANTE ROTO: cuenta ", (unsigned)s.queda);
+            log_line("  con la semantica de multiplicador eso es 1X: no genera nada");
+            log_num("  seleccion ", (unsigned)g_force_sel);
+            log_num("  g_force_generated ", (unsigned)g_force_generated);
+            log_num("  g_dyn_target x100 ", (unsigned)g_dyn_target);
+            log_num("  kTope ", (unsigned)kTope);
+            log_line(s.invariante_corregido
+                         ? "  se escribe 2, que es el piso de un modo que genera"
+                         : "  manda el freno (sin parche de la cuenta): NO se corrige");
+        }
+    }
+    if (s.escribir_modo) *(LONG *)(p + 32) = (LONG)s.modo;
+    if (s.escribir_cuenta) *(LONG *)(p + 36) = (LONG)s.cuenta;
 }
 
 // What the last capture was taken from. A game may call slDLSSGSetOptions
