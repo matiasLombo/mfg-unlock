@@ -8282,12 +8282,23 @@ static void copia_que_ejecuta(const void *fn, const char *nombre) {
     static bool dicho = false;
     if (dicho || fn == nullptr) return;
     const unsigned char *p = (const unsigned char *)fn;
+    // Dos pasadas: primero entre las que siguen mapeadas.
+    //
+    // Halo descarga y vuelve a cargar sl.dlss_g en la MISMA base, asi que dos
+    // entradas del registro comparten rango y la vieja -- muerta -- ganaba el
+    // match. El instrumento lo delato en su primera corrida: dijo "copia EJECUTA
+    // indice 0, sigue mapeada 0" junto a "copia inactiva indice 1, sigue mapeada
+    // 1", que es una contradiccion. Un puntero que el interposer acaba de
+    // resolver no puede caer en un modulo descargado.
     int cual = -1;
-    for (int i = 0; i < g_copias_n; ++i) {
-        if (g_copias[i].base == nullptr) continue;
-        if (p >= g_copias[i].base && p < g_copias[i].base + g_copias[i].largo) {
-            cual = i;
-            break;
+    for (int pasada = 0; pasada < 2 && cual < 0; ++pasada) {
+        for (int i = 0; i < g_copias_n; ++i) {
+            if (g_copias[i].base == nullptr) continue;
+            if (pasada == 0 && !g_copias[i].viva) continue;
+            if (p >= g_copias[i].base && p < g_copias[i].base + g_copias[i].largo) {
+                cual = i;
+                break;
+            }
         }
     }
     dicho = true;
