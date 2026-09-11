@@ -39,12 +39,12 @@ static void arm_frametoken_hook(void);
 // Escribir en una copia que no se usa es inofensivo: es un byte en su .text que
 // nadie lee. Buscar cual es la buena seria adivinar; escribir en todas no.
 static const int kMaxSites = 4;
-static void site_add(volatile unsigned char **lista, int *n, volatile unsigned char *q) {
-    for (int i = 0; i < *n; ++i) if (lista[i] == q) return;
-    if (*n < kMaxSites) lista[(*n)++] = q;
+static void site_add(volatile unsigned char **list, int *n, volatile unsigned char *q) {
+    for (int i = 0; i < *n; ++i) if (list[i] == q) return;
+    if (*n < kMaxSites) list[(*n)++] = q;
 }
-static void site_write(volatile unsigned char **lista, int n, unsigned char v) {
-    for (int i = 0; i < n; ++i) if (lista[i] != nullptr) *lista[i] = v;
+static void site_write(volatile unsigned char **list, int n, unsigned char v) {
+    for (int i = 0; i < n; ++i) if (list[i] != nullptr) *list[i] = v;
 }
 static volatile unsigned char *g_wic_sites[kMaxSites] = { nullptr, nullptr, nullptr, nullptr };
 static int g_wic_n = 0;
@@ -72,15 +72,15 @@ static int g_wic_n = 0;
 // escriben de atras hacia adelante para que el opcode quede ultimo: asi ningun
 // hilo puede leer una instruccion a medio formar.
 static volatile LONG g_wic_set = 1;   // el parche arranca aplicado
-static void wic_patch(bool poner) {
-    if ((g_wic_set != 0) == poner) return;
+static void wic_patch(bool put) {
+    if ((g_wic_set != 0) == put) return;
     for (int i = 0; i < g_wic_n; ++i) {
         volatile unsigned char *imm = g_wic_sites[i];
         if (imm == nullptr) continue;
         unsigned char *q = (unsigned char *)(imm - 1);   // el opcode
         DWORD old = 0;
         if (!VirtualProtect(q, 3, PAGE_EXECUTE_READWRITE, &old)) continue;
-        if (poner) {
+        if (put) {
             q[2] = 0x58;                 // pop rax
             // La semilla es lo que el plugin TIENE, no 1.
             //
@@ -104,8 +104,8 @@ static void wic_patch(bool poner) {
         }
         VirtualProtect(q, 3, old, &old);
     }
-    g_wic_set = poner ? 1 : 0;
-    log_line(poner ? "wic: parche PUESTO (modo fraccional)"
+    g_wic_set = put ? 1 : 0;
+    log_line(put ? "wic: parche PUESTO (modo fraccional)"
                    : "wic: parche SACADO (modo entero, manda la API)");
 }
 
@@ -751,9 +751,9 @@ static int patch_subframe_count(unsigned char *base) {
     if (g_wic_mode) {
         // The comparison patches are exactly what this replaces; leaving
         // them in would put the bound back out of step with the field.
-        const int wic_sitios = patch_work_item_count(text, len);
-        g_wic_sitios_ultima = wic_sitios;
-        g_vio_alguna_copia = true;
+        const int wic_sites_n = patch_work_item_count(text, len);
+        g_wic_sites_last = wic_sites_n;
+        g_saw_any_copy = true;
         // Refleja ESTA copia, no la peor que se haya visto nunca.
         //
         // Antes solo se apagaba. Una copia que no nos interesa -- el sl.dlss_g
@@ -763,11 +763,11 @@ static int patch_subframe_count(unsigned char *base) {
         // 0, y despues sites 1 otra vez, con el freno activo hasta el final.
         //
         // Un estado que solo sabe empeorar no es un estado, es una cicatriz.
-        g_wic_ok = wic_sitios > 0;
-        log_line(wic_sitios > 0
+        g_wic_ok = wic_sites_n > 0;
+        log_line(wic_sites_n > 0
                  ? "  PARCHE DE CUENTA: engancho en esta copia"
                  : "  PARCHE DE CUENTA: NO engancho en esta copia");
-        if (wic_sitios == 0) {
+        if (wic_sites_n == 0) {
             // Nothing downstream reports this on its own: set_count_now would
             // simply do nothing, the run would execute at the fixed API ceiling,
             // and the only outward sign would be the absence of the "fractional:"
@@ -862,18 +862,18 @@ static int patch_subframe_count(unsigned char *base) {
     // present - will skip the present". Those skipped presents are the frame
     // rate collapsing; the cadence was never the problem.
     {
-        size_t mfound = 0, mat = 0;
+        size_t meter_found = 0, meter_at = 0;
         for (size_t i = 0; i + 12 <= len; ++i) {
             if (text[i] != 0x44 || text[i+1] != 0x8B || text[i+2] != 0xCB) continue;
             if (text[i+3] != 0x4D || text[i+4] != 0x85 || text[i+5] != 0xED) continue;
             if (text[i+6] != 0x74) continue;
             if (text[i+8] != 0x45 || text[i+9] != 0x8B ||
                 text[i+10] != 0x4D || text[i+11] != 0x00) continue;
-            ++mfound;
-            mat = i;
+            ++meter_found;
+            meter_at = i;
         }
-        if (mfound == 1) {
-            unsigned char *m = text + mat + 8;
+        if (meter_found == 1) {
+            unsigned char *m = text + meter_at + 8;
             DWORD om = 0;
             if (VirtualProtect(m, 4, PAGE_EXECUTE_READWRITE, &om)) {
                 m[0] = 0x6A;    // push imm8
@@ -887,7 +887,7 @@ static int patch_subframe_count(unsigned char *base) {
                 log_line("  metering count made writable too");
             }
         } else {
-            log_num("  ! metering count site not unique, sites: ", (unsigned)mfound);
+            log_num("  ! metering count site not unique, sites: ", (unsigned)meter_found);
         }
     }
 
@@ -964,18 +964,18 @@ static int patch_subframe_count(unsigned char *base) {
     // One byte; the branch and everything after it stay where they are.
     // Unique across the corpus from 2.8.0 through 2.13.
     {
-        size_t vfound = 0, vat = 0;
+        size_t valid_found = 0, valid_at = 0;
         for (size_t i = 0; i + 10 <= len; ++i) {
             if (text[i] != 0x44 || text[i + 1] != 0x8B ||
                 text[i + 2] != 0x47 || text[i + 3] != 0x24) continue;
             if (text[i + 4] != 0x41 || text[i + 5] != 0x83 ||
                 text[i + 6] != 0xF8 || text[i + 7] != 0x01) continue;
             if (text[i + 8] != 0x0F || text[i + 9] != 0x83) continue;
-            ++vfound;
-            vat = i;
+            ++valid_found;
+            valid_at = i;
         }
-        if (vfound == 1) {
-            unsigned char *v = text + vat + 7;
+        if (valid_found == 1) {
+            unsigned char *v = text + valid_at + 7;
             DWORD ov = 0;
             if (VirtualProtect(v, 1, PAGE_EXECUTE_READWRITE, &ov)) {
                 *v = 0;
@@ -983,21 +983,21 @@ static int patch_subframe_count(unsigned char *base) {
                 log_line("  zero generated frames accepted (ratios under 2x)");
             }
         } else {
-            log_num("  ! zero-count validation not unique, sites: ", (unsigned)vfound);
+            log_num("  ! zero-count validation not unique, sites: ", (unsigned)valid_found);
         }
     }
 
-    size_t g_found = 0, g_at = 0;
+    size_t guard_found = 0, guard_at = 0;
     for (size_t i = 0; i + 10 <= len; ++i) {
         if (text[i] != 0x8B || text[i + 1] != 0xFB) continue;          // mov edi, ebx
         if (text[i + 2] != 0x41 || text[i + 3] != 0x39 ||
             text[i + 4] != 0x5D || text[i + 5] != 0x04) continue;      // cmp [r13+4], ebx
         if (text[i + 6] != 0x0F || text[i + 7] != 0x86) continue;      // jbe rel32
-        ++g_found;
-        g_at = i;
+        ++guard_found;
+        guard_at = i;
     }
-    if (g_found == 1) {
-        unsigned char *q = text + g_at + 2;
+    if (guard_found == 1) {
+        unsigned char *q = text + guard_at + 2;
         DWORD o2 = 0;
         if (VirtualProtect(q, 6, PAGE_EXECUTE_READWRITE, &o2)) {
             q[0] = 0x83;    // cmp ebx, imm8
@@ -1011,7 +1011,7 @@ static int patch_subframe_count(unsigned char *base) {
             site_add(g_imm2_sites, &g_imm2_n, q + 2);
         }
     } else {
-        log_num("  ! loop entry guard not unique, sites: ", (unsigned)g_found);
+        log_num("  ! loop entry guard not unique, sites: ", (unsigned)guard_found);
     }
     return 1;
 }
@@ -1230,8 +1230,8 @@ static int g_mfcmax = 0;          // 0 = no tocar; si no, el valor a escribir
 //
 // El inmediato del `cmp` puede estar ya en cero cuando esto corre, asi que el
 // patron no se ancla en 0x1b0: `81 FD` + imm32 + `0F 8C` + rel32 + `BF 05...`.
-static int patch_snippet_max(unsigned char *base, int valor) {
-    if (valor < 2 || valor > 8) return 0;
+static int patch_snippet_max(unsigned char *base, int value) {
+    if (value < 2 || value > 8) return 0;
     auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
     auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
@@ -1258,7 +1258,7 @@ static int patch_snippet_max(unsigned char *base, int valor) {
             unsigned char *byte = text + at[k] + sites::kSnippetMaxEdi.write_at;
             DWORD old = 0;
             if (!VirtualProtect(byte, 1, PAGE_EXECUTE_READWRITE, &old)) continue;
-            *byte = (unsigned char)valor;
+            *byte = (unsigned char)value;
             VirtualProtect(byte, 1, old, &old);
             ++hits;
         }
@@ -1293,7 +1293,7 @@ static int patch_snippet_max(unsigned char *base, int valor) {
             unsigned char *byte = text + at + sites::kSnippetMaxEsi.write_at;
             DWORD old = 0;
             if (VirtualProtect(byte, 1, PAGE_EXECUTE_READWRITE, &old)) {
-                *byte = (unsigned char)valor;
+                *byte = (unsigned char)value;
                 VirtualProtect(byte, 1, old, &old);
                 ++hits;
             }
@@ -1368,7 +1368,7 @@ static int patch_multiframe_max(unsigned char *base) {
 // con 6 ranuras reales detras. Es mejor apuesta, no una certeza.
 // g_seis se declara arriba, junto a g_seis_sitios.
 
-static int patch_tope_seis(unsigned char *base) {
+static int patch_cap_six(unsigned char *base) {
     if (!g_six) return 0;
     auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;

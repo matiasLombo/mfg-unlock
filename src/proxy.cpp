@@ -136,11 +136,11 @@ static bool g_frac_enabled = false;   // mfg-frac.txt
 // presenta por un camino sin nada que presentar. El dump del crash de Halo cae
 // justo dentro de esa copia: 0xC0000005 en 190_E658703.dll +0x3F2E9.
 static bool g_wic_ok = true;
-static bool g_vio_alguna_copia = false;
+static bool g_saw_any_copy = false;
 // Sitios del parche de la cuenta de la ULTIMA copia parcheada. La cuenta se
 // parchea adentro de patch_subframe_count, y el observador de M1 la necesita
 // por copia, no acumulada.
-static int g_wic_sitios_ultima = -1;
+static int g_wic_sites_last = -1;
 static bool g_quiet = false;          // mfg-quiet.txt: no per-window logging
 static bool g_nullalt = false;        // mfg-nullalt.txt: alternate between equals
 static bool g_slowalt = false;        // mfg-slowalt.txt
@@ -561,7 +561,7 @@ static unsigned hk_slInit(void *pref, unsigned long long sdk) {
         // apuntemos aca.
         if (g_pathsplugins) {
             static wchar_t buf[MAX_PATH];
-            static const wchar_t *lista[1];
+            static const wchar_t *list[1];
             static bool armado = false;
             if (!armado) {
                 const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH - 40);
@@ -570,12 +570,12 @@ static unsigned hk_slInit(void *pref, unsigned long long sdk) {
                     const wchar_t *cola = L"\\mfg-unlock\\sdk\\2.12";
                     for (int i = 0; cola[i] != 0; ++i) buf[k++] = cola[i];
                     buf[k] = 0;
-                    lista[0] = buf;
+                    list[0] = buf;
                     armado = true;
                 }
             }
             if (armado) {
-                *(const wchar_t ***)(p + 40) = lista;
+                *(const wchar_t ***)(p + 40) = list;
                 *(unsigned *)(p + 48) = 1;
                 *(unsigned long long *)(p + kPrefFlags) =
                     f & ~((1ull << 3) | (1ull << 6));   // eAllowOTA, eLoadDownloadedPlugins
@@ -2880,15 +2880,15 @@ static void emit_verdict_if_due(void) {
 }
 // ---------------------------------------------------------------------------
 
-static void sitio_drop(volatile unsigned char **lista, int *n,
+static void sitio_drop(volatile unsigned char **list, int *n,
                        const unsigned char *base, size_t largo) {
     int w = 0;
     for (int i = 0; i < *n; ++i) {
-        const unsigned char *q = (const unsigned char *)lista[i];
+        const unsigned char *q = (const unsigned char *)list[i];
         const bool dentro = q >= base && q < base + largo;
-        if (!dentro) lista[w++] = lista[i];
+        if (!dentro) list[w++] = list[i];
     }
-    for (int i = w; i < *n; ++i) lista[i] = nullptr;
+    for (int i = w; i < *n; ++i) list[i] = nullptr;
     *n = w;
 }
 
@@ -2987,7 +2987,7 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         {
             g_dlssg_base = reinterpret_cast<const unsigned char *>(d->DllBase);
             if (g_six) {
-                const int t6 = patch_tope_seis(reinterpret_cast<unsigned char *>(d->DllBase));
+                const int t6 = patch_cap_six(reinterpret_cast<unsigned char *>(d->DllBase));
                 log_num("  tope del plugin subido a 6, sitios: ", (unsigned)t6);
                 if (t6 < 2) log_line("  ! faltan sitios: uno solo no alcanza");
             }
@@ -3011,8 +3011,8 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
                 }
             }
             copia_registrar(reinterpret_cast<const unsigned char *>(d->DllBase),
-                            (size_t)d->SizeOfImage, men_c, g_wic_sitios_ultima, n);
-            g_wic_sitios_ultima = -1;
+                            (size_t)d->SizeOfImage, men_c, g_wic_sites_last, n);
+            g_wic_sites_last = -1;
         }
         if (g_meter_off) {
             const int mo = patch_metering_off(reinterpret_cast<unsigned char *>(d->DllBase));
