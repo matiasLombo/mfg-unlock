@@ -2088,8 +2088,14 @@ static unsigned hk_slGetFeatureFunction(unsigned feature, const char *name, void
     // dentro de UNA de las copias mapeadas, y esa es la que corre. Es un hecho
     // observado, no una deduccion por orden de carga -- que es justo lo que
     // fallaba: g_dlssg_base se asigna a la ULTIMA copia mapeada, no a la viva.
+    // slDLSSG, no slDL. El filtro corto delataba a la copia equivocada: matchea
+    // tambien slDLSS* -- la super resolucion, que vive en sl.dlss.dll -- y en
+    // GTA V se engancho a slDLSSGetOptimalSettings, cuyo puntero no cae en
+    // ninguna copia de sl.dlss_g porque es de otro modulo. El log lo dijo solo:
+    // "el puntero NO cae en ninguna de las copias registradas".
     if (r == 0 && name != nullptr && fn != nullptr &&
-        name[0] == 's' && name[1] == 'l' && name[2] == 'D' && name[3] == 'L')
+        name[0] == 's' && name[1] == 'l' && name[2] == 'D' && name[3] == 'L' &&
+        name[4] == 'S' && name[5] == 'S' && name[6] == 'G')
         copia_que_ejecuta(fn, name);
     if (r == 0 && name != nullptr && fn != nullptr &&
         strcmp(name, "slDLSSGGetState") == 0 && g_orig_getstate == nullptr) {
@@ -8324,6 +8330,12 @@ static void copia_que_ejecuta(const void *fn, const char *nombre) {
     dicho = true;
     g_copia_ejecuta = cual;
     g_ejecuta_resuelto = true;
+    // La fase se decide con este dato, y no siempre llega antes del primer
+    // frame token: en GTA V el token fue a los 34 s y esto a los 38. Asumir un
+    // orden que el juego no garantiza es la misma clase de error que decidir la
+    // copia viva por orden de mapeo. Se re-evalua ahora que el dato existe.
+    g_fase = (LONG)Fase::ARMADO;
+    evaluar_invariantes();
     log_line("--- CAPA 0: que copia de sl.dlss_g ejecuta ---");
     log_line(nombre);
     if (cual < 0) {
