@@ -32,71 +32,71 @@
 // distingue (Halo para 1, cualquiera con la base sustituida y sel 0 para 2).
 #pragma once
 
-namespace pol {
+namespace policy {
 
 // En que unidades habla cada lado. No es lo mismo el dialecto del JUEGO --
 // fijado por el snippet contra el que se compilo -- que el nuestro, que lo fija
 // el snippet que cargamos. Confundirlos es el fallo 2.
-enum class Dialecto { GENERADOS, MULTIPLICADOR };
+enum class Dialect { GENERATED, MULTIPLIER };
 
 // Los modos de DLSSGMode que nos importan. eAuto lo decide el juego.
-enum Modo { kOff = 0, kOn = 1, kAuto = 2 };
+enum Mode { kOff = 0, kOn = 1, kAuto = 2 };
 
-struct PedidoJuego {
-    long modo;      // lo que el juego escribio en la struct
-    long cuenta;    // en SU dialecto
+struct GameRequest {
+    long mode;      // lo que el juego escribio en la struct
+    long count;    // en SU dialecto
 };
 
 struct Decision {
-    long objetivo_x100;   // 0 = no hay modo fijo ni controlador: se respeta al juego
-    long tope;            // el maximo que el binario vivo soporta
+    long target_x100;   // 0 = no hay modo fijo ni controlador: se respeta al juego
+    long cap;            // el maximo que el binario vivo soporta
 };
 
-struct PedidoPlugin {
-    long modo;
-    long cuenta;
+struct PluginRequest {
+    long mode;
+    long count;
 };
 
-inline long a_multiplicador(long cuenta, Dialecto d) {
-    if (d == Dialecto::MULTIPLICADOR) return cuenta;
-    return cuenta + 1;              // generados -> multiplicador
+inline long to_multiplier(long count, Dialect d) {
+    if (d == Dialect::MULTIPLIER) return count;
+    return count + 1;              // generados -> multiplicador
 }
 
-inline long desde_multiplicador(long mult, Dialecto d) {
-    if (d == Dialecto::MULTIPLICADOR) return mult;
+inline long from_multiplier(long mult, Dialect d) {
+    if (d == Dialect::MULTIPLIER) return mult;
     return mult - 1;
 }
 
-inline long acotar(long v, long lo, long hi) {
+inline long clamp(long v, long lo, long hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
-inline PedidoPlugin resolve(PedidoJuego g, Dialecto dial_juego,
-                            Dialecto dial_nuestro, Decision dec) {
-    PedidoPlugin out;
+inline PluginRequest resolve(GameRequest g, Dialect game_dialect,
+                            Dialect our_dialect, Decision dec) {
+    PluginRequest out;
     // EL MODO NO SE TOCA.
     //
     // Es passthrough por regla, no por rama. Si el juego apago la generacion,
     // apagada queda: pelearle el eOff es el fallo 3, y no hay objetivo que
     // justifique encender lo que el juego decidio apagar.
-    out.modo = g.modo;
-    if (g.modo == kOff) {
-        out.cuenta = 0;
+    out.mode = g.mode;
+    if (g.mode == kOff) {
+        out.count = 0;
         return out;
     }
 
     // LA CUENTA SE TRADUCE, NO SE REEMPLAZA.
-    const long mult_pedido = a_multiplicador(g.cuenta, dial_juego);
+    const long requested_mult = to_multiplier(g.count, game_dialect);
     // Sin objetivo se respeta lo que pidio el juego, traducido. Esa es tambien
     // la semilla de DYNAMIC: nunca un literal (fallo 4).
-    long mult_objetivo = dec.objetivo_x100 > 0
-                             ? (dec.objetivo_x100 + 50) / 100
-                             : mult_pedido;
+    long target_mult = dec.target_x100 > 0
+                             ? (dec.target_x100 + 50) / 100
+                             : requested_mult;
     // El piso es 2: con la semantica de multiplicador, 1 es "generacion
     // encendida produciendo nada", que no es lo que pidio ningun modo.
-    const long tope = dec.tope > 0 ? dec.tope : 6;
-    mult_objetivo = acotar(mult_objetivo, 2, tope);
-    out.cuenta = desde_multiplicador(mult_objetivo, dial_nuestro);
+    const long cap = dec.cap > 0 ? dec.cap : 6;
+    target_mult = clamp(target_mult, 2, cap);
+    out.count = from_multiplier(target_mult, our_dialect);
     return out;
 }
 

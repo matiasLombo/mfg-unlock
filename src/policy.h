@@ -17,128 +17,128 @@
 #pragma once
 #include "resolve.h"
 
-namespace pol {
+namespace policy {
 
 // Todo lo que force_into lee. Un campo por global, con el mismo significado.
-struct EntradaForce {
-    bool pasivo;                 // fase_pasiva()
-    bool juego_pidio_on;         // g_juego_pidio_on != 0
-    long juego_quiere;           // g_juego_quiere: -1 nunca dijo, 0 eOff, 1 eOn
+struct ForceInput {
+    bool passive;                 // fase_pasiva()
+    bool game_asked_on;         // g_juego_pidio_on != 0
+    long game_wants;           // g_juego_quiere: -1 nunca dijo, 0 eOff, 1 eOn
     long sel;                    // g_force_sel: 0 nada, 1 OFF, 2..6 fijo, 7/8 DYNAMIC
     long force_generated;        // g_force_generated, ya en NUESTRO dialecto
-    bool multiplicador;          // cuenta_es_multiplicador()
-    long ciclo_techo;            // g_ciclo_techo
-    bool seis;                   // g_seis
+    bool multiplier;          // cuenta_es_multiplicador()
+    long cycle_ceiling;            // g_ciclo_techo
+    bool six;                   // g_seis
     bool ceilfirst;              // g_ceilfirst (mfg-ceilfirst.txt)
     bool interp_on;              // g_interp_on != 0
     bool wic_ok;                 // g_wic_ok: el parche de la cuenta esta puesto
     long last_seen_generated;    // g_last_seen_generated: lo que el juego escribio
-    long tope;                   // tope_cuenta()
+    long cap;                   // tope_cuenta()
 };
 
 // Las mismas constantes de overlay.h, sin arrastrar ese header al host.
 enum { kSelOff = 1, kSelDyn = 7, kSelDynFut = 8 };
 
-enum class Razon {
-    PASIVO,          // no se reescribe nada: topologia rota
-    JUEGO_APAGO,     // el juego pidio eOff despues de haber pedido eOn
-    NADA,            // sel 0: no hay seleccion
+enum class Reason {
+    PASSIVE,          // no se reescribe nada: topologia rota
+    GAME_TURNED_OFF,     // el juego pidio eOff despues de haber pedido eOn
+    NONE,            // sel 0: no hay seleccion
     OFF,             // sel 1
     DYN_OFF,         // DYNAMIC con cuenta 0: eOff, no eOn con cero
     DYN_ON,          // DYNAMIC: eOn con la cuenta calculada
-    FRENO_SIN_DATO,  // sin parche y sin saber que pide el juego: no se toca
-    FIJO,            // sel 2..6
+    BRAKE_NO_DATA,  // sin parche y sin saber que pide el juego: no se toca
+    FIXED,            // sel 2..6
 };
 
-struct SalidaForce {
-    Razon razon;
-    bool escribir_modo;   long modo;
-    bool escribir_cuenta; long cuenta;
+struct ForceOutput {
+    Reason reason;
+    bool write_mode;   long mode;
+    bool write_count; long count;
     // Para las lineas de log de force_into, con sus mismas claves de dedupe.
-    bool a1_declaro;      long a1_techo;
-    bool freno_limito;    long freno_tope;
-    long escribir;        // lo que se iba a escribir antes del recorte a tope
-    long queda;           // min(escribir, tope) antes de la correccion del invariante
-    bool invariante_roto;
-    bool invariante_corregido;
+    bool a1_declared;      long a1_ceiling;
+    bool brake_limited;    long brake_cap;
+    long to_write;        // lo que se iba a escribir antes del recorte a tope
+    long remains;           // min(escribir, tope) antes de la correccion del invariante
+    bool invariant_broken;
+    bool invariant_fixed;
 };
 
-inline SalidaForce decidir_force(const EntradaForce &e) {
-    SalidaForce s{};
-    s.razon = Razon::NADA;
-    if (e.pasivo) { s.razon = Razon::PASIVO; return s; }
+inline ForceOutput decide_force(const ForceInput &e) {
+    ForceOutput s{};
+    s.reason = Reason::NONE;
+    if (e.passive) { s.reason = Reason::PASSIVE; return s; }
     // juego_apago_la_generacion(): la guarda de haberlo visto pedir eOn importa,
     // hay juegos que no llaman nunca con eOn y ahi respetar el eOff seria no
     // generar jamas.
-    if (e.juego_pidio_on && e.juego_quiere == 0) { s.razon = Razon::JUEGO_APAGO; return s; }
+    if (e.game_asked_on && e.game_wants == 0) { s.reason = Reason::GAME_TURNED_OFF; return s; }
 
     if (e.sel == kSelOff) {
-        s.razon = Razon::OFF;
-        s.escribir_modo = true; s.modo = kOff;
+        s.reason = Reason::OFF;
+        s.write_mode = true; s.mode = kOff;
         return s;
     }
     if (e.sel == kSelDyn || e.sel == kSelDynFut) {
         if (e.force_generated <= 0) {
-            s.razon = Razon::DYN_OFF;
-            s.escribir_modo = true; s.modo = kOff;
+            s.reason = Reason::DYN_OFF;
+            s.write_mode = true; s.mode = kOff;
             return s;
         }
-        s.razon = Razon::DYN_ON;
-        s.escribir_modo = true; s.modo = kOn;
-        long escribir = e.force_generated;
+        s.reason = Reason::DYN_ON;
+        s.write_mode = true; s.mode = kOn;
+        long to_write = e.force_generated;
         // Con la semantica de generados la cuenta de la API es la RESERVA y se
         // declara el techo del ciclo; con la de multiplicador la cuenta ES lo
         // que se entrega y no se sube.
-        if (!e.multiplicador) {
-            const long techo = e.ciclo_techo;
-            if (techo > escribir && techo <= (e.seis ? 6 : 5)) escribir = techo;
+        if (!e.multiplier) {
+            const long techo = e.cycle_ceiling;
+            if (techo > to_write && techo <= (e.six ? 6 : 5)) to_write = techo;
         }
         if (e.ceilfirst) {
-            const long techo = e.ciclo_techo;
-            if (!e.interp_on && techo > escribir &&
-                techo <= ((e.seis || e.multiplicador) ? 6 : 5)) {
-                escribir = techo;
-                s.a1_declaro = true; s.a1_techo = techo;
+            const long techo = e.cycle_ceiling;
+            if (!e.interp_on && techo > to_write &&
+                techo <= ((e.six || e.multiplier) ? 6 : 5)) {
+                to_write = techo;
+                s.a1_declared = true; s.a1_ceiling = techo;
             }
         }
         // Freno: sin el parche de la cuenta se espeja lo que pide el juego,
         // traducido de SU dialecto (el del snippet contra el que se compilo,
         // que force_into asume generados) al nuestro.
         if (!e.wic_ok) {
-            const long suyo = desde_multiplicador(
-                a_multiplicador(e.last_seen_generated, Dialecto::GENERADOS),
-                e.multiplicador ? Dialecto::MULTIPLICADOR : Dialecto::GENERADOS);
-            if (suyo < 1 || suyo > 6) {
+            const long theirs = from_multiplier(
+                to_multiplier(e.last_seen_generated, Dialect::GENERATED),
+                e.multiplier ? Dialect::MULTIPLIER : Dialect::GENERATED);
+            if (theirs < 1 || theirs > 6) {
                 // El modo vuelve como estaba: no se enciende la generacion con
                 // una cuenta que no elegimos.
-                s.razon = Razon::FRENO_SIN_DATO;
-                s.escribir_modo = false;
+                s.reason = Reason::BRAKE_NO_DATA;
+                s.write_mode = false;
                 return s;
             }
-            if (escribir > suyo) {
-                s.freno_limito = true; s.freno_tope = suyo;
-                escribir = suyo;
+            if (to_write > theirs) {
+                s.brake_limited = true; s.brake_cap = theirs;
+                to_write = theirs;
             }
         }
-        s.escribir = escribir;
-        s.queda = escribir > e.tope ? e.tope : escribir;
+        s.to_write = to_write;
+        s.remains = to_write > e.cap ? e.cap : to_write;
         // El invariante: con multiplicador, una cuenta menor a 2 es 1X. Se
         // corrige solo cuando manda el parche; con el freno solo se deja
         // constancia (corregirlo ahi fue lo que congelo Halo 24 veces).
-        if (e.multiplicador && s.queda < 2 && e.sel >= 2) {
-            s.invariante_roto = true;
-            if (e.wic_ok) { s.invariante_corregido = true; escribir = 2; }
+        if (e.multiplier && s.remains < 2 && e.sel >= 2) {
+            s.invariant_broken = true;
+            if (e.wic_ok) { s.invariant_fixed = true; to_write = 2; }
         }
-        s.escribir_cuenta = true;
-        s.cuenta = escribir > e.tope ? e.tope : escribir;
+        s.write_count = true;
+        s.count = to_write > e.cap ? e.cap : to_write;
         return s;
     }
     if (e.sel >= 2) {
-        s.razon = Razon::FIJO;
-        s.escribir_modo = true; s.modo = kOn;
-        const long c = e.multiplicador ? e.sel : e.sel - 1;
-        s.escribir_cuenta = true;
-        s.cuenta = c > e.tope ? e.tope : c;
+        s.reason = Reason::FIXED;
+        s.write_mode = true; s.mode = kOn;
+        const long c = e.multiplier ? e.sel : e.sel - 1;
+        s.write_count = true;
+        s.count = c > e.cap ? e.cap : c;
         return s;
     }
     return s;

@@ -32,7 +32,7 @@
 #include <cstdint>
 #include <MinHook.h>
 #include "cubins.h"
-#include "politica.h"
+#include "policy.h"
 #include "config.h"
 #include "diag.h"
 #include "controlador.h"
@@ -1139,25 +1139,25 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     // tools/test_politica.cpp. Aca queda lo que no es decision: leer los
     // globales, escribir la struct y loguear con el mismo dedupe de siempre.
     // Es el unico punto por el que pasa toda escritura de opciones.
-    pol::EntradaForce e{};
-    e.pasivo = fase_pasiva();
-    e.juego_pidio_on = g_juego_pidio_on != 0;
-    e.juego_quiere = g_juego_quiere;
+    policy::ForceInput e{};
+    e.passive = fase_pasiva();
+    e.game_asked_on = g_juego_pidio_on != 0;
+    e.game_wants = g_juego_quiere;
     e.sel = g_force_sel;
     e.force_generated = g_force_generated;
-    e.multiplicador = cuenta_es_multiplicador();
-    e.ciclo_techo = g_ciclo_techo;
-    e.seis = g_seis;
+    e.multiplier = cuenta_es_multiplicador();
+    e.cycle_ceiling = g_ciclo_techo;
+    e.six = g_seis;
     e.ceilfirst = g_ceilfirst;
     e.interp_on = g_interp_on != 0;
     e.wic_ok = g_wic_ok;
     e.last_seen_generated = g_last_seen_generated;
     const LONG kTope = tope_cuenta();
-    e.tope = kTope;
-    const pol::SalidaForce s = pol::decidir_force(e);
+    e.cap = kTope;
+    const policy::ForceOutput s = policy::decide_force(e);
 
-    switch (s.razon) {
-    case pol::Razon::PASIVO: {
+    switch (s.reason) {
+    case policy::Reason::PASSIVE: {
         // Un juego con topologia rota corre como si el mod no estuviera, en vez
         // de crashear. Ver evaluar_invariantes.
         static bool dicho = false;
@@ -1167,7 +1167,7 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         }
         return;
     }
-    case pol::Razon::JUEGO_APAGO: {
+    case policy::Reason::GAME_TURNED_OFF: {
         // El congelamiento del menu de pausa: ver juego_apago_la_generacion.
         static LONG dicho = -1;
         if (dicho != g_force_sel) {
@@ -1182,15 +1182,15 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     }
     g_target_written = false;
 
-    if (s.a1_declaro) {
+    if (s.a1_declared) {
         static bool dicho = false;
         if (!dicho) {
             dicho = true;
             log_num("A1: declarando el techo del ciclo mientras apagado ",
-                    (unsigned)s.a1_techo);
+                    (unsigned)s.a1_ceiling);
         }
     }
-    if (s.razon == pol::Razon::FRENO_SIN_DATO) {
+    if (s.reason == policy::Reason::BRAKE_NO_DATA) {
         // Nunca vimos que cuenta pide el juego. Sin ese dato no hay a que
         // espejarse: ni la cuenta ni el modo se tocan. Poner un valor de reserva
         // seria forzar a ciegas, que es lo que hizo crashear a Halo.
@@ -1204,45 +1204,45 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         }
         return;
     }
-    if (s.freno_limito) {
+    if (s.brake_limited) {
         static LONG dicho = -1;
-        if (dicho != s.freno_tope) {
-            dicho = s.freno_tope;
+        if (dicho != s.brake_cap) {
+            dicho = s.brake_cap;
             log_num("freno: sin parche, la cuenta se limita a la del juego ",
-                    (unsigned)s.freno_tope);
+                    (unsigned)s.brake_cap);
         }
     }
-    if (s.razon == pol::Razon::DYN_ON) {
+    if (s.reason == policy::Reason::DYN_ON) {
         // Lo que realmente se escribe, y contra que se recorta.
         static LONG dicho_e = -1, dicho_t = -1, dicho_g = -1;
-        if (dicho_e != s.escribir || dicho_t != kTope || dicho_g != g_force_generated) {
-            dicho_e = s.escribir; dicho_t = kTope; dicho_g = g_force_generated;
+        if (dicho_e != s.to_write || dicho_t != kTope || dicho_g != g_force_generated) {
+            dicho_e = s.to_write; dicho_t = kTope; dicho_g = g_force_generated;
             log_num("force_into: g_force_generated ", (unsigned)g_force_generated);
-            log_num("  escribir ", (unsigned)s.escribir);
+            log_num("  escribir ", (unsigned)s.to_write);
             log_num("  kTope ", (unsigned)kTope);
             log_num("  g_max_declarado ", (unsigned)g_max_declarado);
-            log_num("  queda ", (unsigned)s.queda);
+            log_num("  queda ", (unsigned)s.remains);
         }
     }
-    if (s.invariante_roto) {
+    if (s.invariant_broken) {
         // Con la semantica de multiplicador una cuenta menor a 2 es 1X. Se
         // corrige solo cuando manda el parche; con el freno se deja constancia
         // (corregirlo ahi congelo Halo 24 veces). Si esto aparece seguido, el
         // culpable es otro y hay que ir a buscarlo.
         static LONG dicho = -1;
-        if (dicho != s.queda) {
-            dicho = s.queda;
+        if (dicho != s.remains) {
+            dicho = s.remains;
             diag::Linea l = diag::invariante(diag::Capa::POLITICA, "cuenta>=2",
-                                             s.invariante_corregido
+                                             s.invariant_fixed
                                                  ? "con multiplicador es 1X; se escribe 2, el piso"
                                                  : "con multiplicador es 1X; manda el freno, NO se corrige");
-            l.par("cuenta", s.queda).par("sel", g_force_sel).par("gen", g_force_generated)
+            l.par("cuenta", s.remains).par("sel", g_force_sel).par("gen", g_force_generated)
              .par("objetivo", g_dyn_target).par("tope", kTope);
             log_line(l.b);
         }
     }
-    if (s.escribir_modo) *(LONG *)(p + 32) = (LONG)s.modo;
-    if (s.escribir_cuenta) *(LONG *)(p + 36) = (LONG)s.cuenta;
+    if (s.write_mode) *(LONG *)(p + 32) = (LONG)s.mode;
+    if (s.write_count) *(LONG *)(p + 36) = (LONG)s.count;
 }
 
 // What the last capture was taken from. A game may call slDLSSGSetOptions
