@@ -36,19 +36,19 @@
 // Corre DENTRO del manejador de excepciones, donde una segunda violacion de
 // acceso no da un segundo aviso: mata el proceso sin log. VirtualQuery contesta
 // por pagina y sin tocar el contenido, asi que se pregunta primero.
-static bool leer_seguro(const void *src, void *dst, unsigned n) {
+static bool read_safe(const void *src, void *dst, unsigned n) {
     if (src == nullptr) return false;
     MEMORY_BASIC_INFORMATION mbi{};
     if (VirtualQuery(src, &mbi, sizeof(mbi)) == 0) return false;
     if (mbi.State != MEM_COMMIT) return false;
-    const DWORD leible = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+    const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
                          PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
                          PAGE_EXECUTE_WRITECOPY;
-    if ((mbi.Protect & leible) == 0) return false;
+    if ((mbi.Protect & readable) == 0) return false;
     if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
     // Que el rango entero entre en esta region; si cruza pagina, no se lee.
-    const ULONG_PTR fin = (ULONG_PTR)mbi.BaseAddress + mbi.RegionSize;
-    if ((ULONG_PTR)src + n > fin) return false;
+    const ULONG_PTR end_at = (ULONG_PTR)mbi.BaseAddress + mbi.RegionSize;
+    if ((ULONG_PTR)src + n > end_at) return false;
     memcpy(dst, src, n);
     return true;
 }
@@ -73,27 +73,27 @@ static bool leer_seguro(const void *src, void *dst, unsigned n) {
 //   * si [r13+4] no es nuestro byte -> el parche no llega a este contexto
 //
 // Solo lee. No cambia nada y devuelve CONTINUE_SEARCH igual que el resto.
-static void autopsia_subframes(const CONTEXT *ctx, const void *modbase) {
+static void subframe_autopsy(const CONTEXT *ctx, const void *modbase) {
     if (ctx == nullptr) return;
     const ULONG_PTR base = (ULONG_PTR)ctx->R13;
     const unsigned idx = (unsigned)(ctx->R10 & 0xFFFFFFFFu);
     log_line("  --- autopsia del array de sub-frames ---");
     log_num("  indice pedido (r10) ", (unsigned long long)idx);
     log_num("  base del contexto (r13) 0x", (unsigned long long)base);
-    LONG total = 0, hechos = 0;
-    if (leer_seguro((const void *)(base + 4), &total, 4))
+    LONG total = 0, done_n = 0;
+    if (read_safe((const void *)(base + 4), &total, 4))
         log_num("  [ctx+4] (nuestro byte) ", (unsigned)total);
     else
         log_line("  [ctx+4] ilegible");
-    if (leer_seguro((const void *)(base + 8), &hechos, 4))
-        log_num("  [ctx+8] (el otro contador) ", (unsigned)hechos);
+    if (read_safe((const void *)(base + 8), &done_n, 4))
+        log_num("  [ctx+8] (el otro contador) ", (unsigned)done_n);
     else
         log_line("  [ctx+8] ilegible");
     // Las 6 ranuras inline de 192 bytes. Cual esta llena y cual no es el dato.
     for (unsigned i = 0; i < 6; ++i) {
-        const ULONG_PTR ranura = base + 0x48 + (ULONG_PTR)i * 192;
+        const ULONG_PTR slot = base + 0x48 + (ULONG_PTR)i * 192;
         void *ptr = nullptr;
-        if (!leer_seguro((const void *)ranura, &ptr, sizeof(ptr))) {
+        if (!read_safe((const void *)slot, &ptr, sizeof(ptr))) {
             log_num("  ranura ilegible ", (unsigned long long)i);
             continue;
         }
@@ -118,12 +118,12 @@ static void autopsia_subframes(const CONTEXT *ctx, const void *modbase) {
     // por eso se imprime crudo y sin interpretar.
     if (modbase != nullptr) {
         const void *pp = nullptr;
-        if (leer_seguro((const unsigned char *)modbase + 0x8f1e8, &pp, sizeof(pp))
+        if (read_safe((const unsigned char *)modbase + 0x8f1e8, &pp, sizeof(pp))
             && pp != nullptr) {
-            LONG cuenta = 0;
-            if (leer_seguro((const unsigned char *)pp + 0x4168, &cuenta, 4))
+            LONG count = 0;
+            if (read_safe((const unsigned char *)pp + 0x4168, &count, 4))
                 log_num("  [global+0x4168] (cuenta de presentacion?) ",
-                        (unsigned)cuenta);
+                        (unsigned)count);
             else
                 log_line("  [global+0x4168] ilegible");
         } else {
@@ -144,18 +144,18 @@ static void autopsia_subframes(const CONTEXT *ctx, const void *modbase) {
     if (modbase != nullptr) {
         const ULONG_PTR mb = (ULONG_PTR)modbase;
         // El tamano del modulo, para saber que es "adentro".
-        ULONG_PTR mfin = mb + 0x97000;          // sl.dlss_g 2.12 mide 0x97000
+        ULONG_PTR mend = mb + 0x97000;          // sl.dlss_g 2.12 mide 0x97000
         log_line("  --- posibles retornos en la pila ---");
         const ULONG_PTR sp = (ULONG_PTR)ctx->Rsp;
-        int puestos = 0;
-        for (int i = 0; i < 160 && puestos < 14; ++i) {
+        int placed = 0;
+        for (int i = 0; i < 160 && placed < 14; ++i) {
             ULONG_PTR v = 0;
-            if (!leer_seguro((const void *)(sp + (ULONG_PTR)i * 8), &v, 8)) continue;
-            if (v <= mb || v >= mfin) continue;
+            if (!read_safe((const void *)(sp + (ULONG_PTR)i * 8), &v, 8)) continue;
+            if (v <= mb || v >= mend) continue;
             log_num("  +0x", (unsigned long long)(v - mb));
-            ++puestos;
+            ++placed;
         }
-        if (puestos == 0) log_line("  ninguno");
+        if (placed == 0) log_line("  ninguno");
     }
     // Los registros crudos. r10 es el indice y r13 la base; el resto es para
     // identificar el objeto desde memoria viva, que es lo que el binario solo
@@ -171,7 +171,7 @@ static void autopsia_subframes(const CONTEXT *ctx, const void *modbase) {
     log_line("  --- fin de la autopsia ---");
 }
 
-static LONG CALLBACK testigo_excepcion(EXCEPTION_POINTERS *info) {
+static LONG CALLBACK exception_witness(EXCEPTION_POINTERS *info) {
     if (info == nullptr || info->ExceptionRecord == nullptr)
         return EXCEPTION_CONTINUE_SEARCH;
     const DWORD c = info->ExceptionRecord->ExceptionCode;
@@ -184,7 +184,7 @@ static LONG CALLBACK testigo_excepcion(EXCEPTION_POINTERS *info) {
     //
     // Ahora la lista es blanca, no negra: solo las excepciones que terminan un
     // proceso. Cualquier cosa que no este aca se ignora.
-    const bool mortal =
+    const bool fatal =
         c == EXCEPTION_ACCESS_VIOLATION            ||   // 0xC0000005
         c == EXCEPTION_ARRAY_BOUNDS_EXCEEDED       ||
         c == EXCEPTION_DATATYPE_MISALIGNMENT       ||
@@ -196,9 +196,9 @@ static LONG CALLBACK testigo_excepcion(EXCEPTION_POINTERS *info) {
         c == 0xC0000409u                           ||   // fail-fast / stack cookie
         c == 0xC0000374u                           ||   // heap corrompido
         c == 0xC000041Du;                               // excepcion en un callback
-    if (!mortal) return EXCEPTION_CONTINUE_SEARCH;
-    static volatile LONG dichas = 0;
-    if (InterlockedIncrement(&dichas) > 40) return EXCEPTION_CONTINUE_SEARCH;
+    if (!fatal) return EXCEPTION_CONTINUE_SEARCH;
+    static volatile LONG said_n = 0;
+    if (InterlockedIncrement(&said_n) > 40) return EXCEPTION_CONTINUE_SEARCH;
     const void *dir = info->ExceptionRecord->ExceptionAddress;
     log_line("EXCEPCION ------------------------------------------");
     log_num("  codigo 0x", (unsigned long long)c);
@@ -251,7 +251,7 @@ static LONG CALLBACK testigo_excepcion(EXCEPTION_POINTERS *info) {
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                            (LPCWSTR)dir, &mm);
-        autopsia_subframes(info->ContextRecord, (const void *)mm);
+        subframe_autopsy(info->ContextRecord, (const void *)mm);
     }
     return EXCEPTION_CONTINUE_SEARCH;
 }

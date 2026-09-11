@@ -838,10 +838,10 @@ static bool leer_ok(const void *src, void *dst, unsigned n) {
     MEMORY_BASIC_INFORMATION mbi{};
     if (VirtualQuery(src, &mbi, sizeof(mbi)) == 0) return false;
     if (mbi.State != MEM_COMMIT) return false;
-    const DWORD leible = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+    const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
                          PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
                          PAGE_EXECUTE_WRITECOPY;
-    if ((mbi.Protect & leible) == 0) return false;
+    if ((mbi.Protect & readable) == 0) return false;
     if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
     if ((ULONG_PTR)src + n > (ULONG_PTR)mbi.BaseAddress + mbi.RegionSize) return false;
     memcpy(dst, src, n);
@@ -1900,7 +1900,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
         HANDLE th = CreateThread(nullptr, 0, &recorder, nullptr, 0, nullptr);
         if (th != nullptr) CloseHandle(th);
     }
-    AddVectoredExceptionHandler(1, testigo_excepcion);
+    AddVectoredExceptionHandler(1, exception_witness);
     log_line("--- mfg-unlock attached ---  (F9 records)");
 
     // Turn on Streamline's own logging from here, before anything loads it, so
