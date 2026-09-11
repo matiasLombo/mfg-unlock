@@ -4,7 +4,11 @@
 # (dlfgPresent.cpp:2544 shouldInterpolate -> "DLSS-G disabled: window not focused").
 # Lanzado desde una tarea en segundo plano la ventana no siempre lo toma, y la
 # corrida entrega 1.0x sin que nada este roto.
-param([string]$Etiqueta = "focus", [string]$EsperadoHash = "")
+# -Steam: lanza por steam://run para que el overlay de Steam se inyecte, que es
+# el camino que el juego real usa y el que hace byte-detour de Present
+# ([[never-byte-detour-present]]). Sin -Steam se lanza el exe directo, sin
+# overlay: otra topologia.
+param([string]$Etiqueta = "focus", [string]$EsperadoHash = "", [switch]$Steam)
 
 $dir = "C:\Program Files (x86)\Steam\steamapps\common\Cyberpunk 2077\bin\x64"
 $exe = Join-Path $dir "Cyberpunk2077.exe"
@@ -73,8 +77,36 @@ if ($EsperadoHash -ne "") {
     Write-Output "binario verificado contra el compilado"
   }
 }
-$p = Start-Process -FilePath $exe -ArgumentList "-benchmark" -WorkingDirectory $dir -PassThru
-Write-Output "lanzado pid $($p.Id)"
+if ($Steam) {
+  # Steam pregunta "Launch Game with custom arguments: -benchmark / Continue /
+  # Cancel" y no lanza hasta que se toca Continue. SendKeys no le llega (es
+  # UI web); se clickea el boton en la posicion que ocupa con la ventana de
+  # Steam maximizada en 2560x1440 (medido en captura: 1704,928). Se clickea
+  # solo mientras el juego no aparezca, cada 3 s, como mucho 8 veces.
+  Add-Type @"
+using System; using System.Runtime.InteropServices;
+public class Raton { [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, UIntPtr e); }
+"@
+  Start-Process "steam://run/1091500//-benchmark/"
+  $p = $null
+  $ws = New-Object -ComObject WScript.Shell
+  for ($i = 0; $i -lt 90 -and $p -eq $null; $i++) {
+    Start-Sleep -Milliseconds 1000
+    $p = Get-Process Cyberpunk2077 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($p -eq $null -and $i -ge 3 -and ($i % 3) -eq 0 -and $i -le 27) {
+      $ws.AppActivate("Steam") | Out-Null
+      Start-Sleep -Milliseconds 300
+      [Raton]::SetCursorPos(1704, 928); Start-Sleep -Milliseconds 150
+      [Raton]::mouse_event(2,0,0,0,[UIntPtr]::Zero); Start-Sleep -Milliseconds 80
+      [Raton]::mouse_event(4,0,0,0,[UIntPtr]::Zero)
+    }
+  }
+  if ($p -eq $null) { Write-Output "ABORTA: Steam no lanzo Cyberpunk2077 en 90 s"; exit 1 }
+  Write-Output "lanzado por Steam, pid $($p.Id)"
+} else {
+  $p = Start-Process -FilePath $exe -ArgumentList "-benchmark" -WorkingDirectory $dir -PassThru
+  Write-Output "lanzado pid $($p.Id)"
+}
 
 # La ventana tarda en aparecer; una vez que esta, se reafirma el foco varias
 # veces porque el juego crea y destruye ventanas al cambiar de modo de video.

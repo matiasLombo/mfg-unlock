@@ -6428,13 +6428,19 @@ static void presentes_del_runtime(void) {
         }
         return;
     }
-    static UINT previo = 0;
-    static bool primero = true;
-    if (primero) { primero = false; previo = ahora; return; }
-    if (ahora < previo) { previo = ahora; return; }
-    const UINT delta = ahora - previo;
-    previo = ahora;
-    if (delta > 0 && delta < 10000) InterlockedAdd(&g_present_count, (LONG)delta);
+    // Al contador del RUNTIME, no al del hook.
+    //
+    // La primera version sumaba el delta a g_present_count, que es la cuenta
+    // de NUESTRO hook de Present -- el cross-check -- y no a
+    // g_rt_present_count, que es de donde leen la ventana de medicion, el
+    // controlador DYNAMIC y la sonda. Medido en Cyberpunk desde Steam con la
+    // adopcion ya arreglada: 351 ventanas de "present count disagrees"
+    // (hook > 0, runtime = 0) y cero lineas de PresentCount. El contador
+    // andaba; alimentaba al instrumento equivocado.
+    //
+    // GetLastPresentCount es un total acumulado, igual que el PresentCount
+    // que el hook muestrea de GetFrameStatistics: se asigna, no se suma.
+    g_rt_present_count = (LONG)ahora;
 }
 
 static void note_display(IDXGISwapChain *sc) {
