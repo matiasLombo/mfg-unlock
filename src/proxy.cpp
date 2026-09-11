@@ -6640,14 +6640,33 @@ static bool g_native_pacer_found = false;  // sticky: one plugin with sites is e
 // del frame token, que corre igual.
 static void presentes_del_runtime(void) {
     if (!g_present_por_runtime || g_swapchain == nullptr) return;
-    DXGI_FRAME_STATISTICS st{};
-    if (FAILED(g_swapchain->GetFrameStatistics(&st))) return;
+    // GetLastPresentCount, no GetFrameStatistics.
+    //
+    // La primera version usaba GetFrameStatistics y no conto NUNCA: esa llamada
+    // falla si el swapchain no esta en modo flip -- devuelve
+    // DXGI_ERROR_FRAME_STATISTICS_DISJOINT o directamente error -- y salia por
+    // el FAILED sin sumar. Medido en Cyberpunk: 108 s, cero ventanas de
+    // medicion, cero lineas de PresentCount, con el bloque de la ventana
+    // corriendo igual ("measured: rendered fps 54"). El HUD quedaba en cero,
+    // que es lo que el usuario reporto.
+    //
+    // GetLastPresentCount devuelve el contador del runtime sin depender del
+    // modo de presentacion, que es justo lo que hace falta aca.
+    UINT ahora = 0;
+    if (FAILED(g_swapchain->GetLastPresentCount(&ahora))) {
+        static bool dicho = false;
+        if (!dicho) {
+            dicho = true;
+            log_line("present: GetLastPresentCount fallo; el contador queda en cero");
+        }
+        return;
+    }
     static UINT previo = 0;
     static bool primero = true;
-    if (primero) { primero = false; previo = st.PresentCount; return; }
-    if (st.PresentCount < previo) { previo = st.PresentCount; return; }
-    const UINT delta = st.PresentCount - previo;
-    previo = st.PresentCount;
+    if (primero) { primero = false; previo = ahora; return; }
+    if (ahora < previo) { previo = ahora; return; }
+    const UINT delta = ahora - previo;
+    previo = ahora;
     if (delta > 0 && delta < 10000) InterlockedAdd(&g_present_count, (LONG)delta);
 }
 
