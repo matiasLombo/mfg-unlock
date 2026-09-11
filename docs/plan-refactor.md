@@ -12,8 +12,8 @@ Antes de cada instalacion: `sh tools/test-host.sh`.
 | fase | que se extrae | a donde | test de host | estado |
 |---|---|---|---|---|
 | F0 | la decision de `force_into` | `src/politica.h` | `tools/test_politica.cpp` (30 casos de los logs) | extraido b02a46e, cableado 67c76a5; falta correr los 3 juegos |
-| F1 | configuracion: 31 flags + `mfg-settings.txt` | `src/config.h` | parser sobre los textos reales de los tres juegos | |
-| F2 | diagnostico: una linea por capa e invariante | `src/diag.h` | -- | |
+| F1 | configuracion: 43 archivos + `mfg-settings.txt` | `src/config.h` | `tools/test_config.cpp` (carpetas reales) | extraido b60b811, cableado a422a66, `mfg-config.txt` 486173e; falta correr |
+| F2 | diagnostico: una linea por capa e invariante | `src/diag.h` | `tools/test_diag.cpp` (formato exacto) | extraido 9107123, cableado 71aa84c; falta correr |
 | F3 | el controlador DYNAMIC (`dyn_control`, `dyn_apply`, sat, sesgo) | `src/controlador.h` | ventanas grabadas de GTA V/Cyberpunk | |
 | F4 | el planificador fraccional (`fractional_tick`, latch, bloques) | `src/reparto.h` | cadencias medidas ([[fractional-by-block-alternation]]) | |
 | F5 | los parches de binario (`patch_*`, `image_has`) | `src/parches.h` | busqueda de sitios sobre el snippet real de la cache | |
@@ -31,6 +31,16 @@ Antes de cada instalacion: `sh tools/test-host.sh`.
 
 ## Que necesita una corrida
 
-- F0: los tres juegos con el mismo modo que la ultima vez, y comparar
-  `numFramesToGenerate` recibido y las lineas `force_into:` contra el log
-  anterior. Si difieren, el rewire no fue identico.
+Build 679861 (71aa84c) instalado en los tres el 2026-09-11, mode 6. Trae
+ademas el arreglo del contador de Cyberpunk (a5a35ce). Que mirar:
+
+- Cyberpunk desde Steam: `runtime PresentCount this window` avanza y el HUD
+  muestra fps. La linea nueva `present: vtable ya enganchada; se adopta la
+  instancia nueva` tiene que aparecer despues de `swapchain con ventana nueva`.
+- F0/F1/F2 en los tres: `numFramesToGenerate` recibido == 6, las lineas
+  `force_into:` iguales a las del log `*.pre-refactor-prev.log`, un solo
+  `VEREDICTO ACTIVO` con `ejecuta_cuenta>0 ejecuta_pacer>0`, y ninguna
+  `INVARIANTE`. `config: claves leidas` no aparece (nadie tiene
+  mfg-config.txt todavia).
+- Si algo difiere: bisecar por commit (a5a35ce, 67c76a5, a422a66, 486173e,
+  71aa84c); cada uno compila solo con `sh build-proxy.sh`.
