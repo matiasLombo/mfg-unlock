@@ -20,6 +20,7 @@ public class FocoS {
   public static bool Traer(IntPtr h) { uint pid; uint d = GetWindowThreadProcessId(GetForegroundWindow(), out pid); uint m = GetCurrentThreadId(); AttachThreadInput(m, d, true); ShowWindow(h, 9); BringWindowToTop(h); bool ok = SetForegroundWindow(h); AttachThreadInput(m, d, false); return ok; }
 }
 "@
+. "$PSScriptRoot\steam_continue.ps1"
 $url = if ($Args -ne "") { "steam://run/$AppId//$Args/" } else { "steam://rungameid/$AppId" }
 Start-Process $url
 $ws = New-Object -ComObject WScript.Shell
@@ -28,10 +29,7 @@ for ($i = 0; $i -lt 120 -and $p -eq $null; $i++) {
   Start-Sleep -Milliseconds 1000
   $p = Get-Process $Proc -ErrorAction SilentlyContinue | Select-Object -First 1
   if ($p -eq $null -and $Args -ne "" -and $i -ge 3 -and ($i % 3) -eq 0 -and $i -le 27) {
-    $ws.AppActivate("Steam") | Out-Null; Start-Sleep -Milliseconds 300
-    [FocoS]::SetCursorPos(1704, 928); Start-Sleep -Milliseconds 150
-    [FocoS]::mouse_event(2,0,0,0,[UIntPtr]::Zero); Start-Sleep -Milliseconds 80
-    [FocoS]::mouse_event(4,0,0,0,[UIntPtr]::Zero)
+    Click-SteamContinue | Out-Null
   }
 }
 if ($p -eq $null) { Write-Output "ABORTA: Steam no lanzo $Proc en 120 s"; exit 1 }

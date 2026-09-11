@@ -81,12 +81,10 @@ if ($Steam) {
   # Steam pregunta "Launch Game with custom arguments: -benchmark / Continue /
   # Cancel" y no lanza hasta que se toca Continue. SendKeys no le llega (es
   # UI web); se clickea el boton en la posicion que ocupa con la ventana de
-  # Steam maximizada en 2560x1440 (medido en captura: 1704,928). Se clickea
-  # solo mientras el juego no aparezca, cada 3 s, como mucho 8 veces.
-  Add-Type @"
-using System; using System.Runtime.InteropServices;
-public class Raton { [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, UIntPtr e); }
-"@
+  # Steam (tools/steam_continue.ps1: relativo al centro de la ventana, no un
+  # pixel fijo). Se clickea solo mientras el juego no aparezca, cada 3 s,
+  # como mucho 8 veces.
+  . "$PSScriptRoot\steam_continue.ps1"
   Start-Process "steam://run/1091500//-benchmark/"
   $p = $null
   $ws = New-Object -ComObject WScript.Shell
@@ -94,11 +92,7 @@ public class Raton { [DllImport("user32.dll")] public static extern bool SetCurs
     Start-Sleep -Milliseconds 1000
     $p = Get-Process Cyberpunk2077 -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($p -eq $null -and $i -ge 3 -and ($i % 3) -eq 0 -and $i -le 27) {
-      $ws.AppActivate("Steam") | Out-Null
-      Start-Sleep -Milliseconds 300
-      [Raton]::SetCursorPos(1704, 928); Start-Sleep -Milliseconds 150
-      [Raton]::mouse_event(2,0,0,0,[UIntPtr]::Zero); Start-Sleep -Milliseconds 80
-      [Raton]::mouse_event(4,0,0,0,[UIntPtr]::Zero)
+      Click-SteamContinue | Out-Null
     }
   }
   if ($p -eq $null) { Write-Output "ABORTA: Steam no lanzo Cyberpunk2077 en 90 s"; exit 1 }
