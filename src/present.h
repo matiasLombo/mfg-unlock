@@ -233,79 +233,9 @@ static void note_display(IDXGISwapChain *sc) {
     }
 }
 
-static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT interval, UINT flags) {
-    // Primero que nada: a quien se le devuelve la llamada. Si este objeto tiene
-    // una vtable que no enganchamos -- no deberia pasar, porque solo se llega
-    // aca por un slot que nosotros escribimos -- se avisa una vez y se usa el
-    // primer original, que es lo que hacia el codigo anterior siempre.
-    PFN_DXGIPresent orig = present_original_for(self);
-    if (orig == nullptr) {
-        static LONG said = 0;
-        if (InterlockedCompareExchange(&said, 1, 0) == 0)
-            log_line("present: objeto con vtable desconocida; se usa el primer original");
-        orig = g_orig_dxgi_present;
-        if (orig == nullptr) return (HRESULT)0x887A0001L;   // DXGI_ERROR_INVALID_CALL
-    }
-    // Anidamiento: el Present del proxy de Streamline llama al Present del
-    // chain real, y con las dos vtables enganchadas este hook corre dos veces
-    // por presentacion del juego (mas las presentaciones generadas, que van
-    // solo por el chain real). Se deja constancia una vez para que quien lea
-    // los contadores por hook sepa que cuentan los dos niveles; el contador
-    // que no depende de esto es PresentCount de GetFrameStatistics.
-    NestedPresent nested;
-    // FRENO DURO DE RECURSION.
-    //
-    // Con la tabla por vtable el anidamiento deberia ser de DOS niveles y
-    // terminar: el proxy de Streamline presenta, eso entra por el slot del chain
-    // real, y el original de ESE chain es el Present de DXGI, que no vuelve.
-    //
-    // Halo, 2026-09-10, con su interposer 2.7.30: dos vtables enganchadas, cero
-    // "vtable desconocida" -- las dos con original propio -- y 0xC00000FD 16 ms
-    // despues de la primera llamada anidada. Si desborda, la recursion NO esta
-    // acotada en dos, y la tabla sola no alcanza.
-    //
-    // A partir del tercer nivel se llama al original y se vuelve, sin hacer nada
-    // mas: sin contar la presentacion, sin cadencia, sin pacer. Se pierde
-    // instrumentacion en esos frames; no se pierde el proceso. Y la profundidad
-    // queda en el log, que es el dato que falta para entender por que hay mas de
-    // dos niveles.
-    if (g_present_depth > 2) {
-        static LONG max_seen = 0;
-        if (g_present_depth > max_seen) {
-            max_seen = g_present_depth;
-            log_num("present: RECURSION, profundidad ", (unsigned)g_present_depth);
-        }
-        return orig(self, interval, flags);
-    }
-    if (g_present_depth > 1) {
-        InterlockedIncrement(&g_present_nested);
-        static LONG said_nested = 0;
-        if (InterlockedCompareExchange(&said_nested, 1, 0) == 0)
-            log_line("present: llamada anidada (proxy de SL -> chain real); "
-                     "los contadores por hook cuentan los dos niveles");
-    }
-    // Presented frames, counted. Nothing else in this file has ever counted
-    // one, and that is why three separate multiplier instruments in one
-    // session were all circular -- the last of them reduced to "what fraction
-    // of my samples did I take while the high count was selected" and returned
-    // the requested ratio to within 0.3% even at 2.10x and 2.90x, fractions its
-    // own scheduler cannot represent. An instrument that cannot fail measures
-    // nothing.
-    InterlockedIncrement(&g_present_count);
-    // Tambien desde aca, no solo desde el lazo de teclas: ese lazo NO corre bajo
-    // el banco (lo dice el comentario de arm_frametoken_hook, y por eso el
-    // enganche de DXGI se armaba tarde ahi). Sin esto el veredicto de M1 no se
-    // podria medir en la unica herramienta con la que se permite probar.
-    // Se auto-limita: despues de la primera emision es una lectura de bool.
-    emit_verdict_if_due();
-    // The runtime's own tally, so our hook can be checked against something we
-    // do not maintain. If these two agree, a shortfall of presents against
-    // rendered frames is the frame counter's fault and not the hook's.
-    {
-        DXGI_FRAME_STATISTICS a;
-        if (self != nullptr && SUCCEEDED(self->GetFrameStatistics(&a)))
-            g_rt_present_count = (LONG)a.PresentCount;
-    }
+// Latencia de cola y pantalla, desde GetFrameStatistics (extraido de
+// hk_dxgi_present, solo movido).
+static void present_display_stats(IDXGISwapChain *self) {
     // Queue latency: how long a present waits before the panel shows it.
     //
     // This is the half of "latency" the swap chain can answer. PresentCount is
@@ -363,6 +293,11 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
             }
         }
     }
+}
+
+// El ritmo de los presents y el testigo de congelamiento (extraido de
+// hk_dxgi_present, solo movido).
+static void present_pacing_stats(void) {
     // Present pacing, from the same hook. The multiplier says how many frames
     // reach the screen; this says whether they arrive evenly, which is the half
     // of the question a player actually feels. Histogram rather than a mean:
@@ -453,8 +388,12 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
         }
         g_pres_qpc = t.QuadPart;
     }
-    note_present(nullptr, 2);
-    if (g_recording != 0) note_display(self);
+}
+
+// La llamada al original: sin vsync si se pidio (diagnostico), con los
+// marcadores de present del modo host, y el tiempo bloqueado adentro
+// (extraido de hk_dxgi_present, solo movido).
+static HRESULT present_call_original(PFN_DXGIPresent orig, IDXGISwapChain *self, UINT interval, UINT flags) {
     // Diagnostic only, behind mfg-novsync.txt.
     //
     // Every throughput comparison in this file was taken against a 165 Hz
@@ -500,6 +439,86 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
             g_present_block_us += (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)g_qpc_freq;
         return hr;
     }
+}
+
+static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT interval, UINT flags) {
+    // Primero que nada: a quien se le devuelve la llamada. Si este objeto tiene
+    // una vtable que no enganchamos -- no deberia pasar, porque solo se llega
+    // aca por un slot que nosotros escribimos -- se avisa una vez y se usa el
+    // primer original, que es lo que hacia el codigo anterior siempre.
+    PFN_DXGIPresent orig = present_original_for(self);
+    if (orig == nullptr) {
+        static LONG said = 0;
+        if (InterlockedCompareExchange(&said, 1, 0) == 0)
+            log_line("present: objeto con vtable desconocida; se usa el primer original");
+        orig = g_orig_dxgi_present;
+        if (orig == nullptr) return (HRESULT)0x887A0001L;   // DXGI_ERROR_INVALID_CALL
+    }
+    // Anidamiento: el Present del proxy de Streamline llama al Present del
+    // chain real, y con las dos vtables enganchadas este hook corre dos veces
+    // por presentacion del juego (mas las presentaciones generadas, que van
+    // solo por el chain real). Se deja constancia una vez para que quien lea
+    // los contadores por hook sepa que cuentan los dos niveles; el contador
+    // que no depende de esto es PresentCount de GetFrameStatistics.
+    NestedPresent nested;
+    // FRENO DURO DE RECURSION.
+    //
+    // Con la tabla por vtable el anidamiento deberia ser de DOS niveles y
+    // terminar: el proxy de Streamline presenta, eso entra por el slot del chain
+    // real, y el original de ESE chain es el Present de DXGI, que no vuelve.
+    //
+    // Halo, 2026-09-10, con su interposer 2.7.30: dos vtables enganchadas, cero
+    // "vtable desconocida" -- las dos con original propio -- y 0xC00000FD 16 ms
+    // despues de la primera llamada anidada. Si desborda, la recursion NO esta
+    // acotada en dos, y la tabla sola no alcanza.
+    //
+    // A partir del tercer nivel se llama al original y se vuelve, sin hacer nada
+    // mas: sin contar la presentacion, sin cadencia, sin pacer. Se pierde
+    // instrumentacion en esos frames; no se pierde el proceso. Y la profundidad
+    // queda en el log, que es el dato que falta para entender por que hay mas de
+    // dos niveles.
+    if (g_present_depth > 2) {
+        static LONG max_seen = 0;
+        if (g_present_depth > max_seen) {
+            max_seen = g_present_depth;
+            log_num("present: RECURSION, profundidad ", (unsigned)g_present_depth);
+        }
+        return orig(self, interval, flags);
+    }
+    if (g_present_depth > 1) {
+        InterlockedIncrement(&g_present_nested);
+        static LONG said_nested = 0;
+        if (InterlockedCompareExchange(&said_nested, 1, 0) == 0)
+            log_line("present: llamada anidada (proxy de SL -> chain real); "
+                     "los contadores por hook cuentan los dos niveles");
+    }
+    // Presented frames, counted. Nothing else in this file has ever counted
+    // one, and that is why three separate multiplier instruments in one
+    // session were all circular -- the last of them reduced to "what fraction
+    // of my samples did I take while the high count was selected" and returned
+    // the requested ratio to within 0.3% even at 2.10x and 2.90x, fractions its
+    // own scheduler cannot represent. An instrument that cannot fail measures
+    // nothing.
+    InterlockedIncrement(&g_present_count);
+    // Tambien desde aca, no solo desde el lazo de teclas: ese lazo NO corre bajo
+    // el banco (lo dice el comentario de arm_frametoken_hook, y por eso el
+    // enganche de DXGI se armaba tarde ahi). Sin esto el veredicto de M1 no se
+    // podria medir en la unica herramienta con la que se permite probar.
+    // Se auto-limita: despues de la primera emision es una lectura de bool.
+    emit_verdict_if_due();
+    // The runtime's own tally, so our hook can be checked against something we
+    // do not maintain. If these two agree, a shortfall of presents against
+    // rendered frames is the frame counter's fault and not the hook's.
+    {
+        DXGI_FRAME_STATISTICS a;
+        if (self != nullptr && SUCCEEDED(self->GetFrameStatistics(&a)))
+            g_rt_present_count = (LONG)a.PresentCount;
+    }
+    present_display_stats(self);
+    present_pacing_stats();
+    note_present(nullptr, 2);
+    if (g_recording != 0) note_display(self);
+    return present_call_original(orig, self, interval, flags);
 }
 
 // IDXGIDevice1::SetMaximumFrameLatency, clamped from the DXGI side.
