@@ -473,7 +473,27 @@ static bool g_snippet_on = true;
 // sin leer POR QUE fallaba -- que es para lo que existe el banco. El motivo real
 // es que se mapean DOS interposers, no que el modulo este mal: el del banco y el
 // nuestro son byte a byte el mismo archivo.
-static bool g_inter_fuera = false;
+// El interposer del JUEGO se respeta. mfg-coninterposer.txt lo vuelve a pisar.
+//
+// Estaba al reves, y el motivo por el que se pisaba murio medido. Se hacia por
+// Halo: su 2.7.30 no tiene un dlss_g parcheable -- el sitio de la cuenta existe
+// desde 2.11 -- asi que "habia que subir todo el set junto". Falso: los plugins
+// suben solos. Halo corriendo SU interposer 2.7.30 con nuestros nueve plugins
+// 2.12 entrega 4.02 pidiendo 4X y 5.98 pidiendo 6X, sobre 81 ventanas.
+//
+// Y forzarlo costaba: un juego compilado contra el host SDK 2.7.30 pierde las
+// constantes de sl.common bajo un interposer 2.12, y el plugin apaga la
+// generacion CUADRO A CUADRO. Medido, 108 warnings por segundo contra 31, y
+// 2.007x contra 4.02x.
+//
+// Ademas es la unica pieza que un juego puede traer como import estatico
+// -- Cyberpunk lo tiene en el puesto #5 y nosotros en el #26 -- asi que en la
+// mitad de los casos no habia nada que sustituir de todos modos, y de ahi
+// salieron los dos peores crashes del 2026-09-10.
+//
+// Solo lo usamos por tres exports -- slGetFeatureFunction, slInit y
+// slGetNewFrameToken -- que cualquier version exporta. No le parcheamos un byte.
+static bool g_inter_fuera = true;
 // mfg-sllog.txt esta presente: ademas del log, se sube el nivel en Preferences.
 static bool g_sllog_on = false;
 // Probado en el sample del banco, que como Halo no pedia OTA: banderas 133 ->
@@ -10269,9 +10289,9 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                             (unsigned)g_force_generated);
                 }
             }
-            if (flag_file(L"mfg-sininterposer.txt")) {
-                g_inter_fuera = true;
-                log_line("base: el interposer queda AFUERA (mfg-sininterposer.txt)");
+            if (flag_file(L"mfg-coninterposer.txt")) {
+                g_inter_fuera = false;
+                log_line("base: el interposer TAMBIEN se sustituye (mfg-coninterposer.txt)");
             }
             if (flag_file(L"mfg-sinbase.txt")) {
                 g_snippet_on = false;
