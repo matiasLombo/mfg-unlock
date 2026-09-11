@@ -74,26 +74,26 @@ static void log_wide(const char *label, const UNICODE_STRING *s) {
 // la siguiente puede actuar, que es lo que pidio el usuario.
 //
 // Nada de esto sustituye ni parchea: solo mira.
-struct CopiaPlugin {
+struct PluginCopy {
     const unsigned char *base;
-    size_t largo;
-    unsigned menor;        // 2.<menor>; 0 si no se pudo leer
-    int sitios_cuenta;     // del parche de la cuenta, por copia
-    int sitios_pacer;
-    bool viva;
+    size_t size;
+    unsigned minor;        // 2.<menor>; 0 si no se pudo leer
+    int count_sites;     // del parche de la cuenta, por copia
+    int pacer_sites;
+    bool live;
 };
-static CopiaPlugin g_copias[8];
-static int g_copias_n = 0;
-static unsigned long long g_primera_copia_ms = 0;
-static bool g_veredicto_escrito = false;
+static PluginCopy g_copies[8];
+static int g_copies_n = 0;
+static unsigned long long g_first_copy_ms = 0;
+static bool g_verdict_written = false;
 
-static void copia_registrar(const unsigned char *base, size_t largo, unsigned menor,
-                            int sitios_cuenta, int sitios_pacer) {
-    if (g_copias_n >= 8) return;
-    CopiaPlugin &c = g_copias[g_copias_n++];
-    c.base = base; c.largo = largo; c.menor = menor;
-    c.sitios_cuenta = sitios_cuenta; c.sitios_pacer = sitios_pacer; c.viva = true;
-    if (g_primera_copia_ms == 0) g_primera_copia_ms = GetTickCount64();
+static void copy_register(const unsigned char *base, size_t size, unsigned minor,
+                            int count_sites, int pacer_sites) {
+    if (g_copies_n >= 8) return;
+    PluginCopy &c = g_copies[g_copies_n++];
+    c.base = base; c.size = size; c.minor = minor;
+    c.count_sites = count_sites; c.pacer_sites = pacer_sites; c.live = true;
+    if (g_first_copy_ms == 0) g_first_copy_ms = GetTickCount64();
 }
 
 // Cual de las copias registradas contiene este puntero.
@@ -103,15 +103,15 @@ static void copia_registrar(const unsigned char *base, size_t largo, unsigned me
 // otra los tiene, ahi esta el defecto de fondo que este proyecto viene pagando
 // juego por juego -- parchear todas las copias y confiar, en vez de verificar el
 // efecto en la que corre.
-int g_copia_ejecuta = -1;   // indice en g_copias, -1 = todavia no se sabe
+int g_executing_copy = -1;   // indice en g_copias, -1 = todavia no se sabe
 // Distinto de lo anterior: si el interposer llego a resolvernos una funcion de
 // DLSS-G. Sin esto, "no se sabe cual ejecuta" y "el gancho nunca disparo" serian
 // el mismo estado, y el segundo NO es una topologia rota -- es falta de dato.
 // Apagar el mod por falta de dato seria la misma clase de regla no verificada
 // que este trabajo viene a sacar.
-bool g_ejecuta_resuelto = false;
+bool g_executing_resolved = false;
 
-static void copia_que_ejecuta(const void *fn, const char *nombre) {
+static void executing_copy(const void *fn, const char *name) {
     static bool said = false;
     if (said || fn == nullptr) return;
     const unsigned char *p = (const unsigned char *)fn;
@@ -123,13 +123,13 @@ static void copia_que_ejecuta(const void *fn, const char *nombre) {
     // indice 0, sigue mapeada 0" junto a "copia inactiva indice 1, sigue mapeada
     // 1", que es una contradiccion. Un puntero que el interposer acaba de
     // resolver no puede caer en un modulo descargado.
-    int cual = -1;
-    for (int pasada = 0; pasada < 2 && cual < 0; ++pasada) {
-        for (int i = 0; i < g_copias_n; ++i) {
-            if (g_copias[i].base == nullptr) continue;
-            if (pasada == 0 && !g_copias[i].viva) continue;
-            if (p >= g_copias[i].base && p < g_copias[i].base + g_copias[i].largo) {
-                cual = i;
+    int which = -1;
+    for (int pass_n = 0; pass_n < 2 && which < 0; ++pass_n) {
+        for (int i = 0; i < g_copies_n; ++i) {
+            if (g_copies[i].base == nullptr) continue;
+            if (pass_n == 0 && !g_copies[i].live) continue;
+            if (p >= g_copies[i].base && p < g_copies[i].base + g_copies[i].size) {
+                which = i;
                 break;
             }
         }
@@ -137,46 +137,46 @@ static void copia_que_ejecuta(const void *fn, const char *nombre) {
     // Solo se cierra el diagnostico si el puntero CAYO. Si no cayo se deja
     // constancia y se vuelve a intentar con la funcion siguiente: latchear un
     // fallo es quedarse con el peor dato de la corrida.
-    if (cual >= 0) {
+    if (which >= 0) {
         said = true;
-        g_copia_ejecuta = cual;
-        g_ejecuta_resuelto = true;
+        g_executing_copy = which;
+        g_executing_resolved = true;
     }
     // La fase se decide con este dato, y no siempre llega antes del primer
     // frame token: en GTA V el token fue a los 34 s y esto a los 38. Asumir un
     // orden que el juego no garantiza es la misma clase de error que decidir la
     // copia viva por orden de mapeo. Se re-evalua ahora que el dato existe.
-    if (g_ejecuta_resuelto) {
-        g_fase = (LONG)Fase::ARMADO;
-        evaluar_invariantes();
+    if (g_executing_resolved) {
+        g_phase = (LONG)Phase::ARMED;
+        evaluate_invariants();
     }
     log_line("--- CAPA 0: que copia de sl.dlss_g ejecuta ---");
-    log_line(nombre);
-    if (cual < 0) {
-        static int avisos = 0;
-        if (avisos < 4) {
-            ++avisos;
+    log_line(name);
+    if (which < 0) {
+        static int warnings = 0;
+        if (warnings < 4) {
+            ++warnings;
             log_num("  el puntero NO cae en ninguna de las copias registradas; van ",
-                    (unsigned)g_copias_n);
+                    (unsigned)g_copies_n);
             log_line("  (se reintenta con la proxima funcion de DLSS-G)");
         }
         return;
     }
-    for (int i = 0; i < g_copias_n; ++i) {
-        log_num(i == cual ? "  copia EJECUTA, indice " : "  copia inactiva, indice ",
+    for (int i = 0; i < g_copies_n; ++i) {
+        log_num(i == which ? "  copia EJECUTA, indice " : "  copia inactiva, indice ",
                 (unsigned)i);
-        log_num("    version 2.", (unsigned)g_copias[i].menor);
-        log_num("    sitios de cuenta ", (unsigned)g_copias[i].sitios_cuenta);
-        log_num("    sitios de pacer ", (unsigned)g_copias[i].sitios_pacer);
-        log_num("    sigue mapeada (1 = si) ", (unsigned)(g_copias[i].viva ? 1 : 0));
+        log_num("    version 2.", (unsigned)g_copies[i].minor);
+        log_num("    sitios de cuenta ", (unsigned)g_copies[i].count_sites);
+        log_num("    sitios de pacer ", (unsigned)g_copies[i].pacer_sites);
+        log_num("    sigue mapeada (1 = si) ", (unsigned)(g_copies[i].live ? 1 : 0));
     }
     // Y lo que importa de verdad: si la que ejecuta no recibio los parches, todo
     // lo que midamos despues es sobre un binario que no tocamos.
-    if (g_copias[cual].sitios_cuenta <= 0 || g_copias[cual].sitios_pacer <= 0) {
+    if (g_copies[which].count_sites <= 0 || g_copies[which].pacer_sites <= 0) {
         diag::Line l = diag::invariant(diag::Layer::IDENTITY, "copia-parcheada",
                                          "la copia que ejecuta no tiene todos los parches");
-        l.pair("copia", cual).pair("cuenta", g_copias[cual].sitios_cuenta)
-         .pair("pacer", g_copias[cual].sitios_pacer);
+        l.pair("copia", which).pair("cuenta", g_copies[which].count_sites)
+         .pair("pacer", g_copies[which].pacer_sites);
         log_line(l.b);
     } else
         log_line("  la copia que ejecuta tiene cuenta y pacer parcheados");
@@ -184,7 +184,7 @@ static void copia_que_ejecuta(const void *fn, const char *nombre) {
     {
         const unsigned char *b = (const unsigned char *)g_dlssg_base;
         log_num("  g_dlssg_base apunta a la copia que ejecuta (1 = si) ",
-                (unsigned)(b == g_copias[cual].base ? 1 : 0));
+                (unsigned)(b == g_copies[which].base ? 1 : 0));
     }
 }
 
@@ -202,51 +202,51 @@ static void copia_que_ejecuta(const void *fn, const char *nombre) {
 // cual es. Los demas invariantes se reportan pero no bloquean, porque todavia
 // no estan medidos en los tres juegos y apagar el mod por uno de ellos seria
 // exactamente el tipo de regla no verificada que este trabajo viene a sacar.
-static void evaluar_invariantes(void) {
-    if (g_fase != (LONG)Fase::ARMADO) return;
-    int vivas = 0, con_cuenta = 0, con_pacer = 0;
-    for (int i = 0; i < g_copias_n; ++i) {
-        if (!g_copias[i].viva) continue;
-        ++vivas;
-        if (g_copias[i].sitios_cuenta > 0) ++con_cuenta;
-        if (g_copias[i].sitios_pacer > 0) ++con_pacer;
+static void evaluate_invariants(void) {
+    if (g_phase != (LONG)Phase::ARMED) return;
+    int live_n = 0, with_count = 0, with_pacer = 0;
+    for (int i = 0; i < g_copies_n; ++i) {
+        if (!g_copies[i].live) continue;
+        ++live_n;
+        if (g_copies[i].count_sites > 0) ++with_count;
+        if (g_copies[i].pacer_sites > 0) ++with_pacer;
     }
     // Una linea con todos los numeros de la topologia, y el veredicto adelante.
-    const bool pasivo = g_ejecuta_resuelto && g_copia_ejecuta < 0;
-    diag::Line l = diag::verdict(pasivo ? "PASIVO" : "ACTIVO",
-                                    pasivo ? "no se identifico que copia ejecuta; no se parchea ni se reescriben opciones"
+    const bool passive = g_executing_resolved && g_executing_copy < 0;
+    diag::Line l = diag::verdict(passive ? "PASIVO" : "ACTIVO",
+                                    passive ? "no se identifico que copia ejecuta; no se parchea ni se reescriben opciones"
                                            : "topologia identificada");
-    l.pair("copias", g_copias_n).pair("vivas", vivas).pair("con_cuenta", con_cuenta)
-     .pair("con_pacer", con_pacer).pair("ejecuta", g_copia_ejecuta)
-     .pair("ejecuta_cuenta", g_copia_ejecuta >= 0 ? g_copias[g_copia_ejecuta].sitios_cuenta : -1)
-     .pair("ejecuta_pacer", g_copia_ejecuta >= 0 ? g_copias[g_copia_ejecuta].sitios_pacer : -1)
+    l.pair("copias", g_copies_n).pair("vivas", live_n).pair("con_cuenta", with_count)
+     .pair("con_pacer", with_pacer).pair("ejecuta", g_executing_copy)
+     .pair("ejecuta_cuenta", g_executing_copy >= 0 ? g_copies[g_executing_copy].count_sites : -1)
+     .pair("ejecuta_pacer", g_executing_copy >= 0 ? g_copies[g_executing_copy].pacer_sites : -1)
      .pair("multiplicador", count_is_multiplier() ? 1 : 0)
-     .pair("resuelto", g_ejecuta_resuelto ? 1 : 0);
+     .pair("resuelto", g_executing_resolved ? 1 : 0);
     log_line(l.b);
-    if (pasivo) {
-        g_fase = (LONG)Fase::PASIVO;
+    if (passive) {
+        g_phase = (LONG)Phase::PASSIVE;
         return;
     }
-    g_fase = (LONG)Fase::VERIFICADO;
-    g_fase = (LONG)Fase::ACTIVO;
+    g_phase = (LONG)Phase::VERIFIED;
+    g_phase = (LONG)Phase::ACTIVE;
 }
 
-static void copia_descargada(const unsigned char *base, size_t largo) {
-    for (int i = 0; i < g_copias_n; ++i) {
-        if (g_copias[i].base == base && g_copias[i].largo == largo) g_copias[i].viva = false;
+static void copy_unloaded(const unsigned char *base, size_t size) {
+    for (int i = 0; i < g_copies_n; ++i) {
+        if (g_copies[i].base == base && g_copies[i].size == size) g_copies[i].live = false;
     }
 }
 
 // VERDE = 0, AMARILLO = 1, ROJO = 2. Ver docs/deteccion-del-set.md.
-static int veredicto_del_set(int *vivas_out, int *vivas_con_sitio_out) {
-    int vivas = 0, con_sitio = 0;
-    for (int i = 0; i < g_copias_n; ++i) {
-        if (!g_copias[i].viva) continue;
-        ++vivas;
-        if (g_copias[i].sitios_cuenta > 0) ++con_sitio;
+static int set_verdict(int *live_out, int *live_with_site_out) {
+    int live_n = 0, with_site = 0;
+    for (int i = 0; i < g_copies_n; ++i) {
+        if (!g_copies[i].live) continue;
+        ++live_n;
+        if (g_copies[i].count_sites > 0) ++with_site;
     }
-    if (vivas_out != nullptr) *vivas_out = vivas;
-    if (vivas_con_sitio_out != nullptr) *vivas_con_sitio_out = con_sitio;
+    if (live_out != nullptr) *live_out = live_n;
+    if (live_with_site_out != nullptr) *live_with_site_out = with_site;
     // Dos estados, no tres.
     //
     // Hubo un AMARILLO para "anda pero es fragil" (mas de una copia mapeada, que
@@ -277,20 +277,20 @@ static int veredicto_del_set(int *vivas_out, int *vivas_con_sitio_out) {
     //
     // Indistinguible. Y de paso quedo probado que el cruce de trenes funciona:
     // corrio con el interposer 2.7 del juego y siete plugins 2.12.
-    if (g_copias_n != 1) return 2;                // mas de una copia, o ninguna
-    if (vivas != 1 || con_sitio != 1) return 2;   // se descargo, o no puede contar
-    if (g_copias[0].sitios_pacer <= 0) return 2;  // sin pacer
+    if (g_copies_n != 1) return 2;                // mas de una copia, o ninguna
+    if (live_n != 1 || with_site != 1) return 2;   // se descargo, o no puede contar
+    if (g_copies[0].pacer_sites <= 0) return 2;  // sin pacer
     // La version del interposer se lee aca y no de g_set_version, que solo se
     // llena cuando ya se decidio sustituir -- o sea nunca en la corrida que
     // observa, que es justo donde este chequeo tiene que valer.
     {
-        HMODULE inter = GetModuleHandleW(L"sl.interposer.dll");
-        if (inter != nullptr && g_copias[0].menor != 0) {
+        HMODULE interposer = GetModuleHandleW(L"sl.interposer.dll");
+        if (interposer != nullptr && g_copies[0].minor != 0) {
             wchar_t ri[MAX_PATH];
-            if (GetModuleFileNameW(inter, ri, MAX_PATH) != 0) {
+            if (GetModuleFileNameW(interposer, ri, MAX_PATH) != 0) {
                 unsigned mi = 0, ni = 0;
-                version_soportada(ri, &mi, &ni);
-                if (ni != 0 && ni != g_copias[0].menor) return 2;   // set mezclado
+                version_supported(ri, &mi, &ni);
+                if (ni != 0 && ni != g_copies[0].minor) return 2;   // set mezclado
             }
         }
     }
@@ -298,7 +298,7 @@ static int veredicto_del_set(int *vivas_out, int *vivas_con_sitio_out) {
 }
 
 // El estado va a carpeta propia, NUNCA al lado del juego: [[ships-as-one-dll]].
-static bool ruta_de_estado(wchar_t *out, int max) {
+static bool state_path(wchar_t *out, int max) {
     wchar_t base[MAX_PATH];
     if (GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH) == 0) return false;
     wchar_t dir[MAX_PATH];
@@ -318,10 +318,10 @@ static bool ruta_de_estado(wchar_t *out, int max) {
     // juegos distintos.
     wchar_t exe[MAX_PATH];
     const DWORD nn = GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    int corte = (int)nn;
-    while (corte > 0 && exe[corte-1] != L'\\' && exe[corte-1] != L'/') --corte;
+    int cut = (int)nn;
+    while (cut > 0 && exe[cut-1] != L'\\' && exe[cut-1] != L'/') --cut;
     unsigned long long h = 1469598103934665603ULL;
-    for (int i = corte; i < (int)nn; ++i) {
+    for (int i = cut; i < (int)nn; ++i) {
         wchar_t c = exe[i];
         if (c >= L'A' && c <= L'Z') c = (wchar_t)(c + 32);
         h ^= (unsigned long long)c; h *= 1099511628211ULL;
@@ -364,24 +364,24 @@ static bool ruta_de_estado(wchar_t *out, int max) {
 // fixture no se podia medir. 8 s sigue siendo cinco veces el peor asentamiento
 // visto y sobrevive a las corridas cortas.
 static void emit_verdict_if_due(void) {
-    if (g_veredicto_escrito || g_copias_n == 0) return;
-    if (GetTickCount64() - g_primera_copia_ms < 8000ULL) return;
-    g_veredicto_escrito = true;
+    if (g_verdict_written || g_copies_n == 0) return;
+    if (GetTickCount64() - g_first_copy_ms < 8000ULL) return;
+    g_verdict_written = true;
 
-    int vivas = 0, con_sitio = 0;
-    const int v = veredicto_del_set(&vivas, &con_sitio);
+    int live_n = 0, with_site = 0;
+    const int v = set_verdict(&live_n, &with_site);
     // El indice 1 ya no se produce; se deja el nombre para poder leer archivos
     // de estado viejos que digan AMARILLO (parsean a 1, que no habilita nada).
     static const char *kNombre[3] = { "VERDE", "AMARILLO", "ROJO" };
     log_line("--- veredicto del set de Streamline ---");
-    log_num("  copias vistas ", (unsigned)g_copias_n);
-    log_num("  vivas ", (unsigned)vivas);
-    log_num("  vivas con el sitio de la cuenta ", (unsigned)con_sitio);
-    for (int i = 0; i < g_copias_n; ++i) {
-        log_num("  copia 2.", (unsigned)g_copias[i].menor);
-        log_num("    sitios de cuenta ", (unsigned)g_copias[i].sitios_cuenta);
-        log_num("    sitios de pacer ", (unsigned)g_copias[i].sitios_pacer);
-        log_num("    viva (1 = si) ", (unsigned)(g_copias[i].viva ? 1 : 0));
+    log_num("  copias vistas ", (unsigned)g_copies_n);
+    log_num("  vivas ", (unsigned)live_n);
+    log_num("  vivas con el sitio de la cuenta ", (unsigned)with_site);
+    for (int i = 0; i < g_copies_n; ++i) {
+        log_num("  copia 2.", (unsigned)g_copies[i].minor);
+        log_num("    sitios de cuenta ", (unsigned)g_copies[i].count_sites);
+        log_num("    sitios de pacer ", (unsigned)g_copies[i].pacer_sites);
+        log_num("    viva (1 = si) ", (unsigned)(g_copies[i].live ? 1 : 0));
     }
     char b[64] = "  VEREDICTO: ";
     int k = 13;
@@ -413,8 +413,8 @@ static void emit_verdict_if_due(void) {
         log_line("  (hubo sustitucion: no se pisa el diagnostico guardado)");
         return;
     }
-    wchar_t ruta[MAX_PATH];
-    if (!ruta_de_estado(ruta, MAX_PATH)) return;
+    wchar_t path[MAX_PATH];
+    if (!state_path(path, MAX_PATH)) return;
     // El consentimiento tiene que sobrevivir a esta reescritura.
     //
     // Se abre con CREATE_ALWAYS: trunca. Se escribian solo veredicto, vivas y
@@ -431,23 +431,23 @@ static void emit_verdict_if_due(void) {
     // Se relee del disco en vez de confiar en g_consentimiento: quien lo llena
     // es el lazo de teclas, que no corre en todos los procesos ni bajo el banco.
     // leer_veredicto_previo es idempotente.
-    leer_veredicto_previo();
-    HANDLE h = CreateFileW(ruta, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+    read_previous_verdict();
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
     char txt[192];
     int t = 0;
-    const char *cab = "veredicto=";
-    for (const char *q = cab; *q != 0; ++q) txt[t++] = *q;
+    const char *header = "veredicto=";
+    for (const char *q = header; *q != 0; ++q) txt[t++] = *q;
     for (const char *q = kNombre[v]; *q != 0; ++q) txt[t++] = *q;
     txt[t++] = '\n';
     const char *l2 = "vivas=";
     for (const char *q = l2; *q != 0; ++q) txt[t++] = *q;
-    txt[t++] = (char)('0' + (vivas > 9 ? 9 : vivas));
+    txt[t++] = (char)('0' + (live_n > 9 ? 9 : live_n));
     txt[t++] = '\n';
     const char *l3 = "con_sitio=";
     for (const char *q = l3; *q != 0; ++q) txt[t++] = *q;
-    txt[t++] = (char)('0' + (con_sitio > 9 ? 9 : con_sitio));
+    txt[t++] = (char)('0' + (with_site > 9 ? 9 : with_site));
     txt[t++] = '\n';
     if (g_consentimiento >= 0) {
         const char *l4 = g_consentimiento == 1 ? "consentimiento=si\n"
@@ -463,13 +463,13 @@ static void emit_verdict_if_due(void) {
 }
 // ---------------------------------------------------------------------------
 
-static void sitio_drop(volatile unsigned char **list, int *n,
-                       const unsigned char *base, size_t largo) {
+static void site_drop(volatile unsigned char **list, int *n,
+                       const unsigned char *base, size_t size) {
     int w = 0;
     for (int i = 0; i < *n; ++i) {
         const unsigned char *q = (const unsigned char *)list[i];
-        const bool dentro = q >= base && q < base + largo;
-        if (!dentro) list[w++] = list[i];
+        const bool inside = q >= base && q < base + size;
+        if (!inside) list[w++] = list[i];
     }
     for (int i = w; i < *n; ++i) list[i] = nullptr;
     *n = w;
@@ -478,15 +478,15 @@ static void sitio_drop(volatile unsigned char **list, int *n,
 static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
     if (reason == 2 && d != nullptr) {                       // 2 = UNLOADED
         const unsigned char *b = (const unsigned char *)d->DllBase;
-        const size_t largo = (size_t)d->SizeOfImage;
-        const int antes = g_wic_n + g_imm_n + g_imm2_n + g_imm3_n;
-        sitio_drop(g_wic_sites,  &g_wic_n,  b, largo);
-        sitio_drop(g_imm_sites,  &g_imm_n,  b, largo);
-        sitio_drop(g_imm2_sites, &g_imm2_n, b, largo);
-        sitio_drop(g_imm3_sites, &g_imm3_n, b, largo);
-        copia_descargada(b, largo);
+        const size_t size = (size_t)d->SizeOfImage;
+        const int before = g_wic_n + g_imm_n + g_imm2_n + g_imm3_n;
+        site_drop(g_wic_sites,  &g_wic_n,  b, size);
+        site_drop(g_imm_sites,  &g_imm_n,  b, size);
+        site_drop(g_imm2_sites, &g_imm2_n, b, size);
+        site_drop(g_imm3_sites, &g_imm3_n, b, size);
+        copy_unloaded(b, size);
         const int now_qpc = g_wic_n + g_imm_n + g_imm2_n + g_imm3_n;
-        if (now_qpc != antes) {
+        if (now_qpc != before) {
             log_line("modulo descargado: se retiran sus sitios parcheados");
             log_num("  sitios que quedan ", (unsigned)now_qpc);
         }
@@ -537,11 +537,11 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
             if (u != nullptr && u->Buffer != nullptr) {
                 const int nn = (int)(u->Length / sizeof(wchar_t));
                 if (nn > 0 && nn < MAX_PATH) {
-                    wchar_t ruta[MAX_PATH];
-                    for (int i = 0; i < nn; ++i) ruta[i] = u->Buffer[i];
-                    ruta[nn] = 0;
-                    unsigned may = 0, men = 0;
-                    version_soportada(ruta, &may, &men);
+                    wchar_t path[MAX_PATH];
+                    for (int i = 0; i < nn; ++i) path[i] = u->Buffer[i];
+                    path[nn] = 0;
+                    unsigned major = 0, minor_v = 0;
+                    version_supported(path, &major, &minor_v);
                     // Se informa la version y NO se rechaza nada.
                     //
                     // Aca hubo un filtro que se negaba a parchear lo que no
@@ -560,7 +560,7 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
                     //
                     // Halo se resuelve donde corresponde, en la carga: alli la
                     // 2.14 ni llega a mapearse.
-                    log_num("  version: 2.", (unsigned long long)men);
+                    log_num("  version: 2.", (unsigned long long)minor_v);
                 }
             }
         }
@@ -582,7 +582,7 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         log_num("  CPU pacer enabled, sites: ", (unsigned)n);
         // M1: se anota esta copia tal como quedo. No decide nada todavia.
         {
-            unsigned may_c = 0, men_c = 0;
+            unsigned major_c = 0, minor_c = 0;
             const UNICODE_STRING *u = d->FullDllName;
             if (u != nullptr && u->Buffer != nullptr) {
                 const int nn = (int)(u->Length / sizeof(wchar_t));
@@ -590,11 +590,11 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
                     wchar_t rr[MAX_PATH];
                     for (int i = 0; i < nn; ++i) rr[i] = u->Buffer[i];
                     rr[nn] = 0;
-                    version_soportada(rr, &may_c, &men_c);
+                    version_supported(rr, &major_c, &minor_c);
                 }
             }
-            copia_registrar(reinterpret_cast<const unsigned char *>(d->DllBase),
-                            (size_t)d->SizeOfImage, men_c, g_wic_sites_last, n);
+            copy_register(reinterpret_cast<const unsigned char *>(d->DllBase),
+                            (size_t)d->SizeOfImage, minor_c, g_wic_sites_last, n);
             g_wic_sites_last = -1;
         }
         if (g_meter_off) {
@@ -752,8 +752,8 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
 // SI lo tenga y se carga ese en su lugar. Si el del juego ya sirve, no se toca
 // nada -- de modo que esto no le puede cambiar el comportamiento a un juego que
 // hoy funciona, solo puede ayudar a uno que hoy no.
-static int sitios_de_cuenta(const wchar_t *ruta) {
-    HANDLE h = CreateFileW(ruta, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+static int count_sites_in(const wchar_t *path) {
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return -1;
     LARGE_INTEGER sz;
@@ -764,11 +764,11 @@ static int sitios_de_cuenta(const wchar_t *ruta) {
     const DWORD n = (DWORD)sz.QuadPart;
     unsigned char *buf = (unsigned char *)VirtualAlloc(nullptr, n, MEM_COMMIT, PAGE_READWRITE);
     if (buf == nullptr) { CloseHandle(h); return -1; }
-    DWORD leidos = 0;
-    const BOOL ok = ReadFile(h, buf, n, &leidos, nullptr);
+    DWORD read_n = 0;
+    const BOOL ok = ReadFile(h, buf, n, &read_n, nullptr);
     CloseHandle(h);
     int sitios = 0;
-    if (ok && leidos == n) {
+    if (ok && read_n == n) {
         // La misma firma que usa patch_work_item_count, sobre el archivo en vez
         // de sobre el modulo mapeado: mov eax,[rdx+4] / mov r8d,0xC0 / mov [rcx+4],eax
         for (DWORD i = 0; i + 12 < n; ++i) {
@@ -813,9 +813,9 @@ static int sitios_de_cuenta(const wchar_t *ruta) {
 // una carga desde adentro del loader es exactamente como se consigue un
 // deadlock. Asi que se busca la cadena "FileVersion" del recurso VS_VERSION_INFO
 // en el archivo y se parsea el valor que la sigue: sin APIs y sin loader.
-static bool version_soportada(const wchar_t *ruta, unsigned *may_out, unsigned *men_out) {
-    if (may_out != nullptr) *may_out = 0;
-    if (men_out != nullptr) *men_out = 0;
+static bool version_supported(const wchar_t *path, unsigned *major_out, unsigned *minor_out) {
+    if (major_out != nullptr) *major_out = 0;
+    if (minor_out != nullptr) *minor_out = 0;
     // FILE_SHARE_DELETE y no FILE_SHARE_WRITE, que es el modo correcto para un
     // archivo que el cargador puede tener mapeado.
     //
@@ -825,7 +825,7 @@ static bool version_soportada(const wchar_t *ruta, unsigned *may_out, unsigned *
     // el log_num, que imprimia una variable en cero. Se afirmo una causa sin
     // medirla y se escribio aca como si estuviera establecida. El modo de
     // apertura se deja porque es el correcto, no porque haya arreglado eso.
-    HANDLE h = CreateFileW(ruta, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER sz;
@@ -836,11 +836,11 @@ static bool version_soportada(const wchar_t *ruta, unsigned *may_out, unsigned *
     const DWORD n = (DWORD)sz.QuadPart;
     unsigned char *buf = (unsigned char *)VirtualAlloc(nullptr, n, MEM_COMMIT, PAGE_READWRITE);
     if (buf == nullptr) { CloseHandle(h); return false; }
-    DWORD leidos = 0;
-    const BOOL ok_read = ReadFile(h, buf, n, &leidos, nullptr);
+    DWORD read_n = 0;
+    const BOOL ok_read = ReadFile(h, buf, n, &read_n, nullptr);
     CloseHandle(h);
     bool ok = false;
-    if (ok_read && leidos == n) {
+    if (ok_read && read_n == n) {
         static const wchar_t kClave[] = L"FileVersion";
         const int klen = 11;
         for (DWORD i = 0; i + (DWORD)(klen * 2) + 128 < n; i += 2) {
@@ -851,25 +851,25 @@ static bool version_soportada(const wchar_t *ruta, unsigned *may_out, unsigned *
             }
             if (!similar) continue;
             // El valor viene despues, con relleno de ceros en el medio.
-            unsigned may = 0, men = 0, campo = 0, acum = 0;
-            bool en_numero = false, listo = false;
-            for (int j = klen; j < 80 && !listo; ++j) {
+            unsigned major = 0, minor_v = 0, field = 0, acc = 0;
+            bool as_number = false, ready = false;
+            for (int j = klen; j < 80 && !ready; ++j) {
                 const wchar_t c = w[j];
                 if (c >= L'0' && c <= L'9') {
-                    acum = acum * 10 + (unsigned)(c - L'0');
-                    en_numero = true;
-                } else if (en_numero && (c == L',' || c == L'.' || c == L' ' || c == 0)) {
-                    if (campo == 0) may = acum; else if (campo == 1) { men = acum; listo = true; }
-                    ++campo;
-                    acum = 0;
-                    en_numero = false;
-                } else if (en_numero) {
+                    acc = acc * 10 + (unsigned)(c - L'0');
+                    as_number = true;
+                } else if (as_number && (c == L',' || c == L'.' || c == L' ' || c == 0)) {
+                    if (field == 0) major = acc; else if (field == 1) { minor_v = acc; ready = true; }
+                    ++field;
+                    acc = 0;
+                    as_number = false;
+                } else if (as_number) {
                     break;      // basura: no era este
                 }
             }
-            if (campo >= 2 || listo) {
-                if (may_out != nullptr) *may_out = may;
-                if (men_out != nullptr) *men_out = men;
+            if (field >= 2 || ready) {
+                if (major_out != nullptr) *major_out = major;
+                if (minor_out != nullptr) *minor_out = minor_v;
                 // 2.11, 2.12 y 2.13. La lista sale de evidencia en juego, no de
             // haber visto una firma suelta: GTA V corre 2.13 y anda, Cyberpunk
             // corre 2.11 y anda, y 2.12 es la que este archivo tiene anotada con
@@ -880,7 +880,7 @@ static bool version_soportada(const wchar_t *ruta, unsigned *may_out, unsigned *
             //
             // Se probo primero con {12,13} y habria dejado a Cyberpunk sin parchear:
             // su plugin es 2.11. Verificado sobre los archivos antes de instalar.
-            ok = (may == 2 && (men == 11 || men == 12 || men == 13));
+            ok = (major == 2 && (minor_v == 11 || minor_v == 12 || minor_v == 13));
                 break;
             }
         }
@@ -891,17 +891,17 @@ static bool version_soportada(const wchar_t *ruta, unsigned *may_out, unsigned *
 
 
 // log_wide toma un UNICODE_STRING; esto es para una ruta suelta.
-static void log_ruta(const char *etiqueta, const wchar_t *s) {
+static void log_path(const char *tag, const wchar_t *s) {
     char b[400];
     int k = 0;
-    for (; etiqueta[k] != 0 && k < 40; ++k) b[k] = etiqueta[k];
+    for (; tag[k] != 0 && k < 40; ++k) b[k] = tag[k];
     for (int i = 0; s[i] != 0 && k < 398; ++i, ++k)
         b[k] = (s[i] < 128) ? (char)s[i] : '?';
     b[k] = 0;
     log_line(b);
 }
 
-static bool igual_sin_caso(const wchar_t *a, const wchar_t *b) {
+static bool equal_nocase(const wchar_t *a, const wchar_t *b) {
     for (int i = 0;; ++i) {
         wchar_t x = a[i], y = b[i];
         if (x >= L'A' && x <= L'Z') x = (wchar_t)(x + 32);
@@ -930,30 +930,30 @@ static bool igual_sin_caso(const wchar_t *a, const wchar_t *b) {
 // un dlss_g parcheable, este camino no alcanza y hay que decirlo en vez de
 // inventar una mezcla: es exactamente el caso de Halo (interposer 2.7.30, y el
 // unico dlss_g 2.7 de la cache tiene 0 sitios).
-struct ModuloSet {
-    const wchar_t *nombre;      // sl.common.dll
-    wchar_t ruta[MAX_PATH];     // reemplazo elegido, vacio si no hay
+struct ModuleSet {
+    const wchar_t *name;      // sl.common.dll
+    wchar_t path[MAX_PATH];     // reemplazo elegido, vacio si no hay
 };
-static ModuloSet g_set[9] = {
+static ModuleSet g_set[9] = {
     { L"sl.common.dll",  {0} }, { L"sl.dlss_g.dll", {0} },
     { L"sl.pcl.dll",     {0} }, { L"sl.reflex.dll", {0} },
     { L"sl.nis.dll",     {0} }, { L"sl.dlss.dll",   {0} },
     { L"sl.dlss_d.dll",  {0} }, { L"sl.deepdvc.dll",{0} },
     { L"sl.nvperf.dll",  {0} },
 };
-static bool g_set_armado = false;
+static bool g_set_built = false;
 static unsigned g_set_version = 0;
 
 // sl.common.dll -> sl_common_0, que es como se llama la carpeta en la cache.
-static void carpeta_de_cache(const wchar_t *modulo, wchar_t *out) {
+static void cache_folder(const wchar_t *module, wchar_t *out) {
     int k = 0;
-    for (int i = 0; modulo[i] != 0; ++i) {
-        if (modulo[i] == L'.') {
+    for (int i = 0; module[i] != 0; ++i) {
+        if (module[i] == L'.') {
             // el ".dll" final no se copia
-            if (modulo[i+1] == L'd' && modulo[i+2] == L'l' && modulo[i+3] == L'l') break;
+            if (module[i+1] == L'd' && module[i+2] == L'l' && module[i+3] == L'l') break;
             out[k++] = L'_';
         } else {
-            out[k++] = modulo[i];
+            out[k++] = module[i];
         }
     }
     out[k++] = L'_'; out[k++] = L'0'; out[k] = 0;
@@ -969,7 +969,7 @@ static void carpeta_de_cache(const wchar_t *modulo, wchar_t *out) {
 //
 // Verificado antes de conectarlo: el sl.dlss_g del SDK 2.12 tiene los cuatro
 // sitios que parcheamos, en el MISMO RVA (0x47333) que el de la cache.
-static bool ruta_en_nuestro_sdk(const wchar_t *modulo, unsigned menor, wchar_t *out) {
+static bool path_in_our_sdk(const wchar_t *module, unsigned minor, wchar_t *out) {
     // Sin buffer intermedio: esto corre dentro de hk_ldrload, BAJO EL LOADER
     // LOCK, donde la pila es poca. Un wchar_t[MAX_PATH] local aca son 520 bytes
     // y desbordaron la pila de GTA V -- 0xC00000FD en ntdll, el juego ni abrio.
@@ -980,40 +980,40 @@ static bool ruta_en_nuestro_sdk(const wchar_t *modulo, unsigned menor, wchar_t *
     int k = (int)n;
     const wchar_t *sub = L"\\mfg-unlock\\sdk\\2.";
     for (int i = 0; sub[i] != 0; ++i) out[k++] = sub[i];
-    if (menor >= 10) out[k++] = (wchar_t)(L'0' + (menor / 10));
-    out[k++] = (wchar_t)(L'0' + (menor % 10));
+    if (minor >= 10) out[k++] = (wchar_t)(L'0' + (minor / 10));
+    out[k++] = (wchar_t)(L'0' + (minor % 10));
     out[k++] = L'\\';
-    for (int i = 0; modulo[i] != 0 && k < MAX_PATH - 1; ++i) out[k++] = modulo[i];
+    for (int i = 0; module[i] != 0 && k < MAX_PATH - 1; ++i) out[k++] = module[i];
     out[k] = 0;
     return GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES;
 }
 
 // Busca en la cache un archivo del modulo pedido cuya version sea 2.<menor>.
-static bool buscar_en_cache(const wchar_t *modulo, unsigned menor, wchar_t *out) {
+static bool find_in_cache(const wchar_t *module, unsigned minor, wchar_t *out) {
     // Nuestra carpeta manda. La cache de NGX queda de respaldo: si el archivo
     // no esta, nada cambia respecto de antes.
-    if (ruta_en_nuestro_sdk(modulo, menor, out)) return true;
-    wchar_t carpeta[64];
-    carpeta_de_cache(modulo, carpeta);
-    wchar_t patron[MAX_PATH];
+    if (path_in_our_sdk(module, minor, out)) return true;
+    wchar_t folder[64];
+    cache_folder(module, folder);
+    wchar_t pattern[MAX_PATH];
     int k = 0;
     const wchar_t *base = L"C:\\ProgramData\\NVIDIA\\NGX\\models\\";
-    for (; base[k] != 0; ++k) patron[k] = base[k];
-    for (int i = 0; carpeta[i] != 0; ++i) patron[k++] = carpeta[i];
-    const wchar_t *cola = L"\\versions\\*";
-    for (int i = 0; cola[i] != 0; ++i) patron[k++] = cola[i];
-    patron[k] = 0;
+    for (; base[k] != 0; ++k) pattern[k] = base[k];
+    for (int i = 0; folder[i] != 0; ++i) pattern[k++] = folder[i];
+    const wchar_t *tail = L"\\versions\\*";
+    for (int i = 0; tail[i] != 0; ++i) pattern[k++] = tail[i];
+    pattern[k] = 0;
 
     WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW(patron, &fd);
+    HANDLE h = FindFirstFileW(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) return false;
-    bool hallado = false;
+    bool found = false;
     do {
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
         if (fd.cFileName[0] == L'.') continue;
         wchar_t glob[MAX_PATH];
         int q = k - 1;                       // sin el '*'
-        for (int i = 0; i < q; ++i) glob[i] = patron[i];
+        for (int i = 0; i < q; ++i) glob[i] = pattern[i];
         int p = q;
         for (int i = 0; fd.cFileName[i] != 0; ++i) glob[p++] = fd.cFileName[i];
         const wchar_t *sub = L"\\files\\*.dll";
@@ -1024,23 +1024,23 @@ static bool buscar_en_cache(const wchar_t *modulo, unsigned menor, wchar_t *out)
         if (ha == INVALID_HANDLE_VALUE) continue;
         do {
             if (fa.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            wchar_t ruta[MAX_PATH];
+            wchar_t path[MAX_PATH];
             int r = 0;
-            for (int i = 0; i < p - 5; ++i) ruta[r++] = glob[i];   // sin "*.dll"
-            for (int i = 0; fa.cFileName[i] != 0 && r < MAX_PATH - 1; ++i) ruta[r++] = fa.cFileName[i];
-            ruta[r] = 0;
-            unsigned may = 0, men = 0;
-            version_soportada(ruta, &may, &men);
-            if (may == 2 && men == menor) {
-                for (int i = 0; i <= r; ++i) out[i] = ruta[i];
-                hallado = true;
+            for (int i = 0; i < p - 5; ++i) path[r++] = glob[i];   // sin "*.dll"
+            for (int i = 0; fa.cFileName[i] != 0 && r < MAX_PATH - 1; ++i) path[r++] = fa.cFileName[i];
+            path[r] = 0;
+            unsigned major = 0, minor_v = 0;
+            version_supported(path, &major, &minor_v);
+            if (major == 2 && minor_v == minor) {
+                for (int i = 0; i <= r; ++i) out[i] = path[i];
+                found = true;
                 break;
             }
         } while (FindNextFileW(ha, &fa));
         FindClose(ha);
-    } while (!hallado && FindNextFileW(h, &fd));
+    } while (!found && FindNextFileW(h, &fd));
     FindClose(h);
-    return hallado;
+    return found;
 }
 
 // Reemplazo del interposer, que es la unica pieza que la cache de NGX no tiene
@@ -1053,7 +1053,7 @@ static bool buscar_en_cache(const wchar_t *modulo, unsigned menor, wchar_t *out)
 //   2. nuestra carpeta, con lo bajado del release oficial de NVIDIA-RTX.
 //
 // Nunca se escribe al lado del juego.
-static wchar_t g_set_inter[MAX_PATH] = {0};
+static wchar_t g_set_interposer[MAX_PATH] = {0};
 
 // El snippet de NGX, desde NUESTRA carpeta.
 //
@@ -1090,95 +1090,95 @@ static wchar_t g_set_inter[MAX_PATH] = {0};
 // nota ninguna diferencia.
 static wchar_t g_snippet_base[MAX_PATH] = {0};
 
-static bool buscar_snippet(wchar_t *out) {
+static bool find_snippet(wchar_t *out) {
     // El del SDK primero, que es la misma base que los sl.*. La carpeta
     // snippet\ queda de respaldo para copias puestas a mano.
-    if (ruta_en_nuestro_sdk(L"nvngx_dlssg.dll", 12, out)) return true;
+    if (path_in_our_sdk(L"nvngx_dlssg.dll", 12, out)) return true;
     // Sin buffer intermedio, por la misma razon: loader lock, pila corta.
     const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", out, MAX_PATH - 64);
     if (n == 0 || n >= MAX_PATH - 64) return false;
     int k = (int)n;
-    const wchar_t *cola = L"\\mfg-unlock\\snippet\\nvngx_dlssg.dll";
-    for (int i = 0; cola[i] != 0; ++i) out[k++] = cola[i];
+    const wchar_t *tail = L"\\mfg-unlock\\snippet\\nvngx_dlssg.dll";
+    for (int i = 0; tail[i] != 0; ++i) out[k++] = tail[i];
     out[k] = 0;
     return GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES;
 }
 
-static bool version_es(const wchar_t *ruta, unsigned v) {
-    unsigned may = 0, men = 0;
-    version_soportada(ruta, &may, &men);
-    return (may == 2 && men == v);
+static bool version_is(const wchar_t *path, unsigned v) {
+    unsigned major = 0, minor_v = 0;
+    version_supported(path, &major, &minor_v);
+    return (major == 2 && minor_v == v);
 }
 
-static bool buscar_interposer(unsigned v, wchar_t *out) {
+static bool find_interposer(unsigned v, wchar_t *out) {
     // 1) junto al ejecutable
     wchar_t exe[MAX_PATH];
     const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
     if (n > 0 && n < MAX_PATH) {
-        int corte = (int)n;
-        while (corte > 0 && exe[corte-1] != L'\\' && exe[corte-1] != L'/') --corte;
-        wchar_t cand[MAX_PATH];
+        int cut = (int)n;
+        while (cut > 0 && exe[cut-1] != L'\\' && exe[cut-1] != L'/') --cut;
+        wchar_t candidate[MAX_PATH];
         int k = 0;
-        for (; k < corte; ++k) cand[k] = exe[k];
+        for (; k < cut; ++k) candidate[k] = exe[k];
         const wchar_t *name_w = L"sl.interposer.dll";
-        for (int i = 0; name_w[i] != 0; ++i) cand[k++] = name_w[i];
-        cand[k] = 0;
-        if (version_es(cand, v)) {
-            for (int i = 0; i <= k; ++i) out[i] = cand[i];
+        for (int i = 0; name_w[i] != 0; ++i) candidate[k++] = name_w[i];
+        candidate[k] = 0;
+        if (version_is(candidate, v)) {
+            for (int i = 0; i <= k; ++i) out[i] = candidate[i];
             return true;
         }
     }
     // 2) lo que bajamos, en LOCALAPPDATA\mfg-unlock\sdk\2.<v>\sl.interposer.dll
     wchar_t base[MAX_PATH];
     if (GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH) == 0) return false;
-    wchar_t cand[MAX_PATH];
+    wchar_t candidate[MAX_PATH];
     int k = 0;
-    for (; base[k] != 0 && k < MAX_PATH - 64; ++k) cand[k] = base[k];
+    for (; base[k] != 0 && k < MAX_PATH - 64; ++k) candidate[k] = base[k];
     const wchar_t *sub = L"\\mfg-unlock\\sdk\\2.";
-    for (int i = 0; sub[i] != 0; ++i) cand[k++] = sub[i];
-    if (v >= 10) { cand[k++] = (wchar_t)(L'0' + (v / 10)); }
-    cand[k++] = (wchar_t)(L'0' + (v % 10));
-    const wchar_t *cola = L"\\sl.interposer.dll";
-    for (int i = 0; cola[i] != 0; ++i) cand[k++] = cola[i];
-    cand[k] = 0;
-    if (!version_es(cand, v)) return false;
-    for (int i = 0; i <= k; ++i) out[i] = cand[i];
+    for (int i = 0; sub[i] != 0; ++i) candidate[k++] = sub[i];
+    if (v >= 10) { candidate[k++] = (wchar_t)(L'0' + (v / 10)); }
+    candidate[k++] = (wchar_t)(L'0' + (v % 10));
+    const wchar_t *tail = L"\\sl.interposer.dll";
+    for (int i = 0; tail[i] != 0; ++i) candidate[k++] = tail[i];
+    candidate[k] = 0;
+    if (!version_is(candidate, v)) return false;
+    for (int i = 0; i <= k; ++i) out[i] = candidate[i];
     return true;
 }
 
 // Arma el set apuntando a la version del interposer que ya esta cargado.
-static void armar_set_objetivo(void) {
-    if (g_set_armado) return;
-    HMODULE inter = GetModuleHandleW(L"sl.interposer.dll");
-    if (inter == nullptr) return;            // todavia no cargo; se reintenta
-    g_set_armado = true;
+static void build_target_set(void) {
+    if (g_set_built) return;
+    HMODULE interposer = GetModuleHandleW(L"sl.interposer.dll");
+    if (interposer == nullptr) return;            // todavia no cargo; se reintenta
+    g_set_built = true;
 
-    wchar_t ruta_int[MAX_PATH];
-    if (GetModuleFileNameW(inter, ruta_int, MAX_PATH) == 0) return;
-    unsigned may = 0, men = 0;
-    version_soportada(ruta_int, &may, &men);
-    g_set_version = men;
-    log_num("set: el interposer del juego es 2.", (unsigned long long)men);
-    if (may != 2 || men == 0) { log_line("  no se pudo leer su version; no se arma nada"); return; }
+    wchar_t interposer_path[MAX_PATH];
+    if (GetModuleFileNameW(interposer, interposer_path, MAX_PATH) == 0) return;
+    unsigned major = 0, minor_v = 0;
+    version_supported(interposer_path, &major, &minor_v);
+    g_set_version = minor_v;
+    log_num("set: el interposer del juego es 2.", (unsigned long long)minor_v);
+    if (major != 2 || minor_v == 0) { log_line("  no se pudo leer su version; no se arma nada"); return; }
 
-    int hallados = 0;
+    int found_n = 0;
     for (int i = 0; i < 9; ++i) {
-        if (buscar_en_cache(g_set[i].nombre, men, g_set[i].ruta)) ++hallados;
-        else g_set[i].ruta[0] = 0;
+        if (find_in_cache(g_set[i].name, minor_v, g_set[i].path)) ++found_n;
+        else g_set[i].path[0] = 0;
     }
-    log_num("  modulos de esa version encontrados en la cache ", (unsigned long long)hallados);
+    log_num("  modulos de esa version encontrados en la cache ", (unsigned long long)found_n);
 
     // El unico que decide si el set sirve: sin sitio en el dlss_g no hay nada
     // que hacer QUEDANDOSE en la version del interposer.
-    bool sirve = false;
-    if (g_set[1].ruta[0] != 0) {
-        const int s = sitios_de_cuenta(g_set[1].ruta);
+    bool usable = false;
+    if (g_set[1].path[0] != 0) {
+        const int s = count_sites_in(g_set[1].path);
         log_num("  sitios de cuenta en el dlss_g candidato ", (unsigned long long)(unsigned)s);
-        sirve = (s > 0);
+        usable = (s > 0);
     } else {
         log_line("  no hay dlss_g de esa version en la cache");
     }
-    if (sirve) return;
+    if (usable) return;
 
     // Segundo intento: mover TAMBIEN el interposer.
     //
@@ -1195,30 +1195,30 @@ static void armar_set_objetivo(void) {
     // de nuestra propia carpeta (descargado del release oficial) o del propio
     // juego si trae uno de esa version.
     log_line("  se prueba mover tambien el interposer");
-    for (int i = 0; i < 9; ++i) g_set[i].ruta[0] = 0;
+    for (int i = 0; i < 9; ++i) g_set[i].path[0] = 0;
     static const unsigned kCandidatas[3] = { 13, 12, 11 };
     for (int c = 0; c < 3; ++c) {
         const unsigned v = kCandidatas[c];
         wchar_t dlssg[MAX_PATH];
-        if (!buscar_en_cache(L"sl.dlss_g.dll", v, dlssg)) continue;
-        if (sitios_de_cuenta(dlssg) <= 0) continue;
-        wchar_t inter[MAX_PATH];
-        if (!buscar_interposer(v, inter)) {
+        if (!find_in_cache(L"sl.dlss_g.dll", v, dlssg)) continue;
+        if (count_sites_in(dlssg) <= 0) continue;
+        wchar_t interposer[MAX_PATH];
+        if (!find_interposer(v, interposer)) {
             log_num("  hay dlss_g parcheable en 2.", (unsigned long long)v);
             log_line("    pero no hay interposer de esa version ni en el juego ni bajado");
             continue;
         }
-        int hall = 0;
+        int found_cnt = 0;
         for (int i = 0; i < 9; ++i) {
-            if (buscar_en_cache(g_set[i].nombre, v, g_set[i].ruta)) ++hall;
-            else g_set[i].ruta[0] = 0;
+            if (find_in_cache(g_set[i].name, v, g_set[i].path)) ++found_cnt;
+            else g_set[i].path[0] = 0;
         }
-        for (int i = 0; inter[i] != 0; ++i) g_set_inter[i] = inter[i];
-        g_set_inter[MAX_PATH-1] = 0;
+        for (int i = 0; interposer[i] != 0; ++i) g_set_interposer[i] = interposer[i];
+        g_set_interposer[MAX_PATH-1] = 0;
         g_set_version = v;
         log_num("  set completo armado en 2.", (unsigned long long)v);
-        log_num("    modulos de la cache ", (unsigned long long)hall);
-        log_ruta("    interposer: ", inter);
+        log_num("    modulos de la cache ", (unsigned long long)found_cnt);
+        log_path("    interposer: ", interposer);
         return;
     }
     log_line("  no hay ninguna version con dlss_g parcheable E interposer disponible");
@@ -1236,7 +1236,7 @@ static void armar_set_objetivo(void) {
 // todos, sin excepcion.
 typedef NTSTATUS(NTAPI *PFN_LDRLOAD)(PWSTR, PULONG, PUNICODE_STRING, PVOID *);
 static PFN_LDRLOAD g_orig_ldrload = nullptr;
-static wchar_t g_ruta_pedida[MAX_PATH];
+static wchar_t g_requested_path[MAX_PATH];
 // Solo se vigila la carpeta de la cache si el plugin del juego ya resulto
 // inservible y tuvimos que sustituirlo. Un juego cuyo plugin sirve -- GTA V con
 // 2.13, Cyberpunk con 2.11 -- no cambia en nada: sus cargas de la cache siguen
@@ -1254,10 +1254,10 @@ static wchar_t g_ruta_pedida[MAX_PATH];
 
 
 // Agrega la respuesta al mismo archivo de estado, sin tocar el diagnostico.
-static void guardar_consentimiento(int si) {
-    wchar_t ruta[MAX_PATH];
-    if (!ruta_de_estado(ruta, MAX_PATH)) return;
-    HANDLE h = CreateFileW(ruta, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+static void save_consent(int si) {
+    wchar_t path[MAX_PATH];
+    if (!state_path(path, MAX_PATH)) return;
+    HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
     const char *txt = si ? "consentimiento=si\n" : "consentimiento=no\n";
@@ -1267,28 +1267,28 @@ static void guardar_consentimiento(int si) {
     CloseHandle(h);
 }
 
-static void leer_veredicto_previo(void) {
+static void read_previous_verdict(void) {
     if (g_veredicto_leido) return;
     g_veredicto_leido = true;
-    wchar_t ruta[MAX_PATH];
-    if (!ruta_de_estado(ruta, MAX_PATH)) return;
-    HANDLE h = CreateFileW(ruta, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    wchar_t path[MAX_PATH];
+    if (!state_path(path, MAX_PATH)) return;
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
     char b[192];
-    DWORD leidos = 0;
-    const BOOL ok = ReadFile(h, b, sizeof(b) - 1, &leidos, nullptr);
+    DWORD read_n = 0;
+    const BOOL ok = ReadFile(h, b, sizeof(b) - 1, &read_n, nullptr);
     CloseHandle(h);
-    if (!ok || leidos == 0) return;
-    b[leidos] = 0;
-    for (DWORD i = 0; i + 4 < leidos; ++i) {
+    if (!ok || read_n == 0) return;
+    b[read_n] = 0;
+    for (DWORD i = 0; i + 4 < read_n; ++i) {
         if (b[i] == 'R' && b[i+1] == 'O' && b[i+2] == 'J' && b[i+3] == 'O') { g_veredicto_previo = 2; break; }
         if (b[i] == 'V' && b[i+1] == 'E' && b[i+2] == 'R' && b[i+3] == 'D') { g_veredicto_previo = 0; break; }
         if (b[i] == 'A' && b[i+1] == 'M' && b[i+2] == 'A' && b[i+3] == 'R') { g_veredicto_previo = 1; break; }
     }
-    for (DWORD i = 0; i + 16 < leidos; ++i) {
+    for (DWORD i = 0; i + 16 < read_n; ++i) {
         if (b[i]=='c' && b[i+1]=='o' && b[i+2]=='n' && b[i+3]=='s' && b[i+4]=='e') {
-            for (DWORD j = i; j + 2 < leidos; ++j) {
+            for (DWORD j = i; j + 2 < read_n; ++j) {
                 if (b[j] == '=') {
                     g_consentimiento = (b[j+1] == 's') ? 1 : 0;
                     break;
@@ -1299,7 +1299,7 @@ static void leer_veredicto_previo(void) {
     }
 }
 static UNICODE_STRING g_us_alt;
-static LONG g_inter_pedidos = 0;
+static LONG g_interposer_requests = 0;
 
 // Cargar NOSOTROS el reemplazo y devolver el handle, en vez de reescribirle la
 // ruta al cargador.
@@ -1324,13 +1324,13 @@ static LONG g_inter_pedidos = 0;
 // es del proceso y serializa esta funcion -- por eso g_ruta_pedida ya era global
 // -- asi que una bandera simple alcanza y es mas barata que preguntar quien
 // llamo. Sin ella, recursion infinita.
-static LONG g_ldr_reentra = 0;
+static LONG g_ldr_reentry = 0;
 
-static NTSTATUS cargar_propio(const wchar_t *own, PVOID *base) {
+static NTSTATUS load_own(const wchar_t *own, PVOID *base) {
     if (base == nullptr) return (NTSTATUS)0xC0000001L;
-    g_ldr_reentra = 1;
+    g_ldr_reentry = 1;
     HMODULE h = LoadLibraryW(own);
-    g_ldr_reentra = 0;
+    g_ldr_reentry = 0;
     if (h == nullptr) return (NTSTATUS)0xC0000001L;
     *base = (PVOID)h;
     return (NTSTATUS)0L;
@@ -1348,20 +1348,20 @@ static NTSTATUS cargar_propio(const wchar_t *own, PVOID *base) {
 // que es firma de pila agotada y no de puntero invalido. El marco era identico
 // en el binario anterior, asi que el peligro no es nuevo -- pero 3288 bytes
 // bajo el loader lock no tienen defensa.
-static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombre,
+static NTSTATUS NTAPI hk_ldrload(PWSTR path, PULONG chars, PUNICODE_STRING name,
                                  PVOID *base) {
     // Nuestra propia carga pasa de largo. Ver cargar_propio.
-    if (g_ldr_reentra != 0) return g_orig_ldrload(ruta, carac, nombre, base);
-    if (nombre == nullptr || nombre->Buffer == nullptr || nombre->Length == 0)
-        return g_orig_ldrload(ruta, carac, nombre, base);
-    const int n = (int)(nombre->Length / sizeof(wchar_t));
-    if (n <= 0 || n >= MAX_PATH) return g_orig_ldrload(ruta, carac, nombre, base);
+    if (g_ldr_reentry != 0) return g_orig_ldrload(path, chars, name, base);
+    if (name == nullptr || name->Buffer == nullptr || name->Length == 0)
+        return g_orig_ldrload(path, chars, name, base);
+    const int n = (int)(name->Length / sizeof(wchar_t));
+    if (n <= 0 || n >= MAX_PATH) return g_orig_ldrload(path, chars, name, base);
     // UNICODE_STRING no viene terminado en cero: se copia para poder mirarlo.
-    for (int i = 0; i < n; ++i) g_ruta_pedida[i] = nombre->Buffer[i];
-    g_ruta_pedida[n] = 0;
-    int corte = n;
-    while (corte > 0 && g_ruta_pedida[corte-1] != L'\\' && g_ruta_pedida[corte-1] != L'/')
-        --corte;
+    for (int i = 0; i < n; ++i) g_requested_path[i] = name->Buffer[i];
+    g_requested_path[n] = 0;
+    int cut = n;
+    while (cut > 0 && g_requested_path[cut-1] != L'\\' && g_requested_path[cut-1] != L'/')
+        --cut;
     // Aca hubo un bloque de diagnostico que escribia al log DESDE ADENTRO de
     // LdrLoadDll, en cada carga de modulo del proceso y con el loader lock
     // tomado. Sirvio para lo que se puso -- probo que el gancho SI ve la copia
@@ -1377,27 +1377,27 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     // resultado era "sitios que quedan 0".
     int idx = -1;
     for (int i = 0; i < 9; ++i) {
-        if (igual_sin_caso(g_ruta_pedida + corte, g_set[i].nombre)) { idx = i; break; }
+        if (equal_nocase(g_requested_path + cut, g_set[i].name)) { idx = i; break; }
     }
     // -2 marca al interposer: se sustituye igual que los demas, pero su ruta
     // vive aparte porque no sale de la cache.
-    const bool es_interposer = igual_sin_caso(g_ruta_pedida + corte, L"sl.interposer.dll");
-    if (es_interposer) idx = -2;
+    const bool is_interposer = equal_nocase(g_requested_path + cut, L"sl.interposer.dll");
+    if (is_interposer) idx = -2;
     // Diagnostico: CADA pedido del interposer, y si ya hay uno mapeado.
     //
     // El banco fallo 5 de 5 con el interposer sustituido y en loaded-modules
     // aparecian DOS: el del sample y el nuestro. Pero en el log habia una sola
     // linea de redireccion, asi que la segunda copia entro por un camino que
     // este gancho no vio. Esto dice cuantos pedidos hay y en que orden.
-    if (es_interposer) {
-        ++g_inter_pedidos;
-        log_num("interposer: pedido numero ", (unsigned)g_inter_pedidos);
-        log_ruta("  ruta pedida: ", g_ruta_pedida);
+    if (is_interposer) {
+        ++g_interposer_requests;
+        log_num("interposer: pedido numero ", (unsigned)g_interposer_requests);
+        log_path("  ruta pedida: ", g_requested_path);
     }
     // -3 marca al snippet de NGX. Sale de nuestra carpeta, igual que el
     // interposer. Ver buscar_snippet.
-    if (g_snippet_on && igual_sin_caso(g_ruta_pedida + corte, L"nvngx_dlssg.dll")) {
-        if (g_snippet_base[0] == 0) buscar_snippet(g_snippet_base);
+    if (g_snippet_on && equal_nocase(g_requested_path + cut, L"nvngx_dlssg.dll")) {
+        if (g_snippet_base[0] == 0) find_snippet(g_snippet_base);
         if (g_snippet_base[0] != 0) idx = -3;
     }
     // Se normaliza antes de comparar: minusculas y todas las barras iguales.
@@ -1412,7 +1412,7 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     //
     // Se vio con una linea de diagnostico: el gancho SI recibe esa ruta. La
     // hipotesis de que NGX la mapeaba fuera del cargador era falsa.
-    bool en_cache = false;
+    bool in_cache = false;
     if (idx < 0) {
         // static, no local: 520 bytes menos de marco en un hook que corre bajo
         // el loader lock. Es seguro porque el loader lock serializa esta
@@ -1420,21 +1420,21 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
         static wchar_t norm[MAX_PATH];
         int nn2 = 0;
         for (; nn2 < n && nn2 < MAX_PATH - 1; ++nn2) {
-            wchar_t c = g_ruta_pedida[nn2];
+            wchar_t c = g_requested_path[nn2];
             if (c == L'/') c = L'\\';
             if (c >= L'A' && c <= L'Z') c = (wchar_t)(c + 32);
             norm[nn2] = c;
         }
         norm[nn2] = 0;
         static const wchar_t kCache[] = L"\\ngx\\models\\sl_";
-        int largo = 0;
-        while (kCache[largo] != 0) ++largo;
-        for (int i = 0; i + largo <= nn2 && !en_cache; ++i) {
+        int size = 0;
+        while (kCache[size] != 0) ++size;
+        for (int i = 0; i + size <= nn2 && !in_cache; ++i) {
             bool m = true;
-            for (int k = 0; k < largo; ++k) {
+            for (int k = 0; k < size; ++k) {
                 if (norm[i + k] != kCache[k]) { m = false; break; }
             }
-            en_cache = m;
+            in_cache = m;
         }
         // CUAL modulo de la cache, no "alguno".
         //
@@ -1452,17 +1452,17 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
         //
         // No se veia en GTA V, que mapea una sola copia y no toca la cache,
         // ni en Cyberpunk, cuyo Reflex propio ya estaba cargado antes.
-        if (en_cache) {
+        if (in_cache) {
             idx = -1;
             for (int i = 0; i < 9 && idx < 0; ++i) {
-                wchar_t carp[64];
-                carpeta_de_cache(g_set[i].nombre, carp);
-                int lc = 0; while (carp[lc] != 0) ++lc;
+                wchar_t folder_w[64];
+                cache_folder(g_set[i].name, folder_w);
+                int lc = 0; while (folder_w[lc] != 0) ++lc;
                 for (int j = 1; j + lc + 1 <= nn2; ++j) {
                     if (norm[j-1] != L'\\') continue;
                     bool m = true;
                     for (int k = 0; k < lc; ++k) {
-                        wchar_t c = carp[k];
+                        wchar_t c = folder_w[k];
                         if (c >= L'A' && c <= L'Z') c = (wchar_t)(c + 32);
                         if (norm[j + k] != c) { m = false; break; }
                     }
@@ -1471,23 +1471,23 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
             }
         }
     }
-    if (idx == -1) return g_orig_ldrload(ruta, carac, nombre, base);
+    if (idx == -1) return g_orig_ldrload(path, chars, name, base);
 
     // El snippet va por su propio camino: no depende del veredicto del set, que
     // es sobre los sl.* del juego. Y no hace falta consentimiento porque no se
     // reemplaza nada del juego -- se carga un archivo nuestro en vez del suyo,
     // igual que el interposer.
     if (idx == -3) {
-        log_ruta("snippet: pedido  ", g_ruta_pedida);
-        log_ruta("  se carga el nuestro: ", g_snippet_base);
+        log_path("snippet: pedido  ", g_requested_path);
+        log_path("  se carga el nuestro: ", g_snippet_base);
         // La semantica NO se decide aca: la decide detectar_semantica mirando el
         // binario que quedo mapeado. Cargarlo desde nuestra carpeta y que sea de
         // una build u otra son cosas distintas.
-        const NTSTATUS st3 = cargar_propio(g_snippet_base, base);
+        const NTSTATUS st3 = load_own(g_snippet_base, base);
         if (st3 < 0) {
             log_num("  no cargo, status ", (unsigned)st3);
             log_line("  se vuelve al del juego");
-            return g_orig_ldrload(ruta, carac, nombre, base);
+            return g_orig_ldrload(path, chars, name, base);
         }
         return st3;
     }
@@ -1556,43 +1556,43 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
     //
     // Y esa copia sin sitios apagaba g_wic_ok para toda la corrida. De ahi salia
     // el freno, la cadencia sin byte y el congelamiento en CUSTOM y DYNAMIC.
-    const bool ya_esta = idx == -2 &&
-                         GetModuleHandleW(g_ruta_pedida + corte) != nullptr;
-    if (ya_esta) {
-        static int dicho_ya = 0;
-        if (dicho_ya < 12) {
-            ++dicho_ya;
-            log_ruta("base: ya mapeado, no se duplica: ", g_ruta_pedida + corte);
+    const bool already_there = idx == -2 &&
+                         GetModuleHandleW(g_requested_path + cut) != nullptr;
+    if (already_there) {
+        static int said_already = 0;
+        if (said_already < 12) {
+            ++said_already;
+            log_path("base: ya mapeado, no se duplica: ", g_requested_path + cut);
         }
-        return g_orig_ldrload(ruta, carac, nombre, base);
+        return g_orig_ldrload(path, chars, name, base);
     }
-    if (g_snippet_on && (idx != -2 || !g_inter_fuera)) {
+    if (g_snippet_on && (idx != -2 || !g_interposer_out)) {
         static wchar_t own[MAX_PATH];
-        const wchar_t *name_w = (idx == -2) ? L"sl.interposer.dll" : g_set[idx].nombre;
-        if (ruta_en_nuestro_sdk(name_w, 12, own)) {
-            log_ruta("base: pedido  ", g_ruta_pedida);
-            log_ruta("  se carga el nuestro: ", own);
+        const wchar_t *name_w = (idx == -2) ? L"sl.interposer.dll" : g_set[idx].name;
+        if (path_in_our_sdk(name_w, 12, own)) {
+            log_path("base: pedido  ", g_requested_path);
+            log_path("  se carga el nuestro: ", own);
             g_ya_sustituimos = true;
-            const NTSTATUS stb = cargar_propio(own, base);
+            const NTSTATUS stb = load_own(own, base);
             if (stb >= 0) return stb;
             log_num("  no cargo, status ", (unsigned)stb);
             log_line("  se vuelve al del juego");
-            return g_orig_ldrload(ruta, carac, nombre, base);
+            return g_orig_ldrload(path, chars, name, base);
         }
     }
 
-    leer_veredicto_previo();
+    read_previous_verdict();
     if (g_veredicto_previo == 2 && g_consentimiento != 1) {
         // ROJO pero sin un si explicito: no se toca nada. Cambiar que binarios
         // corre el juego de alguien no es una decision que tome el dll solo.
-        static bool avisado = false;
-        if (!avisado) {
-            avisado = true;
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
             log_line("set: este juego no puede usar MFG con su Streamline.");
             log_line("  hay un reemplazo disponible, pero falta autorizacion.");
             log_line("  el panel lo pregunta; hasta entonces no se sustituye nada.");
         }
-        return g_orig_ldrload(ruta, carac, nombre, base);
+        return g_orig_ldrload(path, chars, name, base);
     }
     if (g_veredicto_previo != 2) {
         // Sin un ROJO de la corrida anterior no se sustituye NADA. Un juego que
@@ -1603,32 +1603,32 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR ruta, PULONG carac, PUNICODE_STRING nombr
             log_num("set: sin veredicto ROJO previo, no se sustituye. veredicto=",
                     (unsigned long long)(unsigned)(g_veredicto_previo + 1));
         }
-        return g_orig_ldrload(ruta, carac, nombre, base);
+        return g_orig_ldrload(path, chars, name, base);
     }
 
-    armar_set_objetivo();
-    if (g_set_version == 0) return g_orig_ldrload(ruta, carac, nombre, base);
-    const wchar_t *reemplazo = (idx == -2) ? g_set_inter : g_set[idx].ruta;
-    if (reemplazo[0] == 0) return g_orig_ldrload(ruta, carac, nombre, base);
+    build_target_set();
+    if (g_set_version == 0) return g_orig_ldrload(path, chars, name, base);
+    const wchar_t *replacement = (idx == -2) ? g_set_interposer : g_set[idx].path;
+    if (replacement[0] == 0) return g_orig_ldrload(path, chars, name, base);
 
     // Si el que piden YA es de la version del interposer, no se toca: es el caso
     // normal y sustituirlo seria trabajo y riesgo por nada.
-    unsigned may = 0, men = 0;
-    version_soportada(g_ruta_pedida, &may, &men);
-    if (may == 2 && men == g_set_version && !en_cache)
-        return g_orig_ldrload(ruta, carac, nombre, base);
+    unsigned major = 0, minor_v = 0;
+    version_supported(g_requested_path, &major, &minor_v);
+    if (major == 2 && minor_v == g_set_version && !in_cache)
+        return g_orig_ldrload(path, chars, name, base);
 
-    const wchar_t *alt = reemplazo;
-    if (idx == -2) log_num("set: se sustituye el INTERPOSER, pedido 2.", (unsigned long long)men);
-    else           log_num("set: se sustituye un modulo, pedido 2.", (unsigned long long)men);
-    log_ruta("  pedido:  ", g_ruta_pedida);
-    log_ruta("  cargado: ", alt);
+    const wchar_t *alt = replacement;
+    if (idx == -2) log_num("set: se sustituye el INTERPOSER, pedido 2.", (unsigned long long)minor_v);
+    else           log_num("set: se sustituye un modulo, pedido 2.", (unsigned long long)minor_v);
+    log_path("  pedido:  ", g_requested_path);
+    log_path("  cargado: ", alt);
     g_ya_sustituimos = true;
-    const NTSTATUS st = cargar_propio(alt, base);
+    const NTSTATUS st = load_own(alt, base);
     if (st < 0) {
         log_num("  no cargo, status ", (unsigned)st);
         log_line("  se vuelve al del juego");
-        return g_orig_ldrload(ruta, carac, nombre, base);
+        return g_orig_ldrload(path, chars, name, base);
     }
     return st;
 }

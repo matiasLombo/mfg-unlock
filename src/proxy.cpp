@@ -73,19 +73,19 @@ static bool g_veredicto_leido = false;
 // falta un si explicito, y hasta que lo haya el dll no toca nada y lo dice.
 static int g_consentimiento = -1;
 volatile LONG g_pide_permiso = 0;   // lo lee el panel (overlay.h)
-static void leer_veredicto_previo(void);
-static void guardar_consentimiento(int si);
-static bool version_soportada(const wchar_t *ruta, unsigned *may, unsigned *men);
+static void read_previous_verdict(void);
+static void save_consent(int si);
+static bool version_supported(const wchar_t *path, unsigned *major, unsigned *minor_v);
 static bool g_ya_sustituimos = false;                         // M3
 static void emit_verdict_if_due(void);   // M1, definida mas abajo
-static bool ruta_de_estado(wchar_t *out, int max);            // M1, idem
+static bool state_path(wchar_t *out, int max);            // M1, idem
 static void dyn_apply(double base_fps);                          // definida mas abajo
 bool g_dynamic_known = false;
 bool g_ov_enabled = true;
 static void log_line(const char *text);
 static void log_num(const char *label, unsigned long long v);
 // Capa 0: cual copia EJECUTA, atada por el puntero que devuelve el interposer.
-static void copia_que_ejecuta(const void *fn, const char *nombre);
+static void executing_copy(const void *fn, const char *name);
 
 // La fase de la sesion. Monotona: nunca vuelve para atras.
 //
@@ -98,18 +98,18 @@ static void copia_que_ejecuta(const void *fn, const char *nombre);
 // que no habiamos visto producia un crash y una regla reactiva nueva; con esto
 // produce un bloque de diagnostico y nada mas. Es la pieza que hace que "romperse
 // por juego" deje de ser una opcion del codigo.
-enum class Fase { ARMADO, VERIFICADO, ACTIVO, PASIVO };
-static volatile LONG g_fase = (LONG)Fase::ARMADO;
-static inline bool fase_activa(void) { return g_fase == (LONG)Fase::ACTIVO; }
-static inline bool phase_passive(void) { return g_fase == (LONG)Fase::PASIVO; }
-static void evaluar_invariantes(void);
+enum class Phase { ARMED, VERIFIED, ACTIVE, PASSIVE };
+static volatile LONG g_phase = (LONG)Phase::ARMED;
+static inline bool phase_active(void) { return g_phase == (LONG)Phase::ACTIVE; }
+static inline bool phase_passive(void) { return g_phase == (LONG)Phase::PASSIVE; }
+static void evaluate_invariants(void);
 // Alimenta g_present_count desde el runtime cuando no hay hook de Present.
 static void runtime_presents(void);
-extern int g_copia_ejecuta;
+extern int g_executing_copy;
 // Presentaciones vistas en el swapchain. Declarada aca porque el latch de
 // apply_override_now la necesita y vive antes que su definicion.
 extern volatile LONG g_present_count;
-extern bool g_ejecuta_resuelto;
+extern bool g_executing_resolved;
 
 // ------------------------------------------------------------------- log ---
 //
@@ -503,7 +503,7 @@ static bool g_snippet_on = true;
 //
 // Solo lo usamos por tres exports -- slGetFeatureFunction, slInit y
 // slGetNewFrameToken -- que cualquier version exporta. No le parcheamos un byte.
-static bool g_inter_fuera = true;
+static bool g_interposer_out = true;
 // mfg-sllog.txt esta presente: ademas del log, se sube el nivel en Preferences.
 static bool g_sllog_on = false;
 // Probado en el sample del banco, que como Halo no pedia OTA: banderas 133 ->
@@ -567,8 +567,8 @@ static unsigned hk_slInit(void *pref, unsigned long long sdk) {
                 const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH - 40);
                 if (n > 0 && n < MAX_PATH - 40) {
                     int k = (int)n;
-                    const wchar_t *cola = L"\\mfg-unlock\\sdk\\2.12";
-                    for (int i = 0; cola[i] != 0; ++i) buf[k++] = cola[i];
+                    const wchar_t *tail = L"\\mfg-unlock\\sdk\\2.12";
+                    for (int i = 0; tail[i] != 0; ++i) buf[k++] = tail[i];
                     buf[k] = 0;
                     list[0] = buf;
                     armado = true;
@@ -609,9 +609,9 @@ static unsigned hk_slInit(void *pref, unsigned long long sdk) {
         // offset no es el que creemos y escribir seria corromper.
         {
             LONG *nivel = (LONG *)(p + 36);
-            const LONG antes = *nivel;
-            log_num("  logLevel en +36 ", (unsigned)antes);
-            if (antes >= 0 && antes <= 3 && g_sllog_on) {
+            const LONG before = *nivel;
+            log_num("  logLevel en +36 ", (unsigned)before);
+            if (before >= 0 && before <= 3 && g_sllog_on) {
                 DWORD viejo = 0;
                 if (VirtualProtect(nivel, 4, PAGE_READWRITE, &viejo)) {
                     *nivel = 2;                 // eVerbose
@@ -780,9 +780,9 @@ static void detectar_semantica(unsigned char *base) {
             text[i+14] != 0x4C || text[i+15] != 0xC3) continue;
         julio = true;
     }
-    const LONG antes = g_snippet_cargado;
+    const LONG before = g_snippet_cargado;
     g_snippet_cargado = julio ? 0 : 1;
-    if (antes != g_snippet_cargado)
+    if (before != g_snippet_cargado)
         log_line(julio ? "semantica: la cuenta son los GENERADOS (snippet con tope 3)"
                        : "semantica: la cuenta es el MULTIPLICADOR");
 }
@@ -874,9 +874,9 @@ static void bajar_4168(LONG v) {
     if (g_dlssg_base == nullptr || v < 1) return;
     unsigned char *pp = nullptr;
     if (!leer_ok(g_dlssg_base + 0x8f1e8, &pp, sizeof(pp)) || pp == nullptr) return;
-    LONG *campo = (LONG *)(pp + 0x4168);
+    LONG *field = (LONG *)(pp + 0x4168);
     LONG actual = 0;
-    if (!leer_ok(campo, &actual, 4)) return;
+    if (!leer_ok(field, &actual, 4)) return;
     if (actual <= v) return;              // solo baja
     static LONG said = -1;
     if (said != v) {
@@ -884,7 +884,7 @@ static void bajar_4168(LONG v) {
         log_num("4168: la marca baja de ", (unsigned)actual);
         log_num("  a la cuenta viva ", (unsigned)v);
     }
-    *campo = v;
+    *field = v;
 }
 
 // A que apunta la llamada virtual que corta el bucle de generacion.
@@ -906,12 +906,12 @@ static void bajar_4168(LONG v) {
 // desensambla y se ve que recurso niega. Todo lectura: no se engancha nada en
 // la ruta de render, que es lo que rompe el renderizado.
 // Nombre y offset del modulo dueño de una direccion.
-static void decir_modulo(const char *etiqueta, const void *fn) {
+static void decir_modulo(const char *tag, const void *fn) {
     HMODULE m = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                             (LPCWSTR)fn, &m) || m == nullptr) {
-        log_line(etiqueta);
+        log_line(tag);
         log_line("    no pertenece a ningun modulo cargado");
         return;
     }
@@ -921,7 +921,7 @@ static void decir_modulo(const char *etiqueta, const void *fn) {
     for (int q = 0; name_w[q] != 0 && k < 250; ++q)
         a[k++] = (char)(name_w[q] < 128 ? name_w[q] : '?');
     a[k] = 0;
-    log_line(etiqueta);
+    log_line(tag);
     log_line(a);
     log_num("    offset 0x", (unsigned long long)((ULONG_PTR)fn - (ULONG_PTR)m));
 }
@@ -1419,7 +1419,7 @@ static unsigned hk_slGetFeatureFunction(unsigned feature, const char *name, void
     if (r == 0 && name != nullptr && fn != nullptr &&
         (strcmp(name, "slDLSSGSetOptions") == 0 ||
          strcmp(name, "slDLSSGGetState") == 0))
-        copia_que_ejecuta(fn, name);
+        executing_copy(fn, name);
     if (r == 0 && name != nullptr && fn != nullptr &&
         strcmp(name, "slDLSSGGetState") == 0 && g_orig_getstate == nullptr) {
         g_orig_getstate = (PFN_slDLSSGGetState)fn;
@@ -1544,7 +1544,7 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
             g_token_block_us += (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)g_qpc_freq;
     }
     // El grafo ya cargo entero: aca se deciden los invariantes, una sola vez.
-    evaluar_invariantes();
+    evaluate_invariants();
     // Y si no hay hook de Present, el contador se alimenta desde aca.
     runtime_presents();
     // One rendered frame, exactly once.
@@ -2132,9 +2132,9 @@ static DWORD WINAPI recorder(LPVOID) {
             // el panel este abierto.
             hud_tick();
             if (InterlockedExchange(&g_twocopies_pending, 0) != 0) {
-                wchar_t ruta[MAX_PATH];
-                beside_dll(ruta, L"mfg-twocopies.txt");
-                HANDLE h2 = CreateFileW(ruta, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                wchar_t path[MAX_PATH];
+                beside_dll(path, L"mfg-twocopies.txt");
+                HANDLE h2 = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr,
                                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
                 if (h2 != INVALID_HANDLE_VALUE) {
                     char b2[MAX_PATH * 2];
@@ -2347,7 +2347,7 @@ static DWORD WINAPI recorder(LPVOID) {
         //
         // Solo se pregunta si el diagnostico guardado es ROJO y no hay respuesta
         // todavia. Un juego VERDE o AMARILLO no ve nada de esto.
-        leer_veredicto_previo();
+        read_previous_verdict();
         g_pide_permiso = (g_veredicto_previo == 2 && g_consentimiento == -1) ? 1 : 0;
         if (g_pide_permiso) {
             const bool si = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
@@ -2355,7 +2355,7 @@ static DWORD WINAPI recorder(LPVOID) {
             if (si || no) {
                 g_consentimiento = si ? 1 : 0;
                 g_pide_permiso = 0;
-                guardar_consentimiento(g_consentimiento);
+                save_consent(g_consentimiento);
                 log_line(si ? "permiso: el usuario acepto el reemplazo del Streamline"
                             : "permiso: el usuario dijo que no; no se sustituye nada");
                 log_line("  (toma efecto en el proximo arranque del juego)");
@@ -2684,11 +2684,11 @@ static LONG CALLBACK testigo_excepcion(EXCEPTION_POINTERS *info) {
             wchar_t name_w[MAX_PATH];
             const DWORD n = GetModuleFileNameW(m, name_w, MAX_PATH);
             if (n > 0) {
-                int corte = (int)n;
-                while (corte > 0 && name_w[corte-1] != L'\\') --corte;
+                int cut = (int)n;
+                while (cut > 0 && name_w[cut-1] != L'\\') --cut;
                 char a[128];
                 int k = 0;
-                for (int q = corte; name_w[q] != 0 && k < 120; ++q)
+                for (int q = cut; name_w[q] != 0 && k < 120; ++q)
                     a[k++] = (char)(name_w[q] < 128 ? name_w[q] : '?');
                 a[k] = 0;
                 log_line("  modulo:");
@@ -2837,7 +2837,7 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 }
             }
             if (a.coninterposer) {
-                g_inter_fuera = false;
+                g_interposer_out = false;
                 log_line("base: el interposer TAMBIEN se sustituye (mfg-coninterposer.txt)");
             }
             if (a.sinbase) {
