@@ -161,6 +161,38 @@ inline const Pattern kGateEax = { "gate-eax", kGateEaxBytes, 5, 1 };
 inline const pb kGateRegBytes[] = { X(0x81), M(0xF8, 0xF8), X(0xB0), X(0x01), X(0x00), X(0x00) };
 inline const Pattern kGateReg = { "gate-reg", kGateRegBytes, 6, 2 };
 
+// ---- sl.pcl: el registro ETW doble -----------------------------------------
+//
+// TraceLoggingRegister inline: si el handle del proveedor ya esta puesto,
+// __fastfail(FAST_FAIL_INVALID_ARG). sl.pcl lo llama en cada slOnPluginStartup
+// y GTA V a veces inicializa los plugins dos veces por arranque (dos devices
+// de sondeo antes del real): 0xC0000409 en sl.pcl.dll+0x3a58f, cuatro veces
+// en el registro de Windows entre el 09/09 y el 11/09, siempre al arrancar.
+//
+//   0f 10 40 f0        movups xmm0,[rax-0x10]
+//   0f 11 44 24 30     movups [rsp+0x30],xmm0
+//   74 07              je  +7            <- write_at: pasa a jne <resume>
+//   b9 05 00 00 00     mov ecx,5            (y estos 7 bytes a nop)
+//   cd 29              int 29h
+//   48 8d 05           lea rax,[rip+..]  (sigue el registro)
+//
+// El destino del salto no se fija a mano: es el del `jne` que sigue al
+// `test eax,eax` del EventRegister, que es donde el codigo retoma cuando el
+// registro salio bien. pcl_resume() lo deriva del propio codigo.
+inline const pb kPclRegisterBytes[] = { X(0x0F), X(0x10), X(0x40), X(0xF0), X(0x0F), X(0x11), X(0x44), X(0x24), X(0x30),
+                                        X(0x74), X(0x07), X(0xB9), X(0x05), X(0x00), X(0x00), X(0x00), X(0xCD), X(0x29),
+                                        X(0x48), X(0x8D), X(0x05) };
+inline const Pattern kPclRegister = { "pcl-registro-etw", kPclRegisterBytes, 21, 9 };
+// Offset (desde el inicio del patron) de la instruccion donde retoma tras el
+// registro: el destino del `85 c0 75 rel8` que sigue. -1 si no esta.
+inline long pcl_resume(const u8 *t, size_t len, size_t at) {
+    for (size_t i = at + 18; i + 4 <= len && i < at + 96; ++i) {
+        if (t[i] == 0x85 && t[i + 1] == 0xC0 && t[i + 2] == 0x75)
+            return (long)(i + 4 + (signed char)t[i + 3] - at);
+    }
+    return -1;
+}
+
 // ---- el .text de un archivo PE, para el test de host --------------------------
 //
 // Devuelve el offset y el largo de .text dentro del archivo (raw), o false.

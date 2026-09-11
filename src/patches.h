@@ -1009,6 +1009,45 @@ static int patch_preset_b(unsigned char *base) {
 //
 // El inmediato del `cmp` puede estar ya en cero cuando esto corre, asi que el
 // patron no se ancla en 0x1b0: `81 FD` + imm32 + `0F 8C` + rel32 + `BF 05...`.
+// sl.pcl: el registro ETW doble no aborta el proceso. Ver sites::kPclRegister.
+// Con el handle ya puesto salta a donde el codigo retoma tras registrar; el
+// segundo registro se omite, nada mas.
+static int patch_pcl_register(unsigned char *base) {
+    auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    auto *sec = IMAGE_FIRST_SECTION(nt);
+    unsigned char *text = nullptr;
+    size_t len = 0;
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        const char *n = reinterpret_cast<const char *>(sec[i].Name);
+        if (n[0] == '.' && n[1] == 't' && n[2] == 'e' && n[3] == 'x' && n[4] == 't') {
+            text = base + sec[i].VirtualAddress;
+            len = sec[i].Misc.VirtualSize;
+            break;
+        }
+    }
+    if (text == nullptr) return 0;
+    size_t at = 0;
+    const int found = sites::find(text, len, sites::kPclRegister, &at, 1);
+    if (found != 1) {
+        log_num("  ! sitio del registro ETW no unico, sitios: ", (unsigned)found);
+        return 0;
+    }
+    const long resume = sites::pcl_resume(text, len, at);
+    if (resume < 0) { log_line("  ! sin punto de retoma tras el registro"); return 0; }
+    unsigned char *w = text + at + sites::kPclRegister.write_at;
+    const long disp = resume - (long)(sites::kPclRegister.write_at + 2);
+    if (disp < 0 || disp > 127) { log_num("  ! retoma fuera de rel8: ", (unsigned)disp); return 0; }
+    DWORD old = 0;
+    if (!VirtualProtect(w, 9, PAGE_EXECUTE_READWRITE, &old)) return 0;
+    w[0] = 0x75; w[1] = (unsigned char)disp;          // jne <resume>
+    for (int i = 2; i < 9; ++i) w[i] = 0x90;           // mov ecx,5 / int 29h -> nop
+    VirtualProtect(w, 9, old, &old);
+    return 1;
+}
+
 static int patch_snippet_max(unsigned char *base, int value) {
     if (value < 2 || value > 8) return 0;
     auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);

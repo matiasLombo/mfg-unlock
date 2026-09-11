@@ -506,6 +506,12 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
     // exactly the trap the snippet already taught us. "sl_dlss_g" catches the cache
     // layout and "sl.dlss_g" the game-folder one; patching both is harmless, since
     // a signature either matches an image or leaves it alone.
+    if (path_has(d->FullDllName, L"sl.pcl") || path_has(d->FullDllName, L"sl_pcl")) {
+        // El registro ETW doble de PCL abortaba GTA V al arrancar, a veces
+        // (ver sites::kPclRegister). Se parchea cualquier copia con el sitio.
+        const int n = patch_pcl_register(reinterpret_cast<unsigned char *>(d->DllBase));
+        log_num("sl.pcl mapped; registro ETW doble tolerado, sitios: ", (unsigned)n);
+    }
     if (path_has(d->FullDllName, L"sl.dlss_g") ||
         path_has(d->FullDllName, L"sl_dlss_g")) {
         if (!g_dynamic_known &&

@@ -90,6 +90,22 @@ int main(void) {
         }
     }
 
+    printf("\nsl.pcl.dll (PCL)\n");
+    {
+        std::vector<u8> f; const u8 *t; size_t len;
+        if (text_of("sl.pcl.dll", f, &t, &len)) {
+            const int n = find(t, len, kPclRegister, at, 8);
+            check("registro ETW con fastfail: uno", n, 1);
+            if (n == 1) {
+                const long r = pcl_resume(t, len, at[0]);
+                check("  punto de retoma encontrado", r > 0 ? 1 : 0, 1);
+                check("  retoma en rel8 desde el salto", (r > 0 && r - 11 <= 127) ? 1 : 0, 1);
+                // el destino es el cmp dword [rip], 5 (83 3d .. 05) que sigue al registro
+                check("  la retoma es el cmp del nivel", (r > 0 && t[at[0] + r] == 0x83 && t[at[0] + r + 1] == 0x3D) ? 1 : 0, 1);
+            }
+        }
+    }
+
     printf("\nel matcher\n");
     {
         const u8 bytes[] = { 0x00, 0xC7, 0x85, 0xE4, 0x45, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0xFF };
