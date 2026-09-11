@@ -79,6 +79,14 @@ ese log es el primero que hay que mirar.
 - Cada rewire quedo verificado en Cyberpunk desde Steam (la topologia real);
   GTA V y Halo tienen el build instalado y sin correr.
 
+## Halo y GTA V abiertos y cerrados solos (build 681341, 2026-09-11 03:2x)
+
+Lanzados por Steam, esperado el veredicto, cerrados. Los dos: `VEREDICTO
+ACTIVO` con la copia que ejecuta identificada (`ejecuta_cuenta=1
+ejecuta_pacer=1`), 0 `INVARIANTE`, 0 excepciones, los mismos conteos de
+sitios (2/2/2/1/1) y el overlay de Steam detectado. Halo con SU interposer.
+No se midio multiplicador: nadie jugo.
+
 ## Que necesita una corrida con alguien jugando
 
 - GTA V y Halo con build 681341 (instalado, mode 6): `VEREDICTO ACTIVO`, 0
