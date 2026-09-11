@@ -21,6 +21,7 @@
 // y [[measure-with-the-runtime-counter]].
 #pragma once
 #include "present_policy.h"
+#include "adopted.h"
 
 // Globales que solo usa este modulo (movidas de proxy.cpp).
 // El reloj de la PANTALLA, que es otro que el de Present.
@@ -46,6 +47,8 @@ static long long g_pres_qpc = 0;            // when the last present went out
 // The swap chain, kept so the runtime's own present counter can be sampled
 // from anywhere -- specifically from the frame-token hook, once per rendered
 // frame, off the present path entirely.
+// La cache del swapchain elegido por adopted.h; lo escriben solo
+// adopt_swapchain / forget_swapchain / pick_swapchain (mas abajo).
 static IDXGISwapChain *g_swapchain = nullptr;
 
 // ---- the same measurement for D3D12 ---------------------------------------
@@ -170,9 +173,11 @@ static PFN_DXGIPresent present_original_for(IDXGISwapChain *self) {
 // el honesto ([[measure-with-the-runtime-counter]]). Se llama desde el camino
 // del frame token, que corre igual.
 static IDXGISwapChain *live_swapchain(void);   // mas abajo, con la adopcion
+static IDXGISwapChain *pick_swapchain(unsigned *count_out);
 static void runtime_presents(void) {
     if (!g_present_via_runtime) return;
-    IDXGISwapChain *chain = live_swapchain();
+    unsigned now_qpc = 0;
+    IDXGISwapChain *chain = pick_swapchain(&now_qpc);
     if (chain == nullptr) return;
     // GetLastPresentCount, no GetFrameStatistics.
     //
@@ -186,19 +191,6 @@ static void runtime_presents(void) {
     //
     // GetLastPresentCount devuelve el contador del runtime sin depender del
     // modo de presentacion, que es justo lo que hace falta aca.
-    UINT now_qpc = 0;
-    const HRESULT hr = chain->GetLastPresentCount(&now_qpc);
-    if (FAILED(hr)) {
-        static bool said = false;
-        if (!said) {
-            said = true;
-            diag::Line l = diag::invariant(diag::Layer::PRESENTATION, "contador",
-                                             "GetLastPresentCount fallo; el contador queda en cero");
-            l.pair("hr", (long long)(long)hr);
-            log_line(l.b);
-        }
-        return;
-    }
     // Al contador del RUNTIME, no al del hook.
     //
     // La primera version sumaba el delta a g_present_count, que es la cuenta
@@ -525,43 +517,18 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
 // the pin patch was written against.
 static PFN_SMFL g_orig_smfl = nullptr;
 
-// Lo adoptado se suelta cuando se destruye. "La ultima instancia gana" dejo
-// un puntero colgado en GTA V (2026-09-11): a los 52 s alguien creo un
-// swapchain transitorio (CreateSwapChain flags 2, no el del juego), se adopto,
-// lo liberaron, y a los 111 s hk_slGetNewFrameToken leyo su vtable ya basura
-// (0xC0000005 en GetLastPresentCount, vtable 0xAE000). Antes no pasaba solo
-// porque con ReShade en el slot no se adoptaba nada.
+// Los adoptados viven en adopted.h (pura, con test): cual se usa para contar
+// y cuando se suelta. Aca solo lo que necesita Windows: el predicado de vida
+// (la pagina mapeada y la vtable adentro de un modulo -- la basura de GTA V
+// el 11/09 era una vtable en 0xAE000, sin modulo) y el lector de
+// GetLastPresentCount. Sin hooks: el hook de Release que se probo primero
+// recursaba con el overlay de Steam ([[never-byte-detour-present]]).
 //
-// La primera version enganchaba el slot 2 de la vtable (IUnknown::Release)
-// para enterarse de la destruccion. El overlay de Steam tambien lo engancha
-// -- la misma trampa que Present, [[never-byte-detour-present]] -- y
-// Cyberpunk cayo con 0xC00000FD en gameoverlayrenderer64.dll al crear su
-// swapchain. Asi que sin hooks: antes de usar el adoptado se comprueba que
-// su pagina este mapeada y que su vtable apunte adentro de un modulo. Si no,
-// se suelta y vuelve el anterior que siga vivo. Dos VirtualQuery por frame
-// renderizado.
-static IDXGISwapChain *g_adopted[4] = { nullptr, nullptr, nullptr, nullptr };
+// g_swapchain es la cache del elegido; solo se escribe desde estas tres
+// funciones (state.h lo dice).
+static adopted::List g_adopted;
 
-static void adopt_swapchain(void *sc) {
-    IDXGISwapChain *c = reinterpret_cast<IDXGISwapChain *>(sc);
-    int slot = -1;
-    for (int i = 0; i < 4; ++i) if (g_adopted[i] == c) { slot = i; break; }
-    if (slot < 0) {
-        for (int i = 3; i > 0; --i) g_adopted[i] = g_adopted[i - 1];   // el mas nuevo primero
-        g_adopted[0] = c;
-    }
-    g_swapchain = c;
-}
-static void forget_swapchain(IDXGISwapChain *c) {
-    for (int i = 0; i < 4; ++i) {
-        if (g_adopted[i] != c) continue;
-        for (int j = i; j < 3; ++j) g_adopted[j] = g_adopted[j + 1];
-        g_adopted[3] = nullptr;
-        break;
-    }
-    if (g_swapchain == c) g_swapchain = g_adopted[0];
-}
-static bool swapchain_looks_alive(const IDXGISwapChain *c) {
+static bool swapchain_looks_alive(const void *c) {
     MEMORY_BASIC_INFORMATION mb;
     if (VirtualQuery(c, &mb, sizeof mb) != sizeof mb) return false;
     if (mb.State != MEM_COMMIT || (mb.Protect & PAGE_GUARD) || (mb.Protect & PAGE_NOACCESS)) return false;
@@ -571,18 +538,50 @@ static bool swapchain_looks_alive(const IDXGISwapChain *c) {
            GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                               (LPCWSTR)vt, &owner) && owner != nullptr;
 }
-// El adoptado vivo, o nullptr. Descarta los muertos al pasar.
-static IDXGISwapChain *live_swapchain(void) {
-    for (int k = 0; k < 4; ++k) {
-        IDXGISwapChain *c = g_swapchain;
-        if (c == nullptr) return nullptr;
-        if (swapchain_looks_alive(c)) return c;
-        log_line("present: el swapchain adoptado ya no existe; se suelta");
-        forget_swapchain(c);
+static bool swapchain_count(void *c, unsigned *out) {
+    UINT n = 0;
+    const HRESULT hr = reinterpret_cast<IDXGISwapChain *>(c)->GetLastPresentCount(&n);
+    if (FAILED(hr)) {
+        static bool said = false;
+        if (!said) {
+            said = true;
+            diag::Line l = diag::invariant(diag::Layer::PRESENTATION, "contador",
+                                             "GetLastPresentCount fallo; el contador queda en cero");
+            l.pair("hr", (long long)(long)hr);
+            log_line(l.b);
+        }
+        return false;
     }
+    *out = n;   // 0 es valido: todavia no presento
+    return true;
+}
+static void adopt_swapchain(void *sc) {
+    g_adopted.adopt(sc);
+    g_swapchain = reinterpret_cast<IDXGISwapChain *>(g_adopted.current());
+}
+static void forget_swapchain(void *sc) {
+    g_adopted.forget(sc);
+    g_swapchain = reinterpret_cast<IDXGISwapChain *>(g_adopted.current());
+}
+// Una vez por frame renderizado: el elegido vivo y su cuenta del runtime.
+static IDXGISwapChain *pick_swapchain(unsigned *count_out) {
+    bool dropped = false;
+    void *c = g_adopted.pick(swapchain_looks_alive, swapchain_count, count_out, &dropped);
+    if (dropped) log_line("present: un swapchain adoptado ya no existe; se suelta");
+    if (c != g_swapchain) {
+        g_swapchain = reinterpret_cast<IDXGISwapChain *>(c);
+        if (c != nullptr) log_line("present: cambia el swapchain que se cuenta (el que mas presento)");
+    }
+    return g_swapchain;
+}
+// El elegido, si sigue vivo, sin leer cuentas (para quien solo quiere el objeto).
+static IDXGISwapChain *live_swapchain(void) {
+    IDXGISwapChain *c = g_swapchain;
+    if (c == nullptr) return nullptr;
+    if (swapchain_looks_alive(c)) return c;
+    forget_swapchain(c);
     return nullptr;
 }
-
 
 // ---- el unico escritor de slots de vtable ---------------------------------
 //
@@ -818,7 +817,6 @@ static void adopt_existing_swapchain(void) {
     // El descartable ya cumplio. La vtable vive en el modulo de DXGI, no en el
     // objeto, asi que el parche sobrevive a soltarlo.
     forget_swapchain(sc);
-    g_swapchain = nullptr;
     sc->Release();
     if (ctx != nullptr) reinterpret_cast<IUnknown *>(ctx)->Release();
     if (dev != nullptr) reinterpret_cast<IUnknown *>(dev)->Release();

@@ -21,6 +21,7 @@ con `tools/compare_sections.py` (.text byte a byte).
 | `diag.h` | 89 | `INVARIANTE capa nombre: ... k=v` y `VEREDICTO` en una linea | `test_diag` (formato exacto) | -- |
 | `controller.h` | 232 | DYNAMIC: control por ventana, apply por frame, techo (sat) y sesgo por tramo | `test_controller` (la tabla de GTA V) | -- |
 | `scheduler.h` | 156 | el reparto fraccional por bloques, latcheado por ciclo | `test_scheduler` (juego simulado, 2.10-2.90 al 1%) | -- |
+| `adopted.h` | 95 | los swapchains adoptados: cual se cuenta (el que mas presento en el ultimo periodo, entre los vivos) y cuando se suelta; vida y cuenta se inyectan | `test_adopted` (los dos casos de GTA V del 11/09) | -- |
 | `present_policy.h` | 75 | que se hace con un swapchain nuevo (registrar la vtable, escribir el slot, adoptar) segun overlay, dueno del slot, modo host, vtable ya vista; y la guarda de `write_slot` | `test_present_policy` (una fila por incidente medido) | -- |
 | `sites.h` | 189 | los patrones de bytes de cada parche y el `.text` de un PE | `test_sites` (los dll REALES de la cache) | -- |
 | `zipmini.h` | 258 | leer el zip del SDK (deflate) | `test_zipmini <zip>` | -- |
