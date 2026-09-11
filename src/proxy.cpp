@@ -7002,6 +7002,40 @@ static void hook_swapchain_present(void *sc) {
     // advanced 66 to 69 in each, so the run reported 1.00 where the runtime
     // said 1.49. The failure is silent and reads as a clean integer, which at
     // 1.10x would be indistinguishable from a correct answer.
+    // Con el overlay de Steam en el proceso NO se engancha Present. Punto.
+    //
+    // El overlay no toma el slot de la vtable: hace byte-detour de la funcion.
+    // Nuestro "original" apunta a la funcion real, cuyos primeros bytes ahora
+    // saltan al overlay, y el overlay presenta por la vtable -- que somos
+    // nosotros. El lazo es invisible desde el slot, y por eso la guarda de
+    // "quien es el dueno de vt[8]" no lo ve: medido, cuatro enganches, misma
+    // vtable, cero dueños ajenos, y recursion igual.
+    //
+    //   present: RECURSION, profundidad 4249
+    //   EXCEPCION 0xC00000FD en gameoverlayrenderer64.dll
+    //
+    // [[never-byte-detour-present]] ya decia que el overlay de Steam engancha
+    // los mismos bytes y que quien instala segundo gana. Lo que faltaba era
+    // sacar la conclusion: con el overlay presente no hay forma segura de
+    // llamar al original, asi que no se engancha.
+    //
+    // El costo es instrumentacion, no funcionalidad. Las presentaciones se
+    // cuentan con PresentCount del runtime ([[measure-with-the-runtime-counter]]),
+    // que es el instrumento honesto igual, y el pacer propio queda apagado en
+    // esa configuracion.
+    {
+        static bool dicho = false;
+        if (GetModuleHandleW(L"gameoverlayrenderer64.dll") != nullptr) {
+            if (!dicho) {
+                dicho = true;
+                log_line("present: overlay de Steam presente; NO se engancha Present");
+                log_line("  hace byte-detour de la funcion, asi que llamar al");
+                log_line("  original nos devuelve a nosotros: recursion sin fin.");
+                log_line("  Las presentaciones se cuentan con PresentCount del runtime.");
+            }
+            return;
+        }
+    }
     // Solo se engancha un slot que TODAVIA apunta a dxgi.dll.
     //
     // Si ahi ya hay otro hook, apilarnos encima forma un lazo: nuestro hook
