@@ -72,6 +72,7 @@
 static bool path_in_our_sdk(const wchar_t *module, unsigned minor, wchar_t *out);
 
 static bool g_host_on = false;                 // config `host 1`
+static bool g_host_hudless = false;            // config `hosthudless 1`: taggear la salida de DLSS como sin-HUD (se ve mal, ver abajo)
 static HMODULE g_host_sl = nullptr;            // sl.interposer.dll, el nuestro
 static bool g_host_inited = false;
 static sl::FrameToken *g_host_tok = nullptr;   // el token del frame en curso
@@ -430,7 +431,16 @@ static unsigned hk_ngx_evaluate(ID3D12GraphicsCommandList *cl, const void *handl
         // resource extent, IF optionally specified by the client".
         sl::ResourceTag(&rHud, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent, nullptr),
     };
-    const sl::Result rt = h_slSetTag(vp, tags, 3, cl);
+    // La salida de DLSS en Metro es HDR lineal antes del tonemap y de los
+    // post-efectos (flags de creacion: IsHDR), y el backbuffer es SDR con
+    // todo aplicado. DLSS-G resta backbuffer - sinHUD para sacar la UI y la
+    // pega en cada frame generado; con espacios de color distintos esa resta
+    // es la escena entera mal restada: "todo blurry en movimiento" a 3x/4x.
+    // Sin el tag el plugin usa el backbuffer completo (la UI se interpola) y
+    // la imagen se ve bien (juzgado a ojo, Metro 2026-09-11, con 3.00 y 4.00
+    // sostenidos). Por eso el defecto es sin tag; `hosthudless 1` lo vuelve
+    // a poner para experimentar.
+    const sl::Result rt = h_slSetTag(vp, tags, g_host_hudless ? 3 : 2, cl);
     host_pcl(sl::PCLMarker::eRenderSubmitEnd);
     if (n == 1 || n == 300) {
         log_num("  slSetConstants -> ", (unsigned)rc);

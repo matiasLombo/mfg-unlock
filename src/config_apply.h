@@ -179,5 +179,7 @@ static void apply_config(void) {
             g_cubins = a.cubins;
             g_meter_off = a.meter_off;
             g_host_on = a.host;
+            g_host_hudless = a.hosthudless;
+            if (g_host_on && g_host_hudless) log_line("host: se taggea la salida de DLSS como color sin HUD (hosthudless 1)");
             if (g_host_on) log_line("host: modo host ENCENDIDO (Streamline nuestro en un juego sin Streamline)");
 }

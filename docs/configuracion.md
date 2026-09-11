@@ -39,6 +39,7 @@ Fuente: `src/config.h` (la tabla `kFlags` y `kNumerics`). Test:
 | `twocopies` | 0 | `mfg-twocopies.txt` | experimento: segunda copia del plugin ([[two-plugin-copies]]) |
 | `ceilfirst` | 0 | `mfg-ceilfirst.txt` | A1: declara el techo del ciclo mientras apagado |
 | `host` | 0 | `mfg-host.txt` | experimento: modo host, nuestro Streamline en un juego que solo trae DLSS 2 (`src/host.h`); el dll va como `winmm.dll` y `mode` de mfg-settings manda igual |
+| `hosthudless` | 0 | `mfg-hosthudless.txt` | modo host: taggear la salida de DLSS como color sin HUD; se ve blurry (HDR lineal contra backbuffer SDR), por eso apagado |
 | `ota` | 0 | `mfg-ota.txt` | fuerza OTA en slInit ([[forzar-ota-para-parchear]]) |
 | `quiet` | 0 | `mfg-quiet.txt` | sin el volcado por ventana en el log |
 | `nullalt` | 0 | `mfg-nullalt.txt` | fraccional: alterna entre iguales (experimento) |

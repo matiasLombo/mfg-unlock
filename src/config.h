@@ -60,6 +60,7 @@ struct Settings {
     bool sllog         = false;   // mfg-sllog.txt
     bool indicator     = false;   // mfg-indicator.txt
     bool host          = false;   // mfg-host.txt: Streamline en un juego sin Streamline (experimento)
+    bool hosthudless   = false;   // modo host: taggear la salida de DLSS como color sin HUD (experimento; sin tag el plugin usa el backbuffer, que es lo que se ve bien)
 
     // --- numericos: un archivo con numeros adentro; 0 o -1 = ausente/invalido ---
     int blockms        = 0;       // mfg-blockms.txt: 1..99999
@@ -125,6 +126,7 @@ inline const Flag kFlags[] = {
     { L"mfg-sllog.txt",          "sllog", &Settings::sllog },
     { L"mfg-indicator.txt",      "indicator", &Settings::indicator },
     { L"mfg-host.txt",           "host", &Settings::host },
+    { L"mfg-hosthudless.txt",    "hosthudless", &Settings::hosthudless },
 };
 inline const int kFlagsN = (int)(sizeof(kFlags) / sizeof(kFlags[0]));
 
