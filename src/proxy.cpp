@@ -37,6 +37,7 @@
 #include "diag.h"
 #include "controlador.h"
 #include "reparto.h"
+#include "sitios.h"
 
 // The panel's own state, defined here and shared with overlay.h. It is a
 // window of ours now, not something drawn into the game's frame -- see the
@@ -2118,15 +2119,10 @@ static bool g_wic_mode = false;                         // mfg-wic.txt
 // without touching the stack, so this is a known and accepted risk rather than
 // an oversight.
 static int patch_work_item_count(unsigned char *text, size_t len) {
-    size_t found = 0, at = 0;
-    for (size_t i = 0; i + 12 <= len; ++i) {
-        if (text[i] != 0x8B || text[i+1] != 0x42 || text[i+2] != 0x04) continue;
-        if (text[i+3] != 0x41 || text[i+4] != 0xB8 || text[i+5] != 0xC0) continue;
-        if (text[i+6] || text[i+7] || text[i+8]) continue;
-        if (text[i+9] != 0x89 || text[i+10] != 0x41 || text[i+11] != 0x04) continue;
-        ++found;
-        at = i;
-    }
+    // La busqueda esta en src/sitios.h y se corre sobre el archivo real en
+    // tools/test_sitios.cpp; aca solo se escribe.
+    size_t at = 0;
+    const int found = sit::buscar(text, len, sit::kCuentaWorkItem, &at, 1);
     if (found != 1) {
         log_num("  ! work item count site not unique, sites: ", (unsigned)found);
         return 0;
@@ -2181,7 +2177,7 @@ static int patch_work_item_count(unsigned char *text, size_t len) {
     // escribe el mismo numero y los dos bucles recorren el mismo rango.
     {
         unsigned char *q2 = q + 12;
-        if (q2[0] == 0x8B && q2[1] == 0x42 && q2[2] == 0x08) {
+        if (sit::casa(q2, sit::kCuentaFill)) {
             DWORD o2 = 0;
             if (VirtualProtect(q2, 3, PAGE_EXECUTE_READWRITE, &o2)) {
                 q2[0] = 0x6A;
@@ -2655,33 +2651,8 @@ static int patch_monotonic_index(unsigned char *base, unsigned char *text, size_
 // masked with a byte of ours: the plugin still decides when generation is off
 // for its own reasons, and we can only ever turn it off, never on.
 static int patch_generation_flag(unsigned char *base, unsigned char *text, size_t len) {
-    size_t found = 0, at = 0;
-    for (size_t i = 0; i + 15 <= len; ++i) {
-        if (text[i] != 0x49 || text[i + 1] != 0x8B || text[i + 2] != 0xCE) continue;  // mov rcx,r14
-        if (text[i + 3] != 0xE8) continue;                                            // call rel32
-        if (text[i + 8] != 0x41 || text[i + 9] != 0x88 || text[i + 10] != 0x86) continue;
-        // mov byte ptr [r14+0xNNNN], al -- NINGUNO de los dos bytes bajos del
-        // desplazamiento se fija. El comentario original decia que el bajo es
-        // "lo unico que se mueve entre versiones" (0x45da en 2.13, 0x45e2 en
-        // 2.12) y sin embargo fijaba el alto en 0x45. En el build OTA 134656 --
-        // el que carga Halo -- el desplazamiento salio de esa pagina y la firma
-        // devolvia 0 sitios.
-        //
-        // Escaneo de todos los plugins de la maquina, contando sitios con la
-        // firma vieja y con esta:
-        //
-        //     GTA V 625792      1   1
-        //     Cyberpunk 578176  0   0
-        //     NGX 134273        1   1
-        //     NGX 134656        0   1   <-- el que importa para Halo
-        //     los demas         0   0
-        //
-        // Relajar no produce mas de un sitio en ningun build, asi que la guarda
-        // de unicidad de abajo sigue siendo la que protege.
-        if (text[i + 13] != 0x00 || text[i + 14] != 0x00) continue;
-        ++found;
-        at = i;
-    }
+    size_t at = 0;
+    const int found = sit::buscar(text, len, sit::kFlagGeneracion, &at, 1);
     if (found != 1) {
         log_num("  ! generation flag site not unique, sites: ", (unsigned)found);
         return 0;
@@ -4925,17 +4896,20 @@ static int patch_snippet_max(unsigned char *base, int valor) {
         }
     }
     if (text == nullptr) return 0;
+    // La busqueda esta en src/sitios.h (kSnippetMaxA); aca se escribe el
+    // valor sobre el 5.
     int hits = 0;
-    for (size_t i = 0; i + 17 <= len; ++i) {
-        if (text[i] != 0x81 || text[i+1] != 0xFD) continue;      // cmp ebp, imm32
-        if (text[i+6] != 0x0F || text[i+7] != 0x8C) continue;    // jl rel32
-        if (text[i+12] != 0xBF || text[i+13] != 5 ||
-            text[i+14] || text[i+15] || text[i+16]) continue;    // mov edi, 5
-        DWORD old = 0;
-        if (!VirtualProtect(text + i + 13, 1, PAGE_EXECUTE_READWRITE, &old)) continue;
-        text[i + 13] = (unsigned char)valor;
-        VirtualProtect(text + i + 13, 1, old, &old);
-        ++hits;
+    {
+        size_t at[8];
+        const int n = sit::buscar(text, len, sit::kSnippetMaxA, at, 8);
+        for (int k = 0; k < n && k < 8; ++k) {
+            unsigned char *byte = text + at[k] + sit::kSnippetMaxA.escribir;
+            DWORD old = 0;
+            if (!VirtualProtect(byte, 1, PAGE_EXECUTE_READWRITE, &old)) continue;
+            *byte = (unsigned char)valor;
+            VirtualProtect(byte, 1, old, &old);
+            ++hits;
+        }
     }
     // El TERCER techo, y el que realmente rechazaba el 6.
     //
@@ -4960,15 +4934,18 @@ static int patch_snippet_max(unsigned char *base, int valor) {
     // Ojo: este no declara una capacidad, calcula donde cae cada sub-frame en
     // el tiempo. Subirlo puede dar interpolacion mal ubicada en vez de un
     // rechazo limpio. Se mide mirando la imagen, no solo el contador.
-    for (size_t i = 0; i + 5 <= len; ++i) {
-        if (text[i] != 0xBE || text[i+1] != 5 ||
-            text[i+2] || text[i+3] || text[i+4]) continue;
-        DWORD old = 0;
-        if (!VirtualProtect(text + i + 1, 1, PAGE_EXECUTE_READWRITE, &old)) continue;
-        text[i + 1] = (unsigned char)valor;
-        VirtualProtect(text + i + 1, 1, old, &old);
-        ++hits;
-        break;                      // es unico; no seguir barriendo
+    // kSnippetMaxB en src/sitios.h; es unico, se escribe solo el primero.
+    {
+        size_t at = 0;
+        if (sit::buscar(text, len, sit::kSnippetMaxB, &at, 1) >= 1) {
+            unsigned char *byte = text + at + sit::kSnippetMaxB.escribir;
+            DWORD old = 0;
+            if (VirtualProtect(byte, 1, PAGE_EXECUTE_READWRITE, &old)) {
+                *byte = (unsigned char)valor;
+                VirtualProtect(byte, 1, old, &old);
+                ++hits;
+            }
+        }
     }
     return hits;
 }
@@ -5057,32 +5034,20 @@ static int patch_tope_seis(unsigned char *base) {
         }
     }
     if (text == nullptr) return 0;
+    // Las dos formas estan en src/sitios.h (kTope6A, kTope6B); aca se escribe
+    // el 6 sobre el 5 y se anota el sitio para "byte vivo".
     int hits = 0;
-    for (size_t i = 0; i + 10 <= len; ++i) {
-        // 1) el default: C7 87 E4 45 00 00 05 00 00 00
-        //    mov dword ptr [rdi+0x45e4], 5
-        if (text[i] == 0xC7 && (text[i+1] & 0xF8) == 0x80 &&
-            text[i+2] == 0xE4 && text[i+3] == 0x45 && !text[i+4] && !text[i+5] &&
-            text[i+6] == 5 && !text[i+7] && !text[i+8] && !text[i+9]) {
+    const sit::Patron *formas[2] = { &sit::kTope6A, &sit::kTope6B };
+    for (int f = 0; f < 2; ++f) {
+        size_t at[8];
+        const int n = sit::buscar(text, len, *formas[f], at, 8);
+        for (int k = 0; k < n && k < 8; ++k) {
+            unsigned char *byte = text + at[k] + formas[f]->escribir;
             DWORD old = 0;
-            if (VirtualProtect(text + i + 6, 1, PAGE_EXECUTE_READWRITE, &old)) {
-                text[i + 6] = 6;
-                VirtualProtect(text + i + 6, 1, old, &old);
-                if (g_seis_n < 4) g_seis_sitios[g_seis_n++] = text + i + 6;
-                ++hits;
-            }
-            continue;
-        }
-        // 2) el clamp: BA 05 00 00 00 / 3B CA / 0F 42 D1
-        //    mov edx, 5 ; cmp ecx, edx ; cmovb edx, ecx
-        if (text[i] == 0xBA && text[i+1] == 5 && !text[i+2] && !text[i+3] && !text[i+4] &&
-            text[i+5] == 0x3B && text[i+6] == 0xCA &&
-            text[i+7] == 0x0F && text[i+8] == 0x42 && text[i+9] == 0xD1) {
-            DWORD old = 0;
-            if (VirtualProtect(text + i + 1, 1, PAGE_EXECUTE_READWRITE, &old)) {
-                text[i + 1] = 6;
-                VirtualProtect(text + i + 1, 1, old, &old);
-                if (g_seis_n < 4) g_seis_sitios[g_seis_n++] = text + i + 1;
+            if (VirtualProtect(byte, 1, PAGE_EXECUTE_READWRITE, &old)) {
+                *byte = 6;
+                VirtualProtect(byte, 1, old, &old);
+                if (g_seis_n < 4) g_seis_sitios[g_seis_n++] = byte;
                 ++hits;
             }
         }
@@ -5109,20 +5074,21 @@ static int patch_gates(unsigned char *base) {
     }
     if (text == nullptr) return 0;
 
+    // Las dos formas del cmp contra 0x1B0 estan en src/sitios.h; aca se
+    // escribe el 0 sobre el inmediato.
     int hits = 0;
-    for (size_t i = 0; i + 6 <= len; ++i) {
-        // 3D imm32 is cmp eax, imm32; 81 /7 imm32 is cmp r32, imm32 for the rest.
-        const bool is_eax = text[i] == 0x3D &&
-                            *reinterpret_cast<unsigned *>(text + i + 1) == kArchBlackwell;
-        const bool is_reg = text[i] == 0x81 && (text[i + 1] & 0xF8) == 0xF8 &&
-                            *reinterpret_cast<unsigned *>(text + i + 2) == kArchBlackwell;
-        if (!is_eax && !is_reg) continue;
-        unsigned char *imm = text + i + (is_eax ? 1 : 2);
-        DWORD old = 0;
-        if (!VirtualProtect(imm, 4, PAGE_EXECUTE_READWRITE, &old)) continue;
-        *reinterpret_cast<unsigned *>(imm) = 0;
-        VirtualProtect(imm, 4, old, &old);
-        ++hits;
+    const sit::Patron *formas[2] = { &sit::kGateEax, &sit::kGateReg };
+    for (int f = 0; f < 2; ++f) {
+        size_t at[8];
+        const int n = sit::buscar(text, len, *formas[f], at, 8);
+        for (int k = 0; k < n && k < 8; ++k) {
+            unsigned char *imm = text + at[k] + formas[f]->escribir;
+            DWORD old = 0;
+            if (!VirtualProtect(imm, 4, PAGE_EXECUTE_READWRITE, &old)) continue;
+            *reinterpret_cast<unsigned *>(imm) = 0;
+            VirtualProtect(imm, 4, old, &old);
+            ++hits;
+        }
     }
     return hits;
 }
@@ -6995,22 +6961,18 @@ static int patch_enable_cpu_pacer(unsigned char *base) {
     // destination register out of the modrm, the way patch_metering_off already
     // does -- that one survived the same update untouched.
     int hits = 0;
-    for (size_t i = 0; i + 15 <= len; ++i) {
-        if (text[i] != 0x0F || text[i + 1] != 0x94 || text[i + 2] != 0xC0) continue;
-        if (text[i + 3] != 0x41 || text[i + 4] != 0x8B) continue;
-        const unsigned char m1 = text[i + 5];
-        if ((m1 & 0xC7) != 0xC7) continue;                 // mod=11, rm=r15
-        const unsigned reg = (m1 >> 3) & 7;
-        if (text[i + 6] != 0x0F || text[i + 7] != 0xB6 || text[i + 8] != 0xC8) continue;
-        if (text[i + 9] != 0x83 || text[i + 10] != 0xFA || text[i + 11] != 0x1E) continue;
-        if (text[i + 12] != 0x0F || text[i + 13] != 0x43) continue;
-        if (text[i + 14] != (unsigned char)(0xC0 | (reg << 3) | 1)) continue;  // same dest, ecx
-        unsigned char *cmov = text + i + 12;        // the cmovae
-        DWORD old = 0;
-        if (!VirtualProtect(cmov, 3, PAGE_EXECUTE_READWRITE, &old)) continue;
-        cmov[0] = 0x90; cmov[1] = 0x90; cmov[2] = 0x90;
-        VirtualProtect(cmov, 3, old, &old);
-        ++hits;
+    {
+        // Busqueda en src/sitios.h (pacer_cmovae); aca solo se escribe.
+        size_t at[8];
+        const int n = sit::pacer_cmovae(text, len, at, 8);
+        for (int k = 0; k < n && k < 8; ++k) {
+            unsigned char *cmov = text + at[k];         // the cmovae
+            DWORD old = 0;
+            if (!VirtualProtect(cmov, 3, PAGE_EXECUTE_READWRITE, &old)) continue;
+            cmov[0] = 0x90; cmov[1] = 0x90; cmov[2] = 0x90;
+            VirtualProtect(cmov, 3, old, &old);
+            ++hits;
+        }
     }
 
     // NVIDIA pushed a new sl.dlss_g build through its OTA cache on 2026-09-03
@@ -7039,21 +7001,18 @@ static int patch_enable_cpu_pacer(unsigned char *base) {
     // build's guard byte was not re-verified (see the comment on
     // patch_metering_off), so this patch, which does not depend on it, is the
     // one being shipped for this build.
-    for (size_t i = 0; i + 11 <= len; ++i) {
-        if (text[i] != 0x84 || text[i + 1] != 0xDB) continue;                    // test bl, bl
-        if (text[i + 2] != 0x75) continue;                                      // jne rel8
-        if (text[i + 4] != 0x83 || text[i + 5] != 0xFF || text[i + 6] != 0x1E) continue; // cmp edi,0x1E
-        if (text[i + 7] != 0x72) continue;                                      // jb rel8
-        if (text[i + 9] != 0xB3 || text[i + 10] != 0x01) continue;              // mov bl, 1
-        const long t1 = (long)(i + 4) + (signed char)text[i + 3];
-        const long t2 = (long)(i + 9) + (signed char)text[i + 8];
-        if (t1 != t2) continue;   // jne and jb must share a target, or this isn't it
-        unsigned char *imm = text + i + 9;
-        DWORD old = 0;
-        if (!VirtualProtect(imm, 2, PAGE_EXECUTE_READWRITE, &old)) continue;
-        imm[0] = 0x90; imm[1] = 0x90;
-        VirtualProtect(imm, 2, old, &old);
-        ++hits;
+    {
+        // Busqueda en src/sitios.h (pacer_movbl); aca solo se escribe.
+        size_t at[8];
+        const int n = sit::pacer_movbl(text, len, at, 8);
+        for (int k = 0; k < n && k < 8; ++k) {
+            unsigned char *imm = text + at[k];
+            DWORD old = 0;
+            if (!VirtualProtect(imm, 2, PAGE_EXECUTE_READWRITE, &old)) continue;
+            imm[0] = 0x90; imm[1] = 0x90;
+            VirtualProtect(imm, 2, old, &old);
+            ++hits;
+        }
     }
     if (hits != 0) return hits;
 
