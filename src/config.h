@@ -79,49 +79,50 @@ struct Ajustes {
 };
 
 struct Bandera {
-    const wchar_t *archivo;
+    const wchar_t *archivo;   // el archivo viejo, presente = invertir el defecto
+    const char *clave;        // la clave en mfg-config.txt: `clave 0|1`, valor directo
     bool Ajustes::*campo;
 };
 
 // Archivo -> campo. El valor con el archivo presente es !defecto, asi que la
 // polaridad esta en el defecto del campo y no aca.
 inline const Bandera kBanderas[] = {
-    { L"mfg-debug.txt",         &Ajustes::debug },
-    { L"mfg-watch.txt",         &Ajustes::watch },
-    { L"mfg-novsync.txt",       &Ajustes::novsync },
-    { L"mfg-pinlatency.txt",    &Ajustes::pinlatency },
-    { L"mfg-pacefollow.txt",    &Ajustes::pacefollow },
-    { L"mfg-nofrac.txt",        &Ajustes::frac },
-    { L"mfg-sub2.txt",          &Ajustes::sub2 },
-    { L"mfg-twocopies.txt",     &Ajustes::twocopies },
-    { L"mfg-ceilfirst.txt",     &Ajustes::ceilfirst },
-    { L"mfg-ota.txt",           &Ajustes::ota },
-    { L"mfg-noslowalt.txt",     &Ajustes::slowalt },
-    { L"mfg-quiet.txt",         &Ajustes::quiet },
-    { L"mfg-nullalt.txt",       &Ajustes::nullalt },
-    { L"mfg-sinsat.txt",        &Ajustes::sat },
-    { L"mfg-pathsplugins.txt",  &Ajustes::pathsplugins },
-    { L"mfg-peralt.txt",        &Ajustes::peralt },
-    { L"mfg-sinseis.txt",       &Ajustes::seis },
-    { L"mfg-coninterposer.txt", &Ajustes::coninterposer },
-    { L"mfg-sinbase.txt",       &Ajustes::sinbase },
-    { L"mfg-mfcmax.txt",        &Ajustes::mfcmax },
-    { L"mfg-topefijo.txt",      &Ajustes::topefijo },
-    { L"mfg-x6.txt",            &Ajustes::x6 },
-    { L"mfg-dyndiag.txt",       &Ajustes::dyndiag },
-    { L"mfg-nolatch.txt",       &Ajustes::latch },
-    { L"mfg-sin-deuda.txt",     &Ajustes::deuda },
-    { L"mfg-optsv3.txt",        &Ajustes::optsv3 },
-    { L"mfg-blockalt.txt",      &Ajustes::blockalt },
-    { L"mfg-nowaitable.txt",    &Ajustes::nowaitable },
-    { L"mfg-nopanel.txt",       &Ajustes::panel },
-    { L"mfg-nowic.txt",         &Ajustes::wic },
-    { L"mfg-monoidx.txt",       &Ajustes::monoidx },
-    { L"mfg-nocubins.txt",      &Ajustes::cubins },
-    { L"mfg-nometer.txt",       &Ajustes::meter_off },
-    { L"mfg-presetb.txt",       &Ajustes::presetb },
-    { L"mfg-sllog.txt",         &Ajustes::sllog },
-    { L"mfg-indicator.txt",     &Ajustes::indicator },
+    { L"mfg-debug.txt",          "debug", &Ajustes::debug },
+    { L"mfg-watch.txt",          "watch", &Ajustes::watch },
+    { L"mfg-novsync.txt",        "novsync", &Ajustes::novsync },
+    { L"mfg-pinlatency.txt",     "pinlatency", &Ajustes::pinlatency },
+    { L"mfg-pacefollow.txt",     "pacefollow", &Ajustes::pacefollow },
+    { L"mfg-nofrac.txt",         "frac", &Ajustes::frac },
+    { L"mfg-sub2.txt",           "sub2", &Ajustes::sub2 },
+    { L"mfg-twocopies.txt",      "twocopies", &Ajustes::twocopies },
+    { L"mfg-ceilfirst.txt",      "ceilfirst", &Ajustes::ceilfirst },
+    { L"mfg-ota.txt",            "ota", &Ajustes::ota },
+    { L"mfg-noslowalt.txt",      "slowalt", &Ajustes::slowalt },
+    { L"mfg-quiet.txt",          "quiet", &Ajustes::quiet },
+    { L"mfg-nullalt.txt",        "nullalt", &Ajustes::nullalt },
+    { L"mfg-sinsat.txt",         "sat", &Ajustes::sat },
+    { L"mfg-pathsplugins.txt",   "pathsplugins", &Ajustes::pathsplugins },
+    { L"mfg-peralt.txt",         "peralt", &Ajustes::peralt },
+    { L"mfg-sinseis.txt",        "seis", &Ajustes::seis },
+    { L"mfg-coninterposer.txt",  "coninterposer", &Ajustes::coninterposer },
+    { L"mfg-sinbase.txt",        "sinbase", &Ajustes::sinbase },
+    { L"mfg-mfcmax.txt",         "mfcmax", &Ajustes::mfcmax },
+    { L"mfg-topefijo.txt",       "topefijo", &Ajustes::topefijo },
+    { L"mfg-x6.txt",             "x6", &Ajustes::x6 },
+    { L"mfg-dyndiag.txt",        "dyndiag", &Ajustes::dyndiag },
+    { L"mfg-nolatch.txt",        "latch", &Ajustes::latch },
+    { L"mfg-sin-deuda.txt",      "deuda", &Ajustes::deuda },
+    { L"mfg-optsv3.txt",         "optsv3", &Ajustes::optsv3 },
+    { L"mfg-blockalt.txt",       "blockalt", &Ajustes::blockalt },
+    { L"mfg-nowaitable.txt",     "nowaitable", &Ajustes::nowaitable },
+    { L"mfg-nopanel.txt",        "panel", &Ajustes::panel },
+    { L"mfg-nowic.txt",          "wic", &Ajustes::wic },
+    { L"mfg-monoidx.txt",        "monoidx", &Ajustes::monoidx },
+    { L"mfg-nocubins.txt",       "cubins", &Ajustes::cubins },
+    { L"mfg-nometer.txt",        "meter_off", &Ajustes::meter_off },
+    { L"mfg-presetb.txt",        "presetb", &Ajustes::presetb },
+    { L"mfg-sllog.txt",          "sllog", &Ajustes::sllog },
+    { L"mfg-indicator.txt",      "indicator", &Ajustes::indicator },
 };
 inline const int kBanderasN = (int)(sizeof(kBanderas) / sizeof(kBanderas[0]));
 
@@ -244,6 +245,88 @@ inline void parsear_settings(const char *buf, unsigned n, int filas, int max_tar
         }
         i = j;
     }
+}
+
+
+// --- mfg-config.txt: el archivo unico ---
+//
+// Una clave por linea, `clave valor`. Las banderas por su nombre de campo con
+// 0 o 1 (polaridad DIRECTA: `seis 0` apaga el 6X, `ota 1` enciende OTA); los
+// numericos por su nombre con el mismo rango que su archivo; markergap y
+// slowframe con sus 2-4 y 1-3 numeros. Se lee DESPUES de los archivos, asi
+// que una clave explicita le gana a un archivo presente. Lo que no se
+// reconoce se ignora. El panel no toca este archivo: escribe mfg-settings.txt
+// entero cada vez, y por eso las banderas no pueden vivir ahi.
+
+struct Numerico {
+    const char *clave;
+    int Ajustes::*campo;
+    int lo, hi;
+};
+inline const Numerico kNumericos[] = {
+    { "blockms",      &Ajustes::blockms,      1, 99999 },
+    { "jitter",       &Ajustes::jitter,       1, 90 },
+    { "clamplatency", &Ajustes::clamplatency, 1, 9 },
+    { "queue",        &Ajustes::queue,        0, 3 },
+    { "blocks",       &Ajustes::blocks,       2, 64 },
+};
+inline const int kNumericosN = (int)(sizeof(kNumericos) / sizeof(kNumericos[0]));
+
+inline bool clave_es(const char *linea, unsigned n, const char *clave, unsigned *fin) {
+    unsigned i = 0;
+    while (clave[i] != 0) {
+        if (i >= n || linea[i] != clave[i]) return false;
+        ++i;
+    }
+    if (i >= n || (linea[i] != ' ' && linea[i] != '=' && linea[i] != '\t')) return false;
+    *fin = i;
+    return true;
+}
+
+// Devuelve cuantas claves reconocio.
+inline int parsear_config(const char *buf, unsigned n, Ajustes &a) {
+    int vistas = 0;
+    unsigned i = 0;
+    while (i < n) {
+        unsigned fin = i;
+        while (fin < n && buf[fin] != '\n' && buf[fin] != '\r') ++fin;
+        const char *l = buf + i;
+        const unsigned len = fin - i;
+        unsigned k = 0;
+        bool hecho = false;
+        for (int b = 0; b < kBanderasN && !hecho; ++b)
+            if (clave_es(l, len, kBanderas[b].clave, &k)) {
+                int v[1] = {0};
+                if (enteros_sueltos(l + k, len - k, v, 1) == 1 && (v[0] == 0 || v[0] == 1)) {
+                    a.*(kBanderas[b].campo) = v[0] == 1;
+                    ++vistas;
+                }
+                hecho = true;
+            }
+        for (int m = 0; m < kNumericosN && !hecho; ++m)
+            if (clave_es(l, len, kNumericos[m].clave, &k)) {
+                int v[1] = {0};
+                if (enteros_sueltos(l + k, len - k, v, 1) == 1 &&
+                    v[0] >= kNumericos[m].lo && v[0] <= kNumericos[m].hi) {
+                    a.*(kNumericos[m].campo) = v[0];
+                    ++vistas;
+                }
+                hecho = true;
+            }
+        if (!hecho && clave_es(l, len, "markergap", &k)) {
+            const int c = enteros_sueltos(l + k, len - k, a.marker, 4);
+            if (c >= 2) { a.marker_n = c; ++vistas; }
+            hecho = true;
+        }
+        if (!hecho && clave_es(l, len, "slowframe", &k)) {
+            const int c = enteros_sueltos(l + k, len - k, a.slowframe, 3);
+            if (c >= 1) { a.slowframe_n = c; ++vistas; }
+            hecho = true;
+        }
+        i = fin;
+        while (i < n && (buf[i] == '\n' || buf[i] == '\r')) ++i;
+    }
+    return vistas;
 }
 
 }  // namespace cfg

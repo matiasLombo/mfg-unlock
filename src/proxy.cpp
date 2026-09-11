@@ -10138,6 +10138,25 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
                 b[got] = 0;
                 return (unsigned)got;
             });
+            // Y el archivo unico, ultimo para que sus claves ganen. Ver
+            // docs/configuracion.md.
+            {
+                wchar_t cp[MAX_PATH];
+                beside_dll(cp, L"mfg-config.txt");
+                HANDLE ch = CreateFileW(cp, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (ch != INVALID_HANDLE_VALUE) {
+                    static char cbuf[4096];
+                    DWORD got = 0;
+                    const BOOL ok = ReadFile(ch, cbuf, sizeof(cbuf) - 1, &got, nullptr);
+                    CloseHandle(ch);
+                    if (ok && got > 0) {
+                        cbuf[got] = 0;
+                        const int vistas = cfg::parsear_config(cbuf, (unsigned)got, g_cfg);
+                        log_num("config: claves leidas de mfg-config.txt ", (unsigned)vistas);
+                    }
+                }
+            }
             const cfg::Ajustes &a = g_cfg;
             g_debug = a.debug;
             g_watch_settings = a.watch;

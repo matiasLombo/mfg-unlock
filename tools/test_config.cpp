@@ -158,6 +158,47 @@ int main(void) {
         chequear("blockms sin digitos: queda 0", a.blockms, 0);
     }
 
+    printf("\nmfg-config.txt: el archivo unico, polaridad directa\n");
+    {
+        // Lo mismo que los archivos de Halo/GTA V, dicho en un archivo.
+        Ajustes a;
+        const char *t = "seis 0\r\nfrac 0\r\ndebug 1\r\nsllog 1\r\nblockms 24\r\n"
+                        "queue 2\r\nmarkergap 500 250 8000 300\r\nslowframe 16000\r\n"
+                        "# comentario\r\nnoexiste 1\r\nx6 7\r\n";
+        const int vistas = parsear_config(t, (unsigned)strlen(t), a);
+        chequear("claves reconocidas", vistas, 8);
+        chequear("seis 0 apaga el 6X", a.seis, 0);
+        chequear("frac 0 apaga el fraccional", a.frac, 0);
+        chequear("debug 1", a.debug, 1);
+        chequear("sllog 1", a.sllog, 1);
+        chequear("blockms 24", a.blockms, 24);
+        chequear("queue 2", a.queue, 2);
+        chequear("markergap trae 4", a.marker_n, 4);
+        chequear("  el cuarto 300", a.marker[3], 300);
+        chequear("slowframe trae 1", a.slowframe_n, 1);
+        chequear("x6 7 no es 0|1: se ignora", a.x6, 0);
+        chequear("lo demas queda en defecto (wic)", a.wic, 1);
+    }
+    {
+        // Archivo y clave a la vez: la clave explicita gana, en cualquier sentido.
+        Carpeta c{ { L"mfg-sinseis.txt" }, { nullptr }, 1 };
+        Ajustes a = cargar(c);
+        chequear("mfg-sinseis.txt apaga", a.seis, 0);
+        const char *t = "seis 1\n";
+        parsear_config(t, (unsigned)strlen(t), a);
+        chequear("  y `seis 1` en mfg-config.txt lo vuelve a encender", a.seis, 1);
+        t = "blocks 3\n";
+        parsear_config(t, (unsigned)strlen(t), a);
+        chequear("blocks 3 con separador de una sola letra", a.blocks, 3);
+        t = "blockms 5\n";
+        parsear_config(t, (unsigned)strlen(t), a);
+        chequear("blockms no pisa blocks (prefijo comun)", a.blocks, 3);
+        chequear("  y si pone blockms", a.blockms, 5);
+        t = "seis=0\n";
+        parsear_config(t, (unsigned)strlen(t), a);
+        chequear("clave=valor tambien vale", a.seis, 0);
+    }
+
     printf("\n%s\n", fallos == 0 ? "todos los casos en verde" : "HAY CASOS EN ROJO");
     return fallos ? 1 : 0;
 }
