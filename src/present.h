@@ -496,7 +496,9 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     {
         LARGE_INTEGER a, b;
         QueryPerformanceCounter(&a);
+        if (g_host_on) host_pcl(sl::PCLMarker::ePresentStart);
         const HRESULT hr = orig(self, interval, flags);
+        if (g_host_on) host_pcl(sl::PCLMarker::ePresentEnd);
         QueryPerformanceCounter(&b);
         if (g_qpc_freq > 0)
             g_present_block_us += (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)g_qpc_freq;
@@ -624,10 +626,21 @@ static void hook_swapchain_present(void *sc) {
     // toman igual. De esa cadena cuelga el HUD entero -- fps y latencia -- y la
     // primera version de esta guarda hacia return aca y lo dejaba en cero.
     // Perder el contador propio es aceptable; perder el HUD no lo es.
+    // En modo host el swapchain que nos interesa es el PROXY de Streamline: su
+    // Present vive en sl.interposer.dll, no en dxgi.dll, asi que el byte-detour
+    // del overlay no lo alcanza y el slot se puede escribir. El chain REAL que
+    // el proxy envuelve sigue siendo de dxgi.dll y ahi valen las dos guardas de
+    // siempre: medido en Metro 2026-09-11, exceptuar los dos dio RECURSION.
+    HMODULE slot_owner = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCWSTR)vt[8], &slot_owner);
+    const bool host_proxy = g_host_on && slot_owner != nullptr &&
+                            slot_owner == GetModuleHandleW(L"sl.interposer.dll");
     bool no_hook = false;
     {
         static bool said = false;
-        if (GetModuleHandleW(L"gameoverlayrenderer64.dll") != nullptr) {
+        if (GetModuleHandleW(L"gameoverlayrenderer64.dll") != nullptr && !host_proxy) {
             no_hook = true;
             if (!said) {
                 said = true;
@@ -665,11 +678,8 @@ static void hook_swapchain_present(void *sc) {
     // instrumento honesto de todas formas ([[measure-with-the-runtime-counter]]).
     {
         HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
-        HMODULE owner = nullptr;
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (LPCWSTR)vt[8], &owner);
-        if (owner != nullptr && dxgi != nullptr && owner != dxgi &&
+        HMODULE owner = slot_owner;
+        if (owner != nullptr && dxgi != nullptr && owner != dxgi && !host_proxy &&
             vt[8] != (void *)&hk_dxgi_present) {
             static bool said = false;
             if (!said) {
@@ -841,6 +851,7 @@ static HRESULT STDMETHODCALLTYPE hk_csc(IDXGIFactory *self, IUnknown *dev,
         desc->Flags = strip_waitable(desc->Flags);
         log_line("  waitable flag stripped at creation (mfg-nowaitable.txt)");
     }
+    host_set_device(dev);
     HRESULT hr = g_orig_csc(self, dev, desc, out);
     if (SUCCEEDED(hr) && out != nullptr) hook_swapchain_present(*out);
     return hr;
@@ -901,6 +912,7 @@ static HRESULT STDMETHODCALLTYPE hk_cscfh(void *self, IUnknown *dev, HWND hwnd,
             d1 = copy;
         }
     }
+    host_set_device(dev);
     HRESULT hr = g_orig_cscfh(self, dev, hwnd, d1, fs, restrict_to, out);
     if (SUCCEEDED(hr) && out != nullptr) hook_swapchain_present(*out);
     return hr;
@@ -921,6 +933,46 @@ static void hook_factory(void *factory) {
         g_orig_csc = nullptr;
 }
 
+// La fabrica PROXY de Streamline (modo host) se engancha aparte: hook_factory
+// ya tomo la fabrica real -- la adopcion del swapchain descartable la crea
+// antes que el juego -- y con eso hk_cscfh solo ve el chain nativo que el
+// proxy crea por dentro. Medido en Metro 2026-09-11: "vtable ya enganchada"
+// sobre la vtable de dxgi, cero llamadas a nuestro hook, y sin ellas no salen
+// los marcadores de present. Aca el *out es el proxy y su vtable vive en
+// sl.interposer.dll, que es el unico slot de Present que se puede escribir
+// con el overlay de Steam en el proceso.
+static PFN_CSC g_orig_csc_host = nullptr;
+static PFN_CSCFH g_orig_cscfh_host = nullptr;
+static HRESULT STDMETHODCALLTYPE hk_csc_host(IDXGIFactory *self, IUnknown *dev,
+        DXGI_SWAP_CHAIN_DESC *desc, IDXGISwapChain **out) {
+    host_set_device(dev);
+    const HRESULT hr = g_orig_csc_host(self, dev, desc, out);
+    log_num("host: CreateSwapChain por la fabrica proxy -> ", (unsigned)hr);
+    if (SUCCEEDED(hr) && out != nullptr) hook_swapchain_present(*out);
+    return hr;
+}
+static HRESULT STDMETHODCALLTYPE hk_cscfh_host(void *self, IUnknown *dev, HWND hwnd,
+        const void *d1, const void *fs, void *restrict_to, IDXGISwapChain **out) {
+    host_set_device(dev);
+    const HRESULT hr = g_orig_cscfh_host(self, dev, hwnd, d1, fs, restrict_to, out);
+    log_num("host: CreateSwapChainForHwnd por la fabrica proxy -> ", (unsigned)hr);
+    if (SUCCEEDED(hr) && out != nullptr) hook_swapchain_present(*out);
+    return hr;
+}
+static void hook_factory_host(void *factory) {
+    if (factory == nullptr || g_orig_cscfh_host != nullptr) return;
+    void **vt = *reinterpret_cast<void ***>(factory);
+    if (MH_CreateHook(vt[15], reinterpret_cast<void *>(&hk_cscfh_host),
+                      reinterpret_cast<void **>(&g_orig_cscfh_host)) != MH_OK ||
+        MH_EnableHook(vt[15]) != MH_OK)
+        g_orig_cscfh_host = nullptr;
+    if (MH_CreateHook(vt[10], reinterpret_cast<void *>(&hk_csc_host),
+                      reinterpret_cast<void **>(&g_orig_csc_host)) != MH_OK ||
+        MH_EnableHook(vt[10]) != MH_OK)
+        g_orig_csc_host = nullptr;
+    log_num("host: fabrica proxy enganchada (1 = si) ", (unsigned)(g_orig_cscfh_host ? 1 : 0));
+}
+
 typedef HRESULT(WINAPI *PFN_F1)(REFIID, void **);
 typedef HRESULT(WINAPI *PFN_F2)(UINT, REFIID, void **);
 static PFN_F1 g_orig_f0 = nullptr, g_orig_f1 = nullptr;
@@ -929,16 +981,37 @@ static PFN_F2 g_orig_f2 = nullptr;
 // One detour per export: a shared one could not tell which entry point it was
 // reached through, and would forward half its calls to the wrong original.
 static HRESULT WINAPI hk_f0(REFIID riid, void **out) {
+    if (host_take()) {
+        const HRESULT hr0 = h_CreateDXGIFactory ? h_CreateDXGIFactory(riid, out) : g_orig_f0(riid, out);
+        host_release();
+        log_num("host: CreateDXGIFactory por el interposer -> ", (unsigned)hr0);
+        if (SUCCEEDED(hr0) && out != nullptr) hook_factory_host(*out);
+        return hr0;
+    }
     HRESULT hr = g_orig_f0(riid, out);
     if (SUCCEEDED(hr) && out != nullptr) hook_factory(*out);
     return hr;
 }
 static HRESULT WINAPI hk_f1(REFIID riid, void **out) {
+    if (host_take()) {
+        const HRESULT hr0 = h_CreateDXGIFactory1 ? h_CreateDXGIFactory1(riid, out) : g_orig_f1(riid, out);
+        host_release();
+        log_num("host: CreateDXGIFactory1 por el interposer -> ", (unsigned)hr0);
+        if (SUCCEEDED(hr0) && out != nullptr) hook_factory_host(*out);
+        return hr0;
+    }
     HRESULT hr = g_orig_f1(riid, out);
     if (SUCCEEDED(hr) && out != nullptr) hook_factory(*out);
     return hr;
 }
 static HRESULT WINAPI hk_f2(UINT flags, REFIID riid, void **out) {
+    if (host_take()) {
+        const HRESULT hr0 = h_CreateDXGIFactory2(flags, riid, out);
+        host_release();
+        log_num("host: CreateDXGIFactory2 por el interposer -> ", (unsigned)hr0);
+        if (SUCCEEDED(hr0) && out != nullptr) hook_factory_host(*out);
+        return hr0;
+    }
     HRESULT hr = g_orig_f2(flags, riid, out);
     if (SUCCEEDED(hr) && out != nullptr) hook_factory(*out);
     return hr;

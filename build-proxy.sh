@@ -23,7 +23,7 @@ static const CubinPatch kCubinPatches[] = {};
 STUB
 fi
 
-g++ -shared -std=c++20 -O2 -DNDEBUG -w -I external/minhook/include \
+g++ -shared -std=c++20 -O2 -DNDEBUG -w -I external/minhook/include -I external/streamline/include \
   -o version.dll src/proxy.cpp src/forwards_winmm.S src/exports.def \
   external/minhook/src/hook.c external/minhook/src/buffer.c \
   external/minhook/src/trampoline.c external/minhook/src/hde/hde64.c \

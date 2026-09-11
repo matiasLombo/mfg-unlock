@@ -59,6 +59,7 @@ struct Settings {
     bool presetb       = false;   // mfg-presetb.txt
     bool sllog         = false;   // mfg-sllog.txt
     bool indicator     = false;   // mfg-indicator.txt
+    bool host          = false;   // mfg-host.txt: Streamline en un juego sin Streamline (experimento)
 
     // --- numericos: un archivo con numeros adentro; 0 o -1 = ausente/invalido ---
     int blockms        = 0;       // mfg-blockms.txt: 1..99999
@@ -123,6 +124,7 @@ inline const Flag kFlags[] = {
     { L"mfg-presetb.txt",        "presetb", &Settings::presetb },
     { L"mfg-sllog.txt",          "sllog", &Settings::sllog },
     { L"mfg-indicator.txt",      "indicator", &Settings::indicator },
+    { L"mfg-host.txt",           "host", &Settings::host },
 };
 inline const int kFlagsN = (int)(sizeof(kFlags) / sizeof(kFlags[0]));
 

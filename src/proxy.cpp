@@ -945,6 +945,7 @@ static void arm_slinit_early(void) {
 
 
 
+#include "host.h"
 #include "recorder.h"
 
 // ------------------------------------------------- catching the dll load ---

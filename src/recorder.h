@@ -417,6 +417,8 @@ static DWORD WINAPI recorder(LPVOID) {
         // D3D12 games never reach the Vulkan branches above, so this is not in
         // the else of anything: both are attempted, and whichever applies wins.
         arm_dxgi_recorder();
+        host_arm_d3d12();
+        host_poll();
         emit_verdict_if_due();
         // Y si el juego ya tenia su swapchain hecho cuando llegamos, el hook de
         // la factory no lo va a ver nunca. Se adopta por la vtable compartida.

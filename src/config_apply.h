@@ -178,4 +178,6 @@ static void apply_config(void) {
             // la dll y nada mas. mfg-nocubins.txt los apaga.
             g_cubins = a.cubins;
             g_meter_off = a.meter_off;
+            g_host_on = a.host;
+            if (g_host_on) log_line("host: modo host ENCENDIDO (Streamline nuestro en un juego sin Streamline)");
 }

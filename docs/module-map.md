@@ -39,9 +39,11 @@ con `tools/compare_sections.py` (.text byte a byte).
 | `recorder.h` | 494 | el grabador F9, el CSV y el hilo del panel | `pacing:` en el log, `mfg-frames.csv` | `present.h`, `overlay.h` |
 | `loader.h` | 1682 | que set y que snippet corren: copias del plugin, veredicto, cache, `LdrLoadDll`, `on_dll_load` | `VEREDICTO ACTIVO copias=N vivas=1 ...`, `se carga el nuestro` | `patches.h`, `slinit.h`, `diag.h` |
 | `present.h` | 984 | el swapchain y Present: adopcion, contador del runtime, el hook o su ausencia con el overlay de Steam | `present: overlay de Steam presente`, `se adopta la instancia nueva` | `recorder.h` (note_present) |
+| `host.h` | 508 | modo host (`host 1`): nosotros como aplicacion de Streamline en un juego que no lo trae -- slInit, proxies de fabrica/device, tags y constantes desde los parametros de NGX, PCL y Reflex, `slDLSSGSetOptions` | `host: slInit -> 0`, `EvaluateFeature, llamadas`, PresentCount = 2x tokens en Metro | los headers del SDK, `present.h` (los hooks de fabrica y Present), `loader.h` |
 | `exceptions.h` | 257 | el testigo de excepciones y la autopsia del sub-frame | `EXCEPCION ----` (que no aparezca) | -- |
 | `overlay.h` | 1124 | el panel y el HUD (ventana propia, GDI) | `panel:` / `hud:` en el log | `state.h` |
-| `proxy.cpp` | 1172 | DllMain en cuatro pasos, el log, el forwarding de `version.dll`, `hk_slGetFeatureFunction` (Capa 0), los helpers de PE | todo lo anterior | todo lo anterior |
+| `proxy.cpp` | 1214 | DllMain en cuatro pasos, el log, el forwarding de `version.dll` y de `winmm.dll` (el mismo dll con cualquiera de los dos nombres; `g_own_name` decide), `hk_slGetFeatureFunction` (Capa 0), los helpers de PE | todo lo anterior | todo lo anterior |
+| `forwards_winmm.S` + `forwards_winmm_names.h` + `exports.def` | generados | los 180 exports de `winmm.dll` como stubs que resuelven el real la primera vez (`tools/gen_forwards.py`); cuatro a mano no alcanzaban: Metro se reiniciaba en bucle | el juego arranca con `winmm.dll` | -- |
 | `cubins.h` | 14659 | los kernels Blackwell recompilados, como bytes (`tools/rebuild_cubins.py`) | `gates and cubins OK` | -- |
 
 ## Como se lee un defecto nuevo
