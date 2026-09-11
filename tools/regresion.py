@@ -55,7 +55,7 @@ def correr(caso, args, duracion, set_key):
     log = (t / "mfg-unlock.log").read_text(encoding="utf-8", errors="replace")
     pres = suma(log, r"runtime PresentCount this window")
     rend = suma(log, r"raw token calls")
-    rotos = log.count("INVARIANTE ROTO")
+    rotos = log.count("INVARIANTE ")
     return (pres / rend if rend else 0.0), m.group(1), rotos
 
 

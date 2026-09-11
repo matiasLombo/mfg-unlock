@@ -34,6 +34,7 @@
 #include "cubins.h"
 #include "politica.h"
 #include "config.h"
+#include "diag.h"
 
 // The panel's own state, defined here and shared with overlay.h. It is a
 // window of ours now, not something drawn into the game's frame -- see the
@@ -1194,8 +1195,10 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         static bool dicho_nada = false;
         if (!dicho_nada) {
             dicho_nada = true;
-            log_line("freno: sin parche y sin saber que pide el juego, "
-                     "no se toca la cuenta");
+            diag::Linea l = diag::invariante(diag::Capa::POLITICA, "cuenta-del-juego",
+                                             "sin parche y sin saber que pide el juego: no se toca");
+            l.par("visto", g_last_seen_generated).par("sel", g_force_sel);
+            log_line(l.b);
         }
         return;
     }
@@ -1227,15 +1230,13 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
         static LONG dicho = -1;
         if (dicho != s.queda) {
             dicho = s.queda;
-            log_num("INVARIANTE ROTO: cuenta ", (unsigned)s.queda);
-            log_line("  con la semantica de multiplicador eso es 1X: no genera nada");
-            log_num("  seleccion ", (unsigned)g_force_sel);
-            log_num("  g_force_generated ", (unsigned)g_force_generated);
-            log_num("  g_dyn_target x100 ", (unsigned)g_dyn_target);
-            log_num("  kTope ", (unsigned)kTope);
-            log_line(s.invariante_corregido
-                         ? "  se escribe 2, que es el piso de un modo que genera"
-                         : "  manda el freno (sin parche de la cuenta): NO se corrige");
+            diag::Linea l = diag::invariante(diag::Capa::POLITICA, "cuenta>=2",
+                                             s.invariante_corregido
+                                                 ? "con multiplicador es 1X; se escribe 2, el piso"
+                                                 : "con multiplicador es 1X; manda el freno, NO se corrige");
+            l.par("cuenta", s.queda).par("sel", g_force_sel).par("gen", g_force_generated)
+             .par("objetivo", g_dyn_target).par("tope", kTope);
+            log_line(l.b);
         }
     }
     if (s.escribir_modo) *(LONG *)(p + 32) = (LONG)s.modo;
@@ -6415,11 +6416,15 @@ static void presentes_del_runtime(void) {
     // GetLastPresentCount devuelve el contador del runtime sin depender del
     // modo de presentacion, que es justo lo que hace falta aca.
     UINT ahora = 0;
-    if (FAILED(g_swapchain->GetLastPresentCount(&ahora))) {
+    const HRESULT hr = g_swapchain->GetLastPresentCount(&ahora);
+    if (FAILED(hr)) {
         static bool dicho = false;
         if (!dicho) {
             dicho = true;
-            log_line("present: GetLastPresentCount fallo; el contador queda en cero");
+            diag::Linea l = diag::invariante(diag::Capa::PRESENTACION, "contador",
+                                             "GetLastPresentCount fallo; el contador queda en cero");
+            l.par("hr", (long long)(long)hr);
+            log_line(l.b);
         }
         return;
     }
@@ -8292,9 +8297,13 @@ static void copia_que_ejecuta(const void *fn, const char *nombre) {
     }
     // Y lo que importa de verdad: si la que ejecuta no recibio los parches, todo
     // lo que midamos despues es sobre un binario que no tocamos.
-    if (g_copias[cual].sitios_cuenta <= 0 || g_copias[cual].sitios_pacer <= 0)
-        log_line("  ! LA COPIA QUE EJECUTA NO TIENE TODOS LOS PARCHES");
-    else
+    if (g_copias[cual].sitios_cuenta <= 0 || g_copias[cual].sitios_pacer <= 0) {
+        diag::Linea l = diag::invariante(diag::Capa::IDENTIDAD, "copia-parcheada",
+                                         "la copia que ejecuta no tiene todos los parches");
+        l.par("copia", cual).par("cuenta", g_copias[cual].sitios_cuenta)
+         .par("pacer", g_copias[cual].sitios_pacer);
+        log_line(l.b);
+    } else
         log_line("  la copia que ejecuta tiene cuenta y pacer parcheados");
     // Comparacion contra el puntero que el resto del archivo viene usando.
     {
@@ -8327,33 +8336,24 @@ static void evaluar_invariantes(void) {
         if (g_copias[i].sitios_cuenta > 0) ++con_cuenta;
         if (g_copias[i].sitios_pacer > 0) ++con_pacer;
     }
-    log_line("--- FASE: invariantes de la topologia ---");
-    log_num("  copias de sl.dlss_g mapeadas ", (unsigned)g_copias_n);
-    log_num("  de esas, vivas ", (unsigned)vivas);
-    log_num("  vivas con sitio de cuenta ", (unsigned)con_cuenta);
-    log_num("  vivas con sitio de pacer ", (unsigned)con_pacer);
-    log_num("  copia que EJECUTA identificada (1 = si) ",
-            (unsigned)(g_copia_ejecuta >= 0 ? 1 : 0));
-    if (g_copia_ejecuta >= 0) {
-        log_num("    indice ", (unsigned)g_copia_ejecuta);
-        log_num("    sitios de cuenta ", (unsigned)g_copias[g_copia_ejecuta].sitios_cuenta);
-        log_num("    sitios de pacer ", (unsigned)g_copias[g_copia_ejecuta].sitios_pacer);
-    }
-    log_num("  semantica: la cuenta es el multiplicador (1 = si) ",
-            (unsigned)(cuenta_es_multiplicador() ? 1 : 0));
-    log_num("  el interposer llego a resolvernos una funcion (1 = si) ",
-            (unsigned)(g_ejecuta_resuelto ? 1 : 0));
-    if (g_ejecuta_resuelto && g_copia_ejecuta < 0) {
+    // Una linea con todos los numeros de la topologia, y el veredicto adelante.
+    const bool pasivo = g_ejecuta_resuelto && g_copia_ejecuta < 0;
+    diag::Linea l = diag::veredicto(pasivo ? "PASIVO" : "ACTIVO",
+                                    pasivo ? "no se identifico que copia ejecuta; no se parchea ni se reescriben opciones"
+                                           : "topologia identificada");
+    l.par("copias", g_copias_n).par("vivas", vivas).par("con_cuenta", con_cuenta)
+     .par("con_pacer", con_pacer).par("ejecuta", g_copia_ejecuta)
+     .par("ejecuta_cuenta", g_copia_ejecuta >= 0 ? g_copias[g_copia_ejecuta].sitios_cuenta : -1)
+     .par("ejecuta_pacer", g_copia_ejecuta >= 0 ? g_copias[g_copia_ejecuta].sitios_pacer : -1)
+     .par("multiplicador", cuenta_es_multiplicador() ? 1 : 0)
+     .par("resuelto", g_ejecuta_resuelto ? 1 : 0);
+    log_line(l.b);
+    if (pasivo) {
         g_fase = (LONG)Fase::PASIVO;
-        log_line("  VEREDICTO: PASIVO -- no se pudo identificar que copia ejecuta.");
-        log_line("  No se parchea ni se reescriben opciones. El multiplicador");
-        log_line("  queda como lo pide el juego. Esto NO es un crash: es el mod");
-        log_line("  negandose a actuar sobre un binario que no sabe cual es.");
         return;
     }
     g_fase = (LONG)Fase::VERIFICADO;
     g_fase = (LONG)Fase::ACTIVO;
-    log_line("  VEREDICTO: ACTIVO");
 }
 
 static void copia_descargada(const unsigned char *base, size_t largo) {
