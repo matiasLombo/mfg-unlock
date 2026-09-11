@@ -20,6 +20,9 @@
 // este archivo agrega -- la escritura -- se verifica con la corrida.
 #pragma once
 
+// Globales que solo usa este modulo (movidas de proxy.cpp).
+static bool g_saw_any_copy = false;
+
 // arm_multiplier_override llama a esto; vive en proxy.cpp, mas abajo.
 static void arm_frametoken_hook(void);
 
@@ -38,7 +41,6 @@ static void arm_frametoken_hook(void);
 //
 // Escribir en una copia que no se usa es inofensivo: es un byte en su .text que
 // nadie lee. Buscar cual es la buena seria adivinar; escribir en todas no.
-static const int kMaxSites = 4;
 static void site_add(volatile unsigned char **list, int *n, volatile unsigned char *q) {
     for (int i = 0; i < *n; ++i) if (list[i] == q) return;
     if (*n < kMaxSites) list[(*n)++] = q;
@@ -46,32 +48,7 @@ static void site_add(volatile unsigned char **list, int *n, volatile unsigned ch
 static void site_write(volatile unsigned char **list, int n, unsigned char v) {
     for (int i = 0; i < n; ++i) if (list[i] != nullptr) *list[i] = v;
 }
-static volatile unsigned char *g_wic_sites[kMaxSites] = { nullptr, nullptr, nullptr, nullptr };
-static int g_wic_n = 0;
 
-// Poner y sacar el parche del byte segun el modo.
-//
-// El parche reemplaza `mov eax,[rdx+4]` (8B 42 04) por `push imm8 / pop rax`,
-// y ese inmediato es el limite del bucle de sub-frames. Mientras esta puesto
-// hay DOS canales fijando la misma cantidad -- ese byte y la cuenta que el
-// plugin recibe por slDLSSGSetOptions, con la que dimensiona sus ranuras -- y
-// cuando se desfasan las dos direcciones rompen: el byte por encima recorre una
-// ranura sin inicializar y crashea ([nulo+0x40] en +0x3ED6F, del dump de
-// UE4SS); por debajo detiene la presentacion.
-//
-// Medido en el banco con el parche DESACTIVADO de entrada:
-//
-//     6X entero      6.00  genera
-//     CUSTOM 2.50x   1.00  no genera
-//
-// O sea: los enteros no lo necesitan y los fraccionarios no pueden sin el. Con
-// el parche fuera en modos enteros queda un solo canal y el desfasaje no puede
-// existir.
-//
-// Se escribe sobre codigo del plugin con el juego corriendo. Los tres bytes se
-// escriben de atras hacia adelante para que el opcode quede ultimo: asi ningun
-// hilo puede leer una instruccion a medio formar.
-static volatile LONG g_wic_set = 1;   // el parche arranca aplicado
 static void wic_patch(bool put) {
     if ((g_wic_set != 0) == put) return;
     for (int i = 0; i < g_wic_n; ++i) {
@@ -109,7 +86,6 @@ static void wic_patch(bool put) {
                    : "wic: parche SACADO (modo entero, manda la API)");
 }
 
-static bool g_wic_mode = false;                         // mfg-wic.txt
 
 // The count in the work item, rather than the comparison that reads it.
 //
@@ -220,14 +196,6 @@ static int patch_work_item_count(unsigned char *text, size_t len) {
     return 1;
 }
 
-static volatile unsigned char *g_imm_sites[kMaxSites] = { nullptr, nullptr, nullptr, nullptr };
-static int g_imm_n = 0;
-static volatile unsigned char *g_imm2_sites[kMaxSites] = { nullptr, nullptr, nullptr, nullptr };
-static int g_imm2_n = 0;
-static volatile unsigned char *g_imm3_sites[kMaxSites] = { nullptr, nullptr, nullptr, nullptr };
-static int g_imm3_n = 0;
-static volatile unsigned char *g_gen_flag = nullptr;    // 1 generating, 0 not
-static volatile unsigned char *g_lat_allow = nullptr;   // 1 reconfigure, 0 leave alone
 
 // The swap chain's frame latency, reconfigured during bring-up and left alone
 // afterwards.
@@ -305,46 +273,6 @@ static int patch_gate_frame_latency(unsigned char *base, unsigned char *text, si
     return 1;
 }
 
-// The swap chain's frame latency, pinned.
-//
-// throttleFlipQueue reconfigures IDXGIDevice1::SetMaximumFrameLatency whenever
-// interpolation starts or stops, and a cadence that turns generation off for
-// some frames does that constantly.
-//
-// The churn is real and has now been counted rather than inferred: hooking the
-// DXGI method itself (IDXGISwapChain2 slot 31 -- IDXGIDevice1 does not exist on
-// D3D12) records 3915 calls in a 2.50x run, exactly one per rendered frame,
-// against 2 calls in either integer control.
-//
-// But it is not what pins the base rate, and it is not what gates generation.
-// Clamping the value to 2 from the DXGI side leaves 2.50x at base 55 and 137
-// presented, identical to unclamped, and leaves 3.00x reading 3.000 at 165 --
-// so the old reading that pinning it stops interpolation was wrong about the
-// cause as well as the effect.
-//
-// Measured on the sample at 1.50x, from the era of the broken instruments:
-//
-//   66  SetMaximumFrameLatency changed from 1 to 2
-//   67  SetMaximumFrameLatency changed from 2 to 1
-//   79  Couldn't lock the mutex on sync present - will skip the present
-//
-// A constant 2.00x run has none of those three. Reconfiguring the swap chain
-// races the present that is already in flight, the present loses, and it is
-// dropped -- 79 of them, which is the missing half of the frame rate. Nothing
-// upstream is at fault: the count, the loop bound, the metering and the
-// generation flag were all correct, and this happens downstream of all four.
-//
-//   8B 56 60   mov edx, dword ptr [rsi+0x60]    ; the latency it wants
-//   FF 50 60   call qword ptr [rax+0x60]        ; SetMaximumFrameLatency
-//
-// becomes `push 2 ; pop rdx` -- three bytes for three -- so the value asked for
-// is always the one a healthy always-on run settles at, and the call becomes a
-// no-op instead of a reconfiguration. This is a deliberate override of the
-// plugin's own judgement, which is why it is worth saying plainly: frame
-// generation was not built to be switched per frame, and this is the piece
-// that assumed it would not be.
-static bool g_pin_latency = false;    // mfg-pinlatency.txt: diagnostic
-static bool g_pace_follow = false;    // mfg-pacefollow.txt
 // Por que el plugin apaga la interpolacion solo, con mode=eOn.
 //
 // En GTA V el log dice "interpolation state changed from enabled to disabled
@@ -395,76 +323,6 @@ static bool g_pace_follow = false;    // mfg-pacefollow.txt
 //
 // Falta: quien escribe [ctx+0x4488] y con que duracion.
 
-// The pacer's wait, made to follow the frame's own count.
-//
-// This is where the throughput law lives. presentCommon's pacing block computes
-// how long to wait before letting the producer go:
-//
-//   48 8B B6 C8 0C 00 00   mov  rsi, [r14+0xcc8]   ; the refresh interval, us
-//   41 8B 4D 04            mov  ecx, [r13+4]       ; the count
-//   48 0F AF CE            imul rcx, rsi           ; wait = count * interval
-//   48 2B C8               sub  rcx, rax           ; less what already elapsed
-//
-// and [r13+4] holds the count the *API* was told, which is ceil(ratio - 1) --
-// the cadence ceiling, because telling the API anything else crashes. So every
-// frame waits ceiling * interval even when it generates fewer, and the producer
-// settles at refresh/(ceiling + 1). That is exactly the measured law,
-// presented = refresh * ratio / (ceiling + 1): at 2.25x the base is 55 = 165/3,
-// the base 3.00x pays, and a quarter of the display's slots go unused.
-//
-// Five other approaches were measured and none moved it: the refresh cap (six
-// levers), pinning the latency in the plugin's bytes (kills the run), the block
-// distribution (base 55 across four layouts), the queue parallelism mode (base
-// 55 across all four) and clamping SetMaximumFrameLatency from the DXGI side
-// (3915 calls counted in a 2.50x run, base unchanged).
-//
-// `mov ecx, [r13+4]` is four bytes and `push imm8; pop rcx; nop` is four, the
-// same trade patch_work_item_count already makes, so the count the pacer waits
-// on becomes a byte this file writes per frame.
-//
-// THE PREMISE WAS HALF WRONG, AND THE CORRECTION MATTERS. Measured in GTA V, standing
-// still and switching selection without moving the camera:
-//
-//   2.00x  28 windows  base 60  ratio 2.01  presented 121
-//   2.50x  20 windows  base 55  ratio 2.48  presented 137
-//   3.00x  17 windows  base 57  ratio 2.61  presented 145
-//
-// 2.50x presents MORE than 2.00x -- but the pinning is still there. 55 is
-// 165/3 exactly, so the pacer is binding at 2.50x in the game too; the game's
-// GPU-bound 60 only binds at 2.00x, where the pacer would have allowed 82.
-//
-// What decides whether the pinning costs anything is whether the integer below
-// already fills the display:
-//
-//   bench, no slow frame:  2.00x presents 165 = the refresh. No headroom, so
-//                          losing base to the ceiling cannot be paid back and
-//                          every fractional value loses.
-//   GTA V:                 2.00x presents 121 of 165. Headroom, so trading
-//                          base 60 -> 55 for ratio 2.0 -> 2.5 nets +17.
-//
-// So: fractional wins when the integer below does not saturate the display and
-// loses when it does. The seven patches that failed to move the base were not
-// chasing a phantom -- the base really is pinned -- they were chasing something
-// whose cost is conditional, in the one setup where the condition was worst.
-//
-// IT DOES NOT MOVE THE BASE. The patch applies, the integer controls stay exact
-// (1.000, 2.001, 3.000) so it is safe, and 2.50x reads base 55 and 138
-// presented with it and without it -- identical. The wait is computed from our
-// per-frame count now and the producer still settles at refresh/(ceiling + 1).
-//
-// So the pinning is not this arithmetic, and the number that says so plainly:
-// at 2.25x the app renders 55 and 124 presents leave. If presents were the
-// limited resource at 165/s the render rate would be 73. Something waits three
-// intervals per rendered frame and it is not this computation. Kept behind
-// mfg-pacefollow.txt, off by default, because the site and the reasoning are
-// right and the next idea will start here.
-//
-// And it is not presents being issued and then dropped: sl.log records zero
-// "will skip the present" in every configuration, so the plugin issues exactly
-// `ratio` presents per rendered frame. 2.25x, 2.50x, 2.75x and 3.00x all render
-// at 55 while presenting 124, 138, 151 and 165 -- the producer is fixed
-// regardless of how many presents actually leave.
-static volatile unsigned char *g_pace_count = nullptr;
 static int patch_pacer_count(unsigned char *text, size_t len) {
     static const unsigned char sig[18] = {
         0x49, 0x8B, 0xB6, 0xC8, 0x0C, 0x00, 0x00,
@@ -578,31 +436,6 @@ static int patch_index_count(unsigned char *base, unsigned char *text, size_t le
     return 1;
 }
 
-// The present index, made monotonic.
-//
-// A present is accepted only if its index is strictly greater than the last
-// one seen (cmp rcx,[rax+0x18] / ja), and the index is built from the count of
-// the frame it belongs to:
-//
-//   48 8D 0C 76              lea rcx, [rsi + rsi*2]     ; frame x 3
-//   4D 85 ED / 74 xx         test r13,r13 / je
-//   41 8B 45 04              mov eax, [r13+4]           ; this frame's count
-//   48 8D 0C 4D 01 00 00 00  lea rcx, [rcx*2 + 1]       ; frame x 6 + 1
-//   48 03 C8                 add rcx, rax               ; + the count
-//
-// With a constant count that is monotonic and nothing is ever dropped -- 2.00x
-// and 3.00x both run at 80 fps with zero drops. With a cadence that alternates,
-// a frame generating one after a frame generating two yields a *lower* index
-// and the present is discarded as out of order: 356 of them at 2.50x, which is
-// why 2.50x presents fewer frames (308) than 2.00x (427).
-//
-// The block is six wide whatever the count, so the room is there; the index
-// simply must not be derived from a number that moves. `add rcx, rax` becomes
-// `add rcx, [rip+d]` -- three bytes for a seven-byte instruction, so the two
-// preceding are absorbed: the `mov eax,[r13+4]` that reads the count is no
-// longer needed and its four bytes are exactly the difference. Our counter is
-// incremented once per frame and only ever rises.
-static volatile unsigned long long *g_pidx = nullptr;
 
 static int patch_monotonic_index(unsigned char *base, unsigned char *text, size_t len) {
     size_t found = 0, at = 0;
@@ -1083,21 +916,7 @@ static void arm_multiplier_override(unsigned char *base) {
 // ----------------------------------------------------------- the rewrite ---
 
 static const unsigned kArchBlackwell = 0x1B0;
-static int g_gates = 0;
-static bool g_preset_b = false;
-static bool g_cubins = false;
-static bool g_meter_off = false;
 
-// The id of the newest build in NVIDIA's OTA cache, or empty if there is none.
-// NGX loads that copy and leaves the one in the game folder unused, so a patch
-// failing against the game's own copy is not a failure worth reporting -- and
-// reporting it anyway is exactly how a log cries wolf: DOOM maps both, and the
-// verdict shouted "CUBINS NOT APPLIED" about the image that never executes
-// while the one that does was patched correctly.
-static wchar_t g_ota_newest[64] = {0};
-// Set once that build has actually been seen mapping, which is the only thing
-// that makes another copy provably redundant.
-static bool g_ota_mapped = false;
 
 // ---- selecting the interpolation model ---------------------------------
 //
@@ -1170,46 +989,6 @@ static int patch_preset_b(unsigned char *base) {
 
 
 
-// Both gates are `cmp <r32>, 0x1B0` against the NGX architecture id.  Rewriting
-// the immediate to 0 makes the comparison read "arch >= 0", true everywhere, so
-// whichever way the compiler phrased the predicate -- jl, setae, cmovl, all of
-// which appear across snippet builds -- the Blackwell branch is the one taken.
-// El techo de MFG, en su origen: la constante que el snippet le contesta a NGX.
-//
-// El plugin no inventa el maximo, se lo pregunta al snippet:
-//
-//   sl.dlss_g 0x57c97  lea   rdx, 'DLSSG.MultiFrameCountMax'
-//             0x57c9e  call  [GetParameterInt]
-//             0x57cca  mov   edx, 5
-//             0x57cd1  cmovb edx, ecx        ; [ctx+0x45e4] = min(NGX, 5)
-//
-// Y el snippet lo decide por arquitectura:
-//
-//   nvngx_dlssg 0x26572  mov   ebx, 1
-//               0x26577  mov   r8d, 3        ; <- ESTE
-//               0x2657d  cmp   edi, 0x1b0    ; 0x1b0 = Blackwell
-//               0x26583  cmovl r8d, ebx      ; arch < 0x1b0 -> 1
-//               0x26587  lea   rdx, 'DLSSG.MultiFrameCountMax'
-//               0x26595  call  [SetParameterInt]
-//
-// O sea `max = (arch >= 0x1B0) ? 3 : 1`. En Ada (0x190) de fabrica seria 1 --
-// el 2X nativo -- y llega a 3 porque patch_gates ya reescribe ese `cmp` a cero
-// y Ada toma el camino de Blackwell.
-//
-// **El 3 no es una capacidad medida de la GPU: es una constante por
-// arquitectura**, y ya la estamos moviendo de 1 a 3. Subirla a 5 es el unico
-// punto de la cadena que puede dar mas: forzar el campo del PLUGIN ya se probo
-// y NGX rechaza igual (hipotesis 9 en docs/objetivo-halo-6x.md), porque el que
-// valida despues es el snippet.
-//
-// No se sabe si el snippet aguanta 5. Puede que 3 refleje recursos que si
-// existen. Por eso va detras de mfg-mfcmax.txt hasta que este medido: si sale
-// mal, el dll que se envia no cambia.
-//
-// El patron evita el inmediato del `cmp`, que patch_gates ya puede haber puesto
-// en cero: se ancla en `mov r8d, 3` + `81 FF` (cmp edi, imm32, sea cual sea) +
-// `cmovl r8d, ebx`.
-static int g_mfcmax = 0;          // 0 = no tocar; si no, el valor a escribir
 
 // El tope que el snippet REPORTA, subido.
 //
@@ -1458,7 +1237,6 @@ static int patch_gates(unsigned char *base) {
 // Opt in with mfg-cubins.txt. This one is not like the gate patch: it puts our
 // code on the GPU in the render path.
 
-static int g_cubins_done = 0;
 
 static bool elf_fingerprint(const unsigned char *b, size_t len,
                             unsigned *text, unsigned *shared, unsigned *regs) {
@@ -1606,7 +1384,6 @@ static int patch_cubins(unsigned char *base, bool live = true) {
 // The same flag also pins the DLFG output count to 2, so this frees that too.
 
 
-static int g_queue_mode = -1;
 
 
 static int patch_queue_mode(unsigned char *base, int mode) {
@@ -1842,7 +1619,6 @@ static int patch_metering_off(unsigned char *base) {
     return hits;
 }
 
-static int g_outputs_patched = 0;
 
 static int patch_enable_cpu_pacer(unsigned char *base) {
     auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);

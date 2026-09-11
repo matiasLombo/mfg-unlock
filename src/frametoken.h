@@ -16,6 +16,13 @@
 // tocar una linea del cuerpo.
 #pragma once
 
+// Globales que solo usa este modulo (movidas de proxy.cpp).
+// The game asks for a frame token once per frame, from its own render thread
+// -- which is the thread that called slDLSSGSetOptions and the only one it is
+// safe to call it from again. With DLSS-G on, Present is Streamline's thread,
+// so the replay cannot happen there; the log said so outright.
+static PFN_slGetNewFrameToken g_orig_frametoken = nullptr;
+
 static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
     // Time inside the original frame-token call, same method as the Present
     // measurement. Present accounts for 2% of the producer's time and Reflex

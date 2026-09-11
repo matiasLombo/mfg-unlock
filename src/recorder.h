@@ -17,6 +17,13 @@
 // tocar una linea del cuerpo.
 #pragma once
 
+// Globales que solo usa este modulo (movidas de proxy.cpp).
+// Remembered across runs: the mode picked in the panel and, for DYNAMIC, the
+// frame-rate target. Nothing else -- the flag files are a separate thing and
+// are not rewritten from here, so a file the player created by hand is never
+// silently replaced by one of ours.
+static volatile LONG g_settings_dirty = 0;
+
 // ---- recording, to tell whether a pacing change did anything -------------
 //
 // The pacer runs inside the game's own present call, so the spacing of those
@@ -40,26 +47,10 @@
 // actually told, per present, instead of inferring it from the disassembly.
 static const unsigned kSetPresentConfigNV = 1000613000u;
 
-// Two layers matter and they are not the same. The game calls
-// sl.interposer!vkQueuePresentKHR once per *rendered* frame; Streamline then
-// issues the generated frames further down, through the Vulkan loader. Hooking
-// only the top layer measures the input rate, not the output -- which is why an
-// earlier capture showed two images at 71 fps and no metering at all. Hook both
-// and tag which one produced each row.
-struct Sample { long long qpc; unsigned img; int meter; unsigned char src; };
-static Sample *g_samples = nullptr;
-static volatile LONG g_nsamples = 0;
-static volatile LONG g_recording = 0;
-// QPC at the start of a recording, so display times can be stored as a small
-// offset rather than a 64-bit absolute.
-static long long g_rec_qpc0 = 0;
 static LONG g_written = 0;
 static const int kMaxSamples = 200000;
-static wchar_t g_frames[MAX_PATH];
-static wchar_t g_frames_base[MAX_PATH];   // unnumbered name, per-run suffix added at F9
 static int g_run_no = 0;
 
-typedef int(__stdcall *PFN_Present)(void *, const void *);
 static PFN_Present g_orig_present = nullptr;
 
 static PFN_Present g_orig_present2 = nullptr;

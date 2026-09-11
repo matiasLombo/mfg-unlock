@@ -21,6 +21,17 @@
 // queda en proxy.cpp. Sin tocar una linea del cuerpo.
 #pragma once
 
+// Globales que solo usa este modulo (movidas de proxy.cpp).
+static int g_cubins_done = 0;
+static int g_gates = 0;
+static bool g_native_pacer_found = false;  // sticky: one plugin with sites is enough
+// Set once that build has actually been seen mapping, which is the only thing
+// that makes another copy provably redundant.
+static bool g_ota_mapped = false;
+static int g_outputs_patched = 0;
+static bool g_veredicto_leido = false;
+static bool g_ya_sustituimos = false;                         // M3
+
 // The snippet does not always arrive under the name nvngx_dlssg.dll. NGX keeps
 // OTA-updated snippets under ProgramData as <arch>_<appid>.bin, and that copy is
 // usually the newest, so it is the one NGX actually uses -- matching on the file
@@ -96,20 +107,6 @@ static void copy_register(const unsigned char *base, size_t size, unsigned minor
     if (g_first_copy_ms == 0) g_first_copy_ms = GetTickCount64();
 }
 
-// Cual de las copias registradas contiene este puntero.
-//
-// Se dice UNA vez por corrida, con el cuadro completo: la que ejecuta y las que
-// no, cada una con los sitios que recibio. Si la que ejecuta tiene cero sitios y
-// otra los tiene, ahi esta el defecto de fondo que este proyecto viene pagando
-// juego por juego -- parchear todas las copias y confiar, en vez de verificar el
-// efecto en la que corre.
-int g_executing_copy = -1;   // indice en g_copias, -1 = todavia no se sabe
-// Distinto de lo anterior: si el interposer llego a resolvernos una funcion de
-// DLSS-G. Sin esto, "no se sabe cual ejecuta" y "el gancho nunca disparo" serian
-// el mismo estado, y el segundo NO es una topologia rota -- es falta de dato.
-// Apagar el mod por falta de dato seria la misma clase de regla no verificada
-// que este trabajo viene a sacar.
-bool g_executing_resolved = false;
 
 static void executing_copy(const void *fn, const char *name) {
     static bool said = false;

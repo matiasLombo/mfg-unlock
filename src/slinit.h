@@ -30,9 +30,6 @@ static const int kPrefFlags = 88;
 // juegos que ya andan no cambian.
 static void arm_slinit_temprano(void);
 
-// Experimento de la fase D: apuntar pathsToPlugins a nuestra carpeta.
-// Ver el bloque de hk_slInit, mas abajo.
-static bool g_pathsplugins = false;
 
 static unsigned hk_slInit(void *pref, unsigned long long sdk) {
     if (pref != nullptr) {

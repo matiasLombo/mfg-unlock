@@ -18,131 +18,15 @@
 // bloque. Separar "contar" de "volcar" y renombrar es el paso siguiente.
 #pragma once
 
-// Smoothed over a window rather than taken frame to frame. A single frame
-// time is noisy enough that the multiplier would change on a passing hitch,
-// and every change makes Streamline restart interpolation -- the native
-// controller did that 42 times in one run, twice within seven milliseconds,
-// and that churn is what a player feels as stutter.
-static double g_token_dt = 0.0;       // the averaged frame time, in seconds
-static double g_last_dt = 0.0;        // and the most recent one, for the spread
+// Globales que solo usa este modulo (movidas de proxy.cpp).
+static unsigned char g_probe[16];
+
 static double g_win_time = 0.0;       // elapsed in the current counting window
 static int    g_win_frames = 0;       // rendered frames in it
 static double g_rendered_fps = 0.0;   // frames / elapsed, unbiased
-volatile LONG g_present_count = 0;   // presents seen at the swap chain
-static long long g_pres_qpc = 0;            // when the last present went out
-static volatile LONG g_last_change_pres = 0; // present index at the last count change
-// Cuando cambio la cuenta, en reloj real, y la curva de recuperacion.
-//
-// El corte viejo era "menos de 8 presentaciones", que a 161 fps son ~50 ms --
-// la MITAD del enfriamiento de 100 ms que se quiere detectar. Con la ventana
-// mas corta que el efecto, cerca y lejos dan igual (0.94 y 0.92 medidos) y eso
-// NO prueba que cambiar la cuenta salga gratis.
-//
-// Aca se mide en milisegundos y por tramos, asi la DURACION del efecto sale del
-// dato en vez de asumirse. Si el enfriamiento es real y dura 100 ms, los tramos
-// de abajo de 100 tienen que estar peor que los de arriba, y la recuperacion
-// tiene que verse.
-// Cadencia SIN ESCALA, porque la de arriba tiene un defecto.
-//
-// "Fuera de cadencia" usa una banda ABSOLUTA de 4-8 ms, o sea que mide cuanto
-// se aleja el frame rate de ~165 fps mezclado con la irregularidad real. 4X
-// fijo sale 23.8 % en parte porque su intervalo medio (7.5 ms) roza el borde de
-// la banda, no porque sea irregular; 5X fijo sale 1.2 % porque 5.2 ms cae comodo
-// en el medio. Comparar configuraciones con distinto fps por esa banda no es
-// valido.
-//
-// Esta compara cada intervalo contra la media de SU PROPIA ventana: cuenta los
-// que se van mas de un cuarto. Es adimensional, asi que 133 y 192 present/s se
-// pueden comparar. Necesita dos pasadas por ventana, y como no se guardan los
-// intervalos se hace con la desviacion acumulada: suma y suma de cuadrados dan
-// el desvio relativo (coeficiente de variacion), que sirve igual y cuesta dos
-// sumas por presentacion.
-static double g_cv_sum = 0.0;    // suma de intervalos, ms
-static double g_cv_sq = 0.0;     // suma de cuadrados
-static int    g_cv_n = 0;
-static int g_hitch_near = 0;                 // hitches within 4 presents of one
-static int g_hitch_far = 0;                  // and the rest
-static double g_lat_sum = 0.0;               // queued presents, summed
-static int g_lat_n = 0, g_lat_max = 0;
-static int g_all_n = 0, g_all_bad = 0;       // every present, for the summary
-static double g_all_ms = 0.0;
-static int g_near_n = 0, g_near_bad = 0;     // presents within 8 of a change
-static int g_far_n = 0, g_far_bad = 0;       // and the rest
-static double g_pres_ms_sum = 0.0;
-static double g_pres_ms_max = 0.0;
-static int    g_pres_n = 0;
-static int    g_pres_hitch = 0;             // intervals over 33 ms
-static int    g_freeze_said = 0;          // tope de lineas del diagnostico
-static int    g_pres_bucket[6] = { 0, 0, 0, 0, 0, 0 };
-// El reloj de la PANTALLA, que es otro que el de Present.
-//
-// Todo lo de arriba mide intervalos entre LLAMADAS a Present. NVIDIA dice
-// explicitamente que eso no sirve para juzgar fluidez con DLSS-G: el plugin
-// retrasa la imagen por hardware DESPUES de Present(), y la guia de
-// ProgrammingGuideDLSS_G manda medir MsBetweenDisplayChange y no
-// MsBetweenPresents. Explica de paso por que el pacer daba vuelta toda la
-// distribucion de intervalos y no cambiaba nada visible ([[present-timing-is-
-// not-fluidity]]): movia el reloj que no se ve.
-//
-// SyncQPCTime es el instante en que el panel escaneo la ultima imagen. Cuando
-// cambia, hubo un cambio de imagen de verdad; si no cambia entre dos presents,
-// esa presentacion no llego a la pantalla como imagen propia. Esto tambien
-// responde la pregunta que quedo abierta en note_display -- si de cada lote de
-// 4 llega una sola o si el driver devuelve la estructura vieja -- porque
-// presentaciones por cambio de imagen lo dice directo.
-static long long g_disp_qpc = 0;      // SyncQPCTime del ultimo cambio visto
-static unsigned  g_disp_refresh = 0;  // PresentRefreshCount en ese cambio
-static int    g_disp_changes = 0;     // cambios de imagen en la ventana
-static int    g_disp_presents = 0;    // presentaciones en la misma ventana
-static double g_disp_ms_sum = 0.0;
-static double g_disp_ms_max = 0.0;
-static int    g_disp_hitch = 0;       // cambios separados por mas de 33 ms
-static int    g_disp_bucket[6] = { 0, 0, 0, 0, 0, 0 };
-static int    g_disp_skip = 0;        // cambios que saltaron mas de un refresh
-// PresentRefreshCount, que es el unico dato de pantalla que resulto confiable.
-//
-// SyncQPCTime NO sirve para MsBetweenDisplayChange: viene repetido. Se midio y
-// el control lo mata -- en ventanas SIN generacion, donde cada presentacion es
-// un frame real, daba 6.42 presentaciones por "cambio de imagen" y 49
-// imagenes/s contra 312 presentaciones/s. Un artefacto que aparece igual de
-// fuerte sin un solo frame generado no esta midiendo frames generados.
-//
-// PresentRefreshCount cuenta REFRESHES del panel. Si avanza a ~165/s el panel
-// va normal y lo grueso era SyncQPCTime; presentaciones por refresh dice si
-// cada presentacion se gano su refresh o si se pisan entre ellas.
-static unsigned  g_ref_first = 0;
-static unsigned  g_ref_last = 0;
-static long long g_ref_qpc0 = 0;
-static double g_token_fps = 0.0;      // and the rate that follows from it
 static double g_token_dt_fast = 0.0;  // la misma senal, para el controlador
-static double g_base_fps = 0.0;       // that, divided by the multiplier in force
 static long long g_last_token_qpc = 0;
 
-static int g_clamp_latency = 0;        // mfg-clamplatency.txt, 0 = off
-static volatile LONG g_smfl_calls = 0;
-static volatile LONG g_token_calls = 0;
-static volatile LONG g_frames_gated = 0;
-static bool g_novsync = false;        // mfg-novsync.txt: diagnostic
-static int  g_slow_frame_us = 0;      // mfg-slowframe.txt, en microsegundos
-// Con tres numeros en mfg-slowframe.txt la carga alterna entre el primero y
-// el segundo cada N milisegundos, y la base del banco se mueve de verdad
-// durante la corrida. Sin esto no hay forma de probar un controlador: una
-// escena de carga constante no distingue a uno que ajusta de uno que no
-// hace nada. Escalon y no rampa a proposito -- el que aguanta un escalon
-// aguanta una rampa, y en los datos se ve donde empieza.
-static int  g_slow_frame_us2 = 0;
-static int  g_slow_step_ms = 0;
-static int  g_jitter_pct = 0;         // mfg-jitter.txt, porcentaje
-static double g_present_block_us = 0.0;   // blocked inside Present, per window
-static double g_token_block_us = 0.0;     // blocked inside slGetNewFrameToken
-static volatile LONG g_rt_present_count = 0;
-// Forma del salto de indice entre llamadas consecutivas al token, para saber si
-// el gate se rompe por intercalado de hilos.
-static volatile LONG g_step_same = 0, g_step_plus_one = 0, g_step_forward = 0, g_step_back = 0;
-// The swap chain, kept so the runtime's own present counter can be sampled
-// from anywhere -- specifically from the frame-token hook, once per rendered
-// frame, off the present path entirely.
-static IDXGISwapChain *g_swapchain = nullptr;
 
 static volatile LONG g_present_mismatch = 0;   // windows where we disagree
 // Gap histogram, in the token hook. Buckets in milliseconds:

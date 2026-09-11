@@ -21,16 +21,34 @@
 // donde estaba el primero. Sin tocar una linea del cuerpo.
 #pragma once
 
+// Globales que solo usa este modulo (movidas de proxy.cpp).
+static volatile LONG g_cycle_ceiling = 0;   // lo+1 del ciclo en curso
+static volatile LONG g_game_asked_on = 0;
+// Lo que el JUEGO pide, que no es lo mismo que lo que pedimos nosotros.
+//
+// g_juego_quiere: su ultimo modo, 0 = eOff, 1 = eOn, -1 = todavia no lo vimos.
+// g_juego_pidio_on: si alguna vez lo vimos pedir eOn en esta corrida.
+static volatile LONG g_game_wants = -1;
+// 0 AUTO, 1 OFF, 2..4 = 2x/3x/4x. DLSSGOptions carries the mode at +32
+// (DLSSGMode: eOff 0, eOn 1, eAuto 2) and the generated-frame count at +36,
+// so switching frame generation off is a different field from choosing a
+// multiplier -- writing a count of zero would not do it.
+// Streamline tells us, in the struct itself, whether eDynamic exists. The
+// version sits at +24 of every sl structure; DLSSGOptions reached version 5
+// in 2.11.1, which is where DLSSGMode::eDynamic and dynamicTargetFrameRate
+// were added. On 2.8.0 (version 3) a mode of 3 is eCount -- an invalid value,
+// not dynamic -- and the struct does not even extend to +116. So the row is
+// offered only when the game's own struct says it can be.
+static volatile LONG g_opts_version = 0;
+static LONG g_refresh_hz = 0;
+static LONG g_saved_mode = 0;
+
 // Applies the current selection to a live options struct, returning what was
 // there so the caller can put it back.
 // Set when force_into wrote the frame-rate target, so the restore afterwards
 // puts back exactly the fields that were touched and no others.
 static bool g_target_written = false;
 static float g_saved_target = 0.0f;
-// 0 nothing said yet, 1 written, 2 declined. Reset when the target changes so
-// a new value gets its own line, and guarded so this never logs per frame:
-// log_line opens and closes the file on every call.
-static int g_dyn_said = 0;
 
 // Cuando el juego apaga la generacion, no se le pelea.
 //
@@ -744,42 +762,7 @@ static inline bool sel_is_frac(void) {
 static controller::State g_ctrl;
 // Y el del reparto fraccional por bloques (src/reparto.h).
 static scheduler::State g_sched;
-// El integrador de deuda del controlador. Redundante con el sesgo por
-// tramo y el que rompia (dos corridas de Cyberpunk con el mismo binario:
-// buena 153-160, mala 274 con deuda y sesgo clavados en el riel). Se
-// deja detras de mfg-sin-deuda.txt para el A/B; la regla esta en
-// controlador.h.
-static bool g_use_debt = true;
 
-static bool g_dyn_diag = false;        // mfg-dyndiag.txt: diagnostico por cambio de ratio
-static bool g_latch_schedule = true;    // mfg-nolatch.txt lo apaga, ver fractional_tick
-// Saturacion: el ratio mas barato que sostiene las presentadas que ya se logran.
-//
-// Arriba de cierto punto, subir el multiplicador NO compra frames. La base se
-// derrumba en la misma proporcion y el producto queda quieto. Medido en GTA V,
-// agrupando 355 ventanas de juego real por el ratio que entregaron:
-//
-//   ratio  ventanas   base   presentado   latencia
-//    3.5      50      45.5      161.1      47.4 ms
-//    4.0      61      41.9      165.1      50.3 ms
-//    4.5      76      35.6      162.6      61.8 ms
-//    5.0     147      32.6      161.2      66.7 ms
-//
-// De 3.5x a 5.0x las presentadas no se mueven -- 161 contra 161 -- y la latencia
-// sube 19 ms. El controlador paso 147 de esas 355 ventanas en 5.0x, o sea en el
-// peor punto de la tabla, cobrando 19 ms por cero frames.
-//
-// Y no era un defecto de la aritmetica: hacia lo que se le pidio. Ve 161 contra
-// un objetivo de 165, concluye que le falta, y empuja. Lo que no sabia es que
-// por esa via ya no hay nada que ganar.
-//
-// Esto es lo que un entero no puede hacer y un fraccional si: el punto optimo es
-// el ratio mas bajo que llega al techo, y ese punto se mueve con la base -- 3.94
-// con base 41.9, 3.63 con base 45.5. Un entero obliga a redondear para arriba y
-// pagar la latencia entera.
-//
-// mfg-sinsat.txt lo apaga, para poder comparar.
-static bool   g_sat_on = true;
 
 // Los dos envoltorios del controlador: leen los globales, llaman a
 // ctl::control / ctl::aplicar y aplican lo que sale. Las guardas de

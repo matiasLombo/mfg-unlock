@@ -18,25 +18,9 @@
 // declaracion. Sin tocar una linea del cuerpo.
 #pragma once
 
-// What the last capture was taken from. A game may call slDLSSGSetOptions
-// once per frame, and re-capturing on every call meant two VirtualQuery
-// syscalls per frame on the game's own render thread -- to copy bytes that had
-// not changed since the frame before. The capture itself is still page-bounded
-// every time it runs; what is skipped is running it when there is nothing new.
-static LONG g_cap_mode = -1, g_cap_cnt = -1;
-// Para clasificar los apagones sin pedirle al usuario que juegue distinto:
-// si la ventana no tiene el foco, o el juego dejo de estar en primer plano,
-// el apagon es del menu/pausa/alt-tab y no un defecto nuestro.
-static HWND g_game_hwnd = nullptr;
-// Latencia: sl.reflex la calcula solo. El sample llama a slReflexGetState
-// todos los frames (StreamlineSample.cpp:901, sin condicion), asi que envolver
-// esa llamada da el struct ya armado por el, con su GUID y su version -- no
-// hay que adivinar nada. La cuenta que importa la escribe NVIDIA en su propio
-// sample: totalGameToRenderLatency = gpuRenderEndTime - inputSampleTime.
-// Paso 1, y por ahora lo unico: volcar los bytes para leer el layout. Nada de
-// calcular latencias sobre offsets supuestos.
-typedef unsigned (*PFN_slReflexGetState)(void *);
-static PFN_slReflexGetState g_orig_reflexstate = nullptr;
+// Globales que solo usa este modulo (movidas de proxy.cpp).
+static LONG g_markers_dropped = 0;
+
 static bool g_reflex_dumped = false;
 // Sacado del volcado: GUID en +8 y version 2 en +24 de la ReflexState que
 // el sample entrego ya armada. Hace falta porque GTA V llama a
@@ -52,37 +36,6 @@ static const unsigned char kReflexStateGuid[16] = {
 // 48 de cabecera mas 64 informes de 152 son 9776; se pide de mas y se
 // pone en cero, que es como se pidio DLSSGState y nunca fallo.
 static unsigned char g_reflex_buf[16384];
-// Offsets confirmados con el volcado y con dos chequeos internos: el
-// gpuActiveRenderTimeUs que escribe NVIDIA coincide con gpuRenderEnd-Start
-// (3802 vs 3883 us) y su gpuFrameTimeUs de 16854 us es exactamente la base de
-// 59 fps que medimos aparte. El cuerpo del informe 63, el mas reciente, cae en
-// 72 + 152*63 = 9648.
-static double g_rfx_gpu = 0.0;     // sim start -> fin de render en GPU
-static double g_rfx_drv = 0.0;     // sim start -> fin de driver
-static long long g_qpc_freq = 1;   // set in DllMain
-static double g_rfx_ft = 0.0;          // gpuFrameTimeUs, para validar contra la base
-static double g_ctrl_fps = 0.0;       // frames/tiempo, insesgada, para el controlador
-// Cuantas muestras tiene el anillo del estimador ahora mismo.
-//
-// Existe porque el detector de escalon vacia el anillo y deja la base valiendo
-// 1/dt de UN solo frame. Al armarse DYNAMIC los primeros frames son lentos --
-// la reconfiguracion del swapchain esta medida en [[fractional-swapchain-churn]]
-// -- asi que un frame de ~62 ms dejaba la base en 16 fps con la real en 156.
-// Con eso el controlador calculaba 165/16 = 10.3 y topaba en 6.00, que es
-// justo el ratio que revienta.
-//
-// Del log de Halo, sin interpretacion:
-//
-//     [37891ms] dynamic: refresh is 165            <- DYNAMIC recien armado
-//     [38000ms] target needs more than 6x at this base, fps 165
-//     [38000ms]   base is 16
-//     [38172ms] measured: rendered fps 156         <- 172 ms despues
-//     [38172ms]   base por Reflex 0                <- y Reflex no alimentaba
-//
-// Con la base real el ratio pedido es 165/33 = 5.0 exacto: alcanzable y sin
-// tocar la ranura que el plugin no llena.
-static int g_ctrl_n = 0;
-static double g_rfx_base = 0.0;        // base en fps, del contador de frames de Reflex
 static ULONGLONG g_ctrl_rfx_ms = 0;    // ultima vez que Reflex alimento el estimador
 
 // El estimador de base del controlador. La logica es la misma de siempre y no
@@ -126,13 +79,6 @@ static void ctrl_feed_dt(double dt) {
 static bool ctrl_fed_by_reflex(void) {
     return g_ctrl_rfx_ms != 0 && GetTickCount64() - g_ctrl_rfx_ms < 500;
 }
-static LONG g_rfx_n = 0;
-// Minimo y maximo ademas del promedio: si la cadencia fraccionaria alterna
-// entre comportarse como el entero de abajo y el de arriba, la latencia seria
-// dos poblaciones y no un valor intermedio. El promedio de la ventana eso lo
-// tapa, que es exactamente como este proyecto ya se equivoco una vez.
-static unsigned g_rfx_min = 0xFFFFFFFFu;
-static unsigned g_rfx_max = 0;
 static unsigned long long g_rfx_lastid = 0;
 
 // Dentro de la ventana de corte no reenvia el marcador: el id de frame de

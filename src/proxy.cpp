@@ -38,174 +38,31 @@
 #include "controller.h"
 #include "scheduler.h"
 #include "sites.h"
+#include "state.h"
 
-// The panel's own state, defined here and shared with overlay.h. It is a
-// window of ours now, not something drawn into the game's frame -- see the
-// note at the top of that file for what the three rendering attempts before
-// it cost.
-volatile LONG g_force_sel = 0;
-volatile LONG g_force_generated = 0;
-volatile LONG g_last_seen_generated = 0;
-volatile LONG g_dyn_target = 0;
-// DYNAMIC: el objetivo esta en fps presentados, no en ratio. Cero significa
-// el refresh del monitor. El controlador escribe g_dyn_target -- el ratio --
-// y de ahi para abajo todo es el planificador fraccionario que ya andaba.
-volatile LONG g_dyn_fps = 0;
-static LONG g_refresh_hz = 0;
-// Sonda de una sola vez: cuantos frames pasan entre escribir un ratio nuevo y
-// que las presentaciones lo reflejen. El objetivo pedia medir esto y no
-// suponerlo, y es el unico candidato que queda para el sobrepaso -- todo el
-// error residual esta del lado alto, justo despues de que la base sube.
-static LONG g_probe_left = 0;
-static LONG g_probe_pc0 = 0;
-static unsigned char g_probe[16];
-static LONG g_probe_i = 0;
-static bool g_probe_done = false;
 static void dyn_control(double base_fps, double presented_fps);  // definida mas abajo
-// Estado del set, compartido entre el hook de carga, el observador y el panel.
-// -1 sin dato, 0 verde, 1 amarillo, 2 rojo.
-static int g_veredicto_previo = -1;
-static bool g_veredicto_leido = false;
-// -1 sin preguntar todavia, 0 dijo que no, 1 dijo que si.
-//
-// M4. Sustituir el Streamline de un juego es una decision del usuario, no
-// nuestra: cambia que binarios corre su juego. Con ROJO solo NO alcanza; hace
-// falta un si explicito, y hasta que lo haya el dll no toca nada y lo dice.
-static int g_consentimiento = -1;
-volatile LONG g_pide_permiso = 0;   // lo lee el panel (overlay.h)
 static void read_previous_verdict(void);
 static void save_consent(int si);
 static bool version_supported(const wchar_t *path, unsigned *major, unsigned *minor_v);
-static bool g_ya_sustituimos = false;                         // M3
 static void emit_verdict_if_due(void);   // M1, definida mas abajo
 static bool state_path(wchar_t *out, int max);            // M1, idem
 static void dyn_apply(double base_fps);                          // definida mas abajo
-bool g_dynamic_known = false;
-bool g_ov_enabled = true;
 static void log_line(const char *text);
 static void log_num(const char *label, unsigned long long v);
 // Capa 0: cual copia EJECUTA, atada por el puntero que devuelve el interposer.
 static void executing_copy(const void *fn, const char *name);
 
-// La fase de la sesion. Monotona: nunca vuelve para atras.
-//
-//   ARMADO      todavia no se pudieron evaluar los invariantes
-//   VERIFICADO  se evaluaron y dieron bien (paso inmediato a ACTIVO)
-//   ACTIVO      se permite parchear y reescribir opciones
-//   PASIVO      la topologia no cumple: NO se toca nada y el log dice por que
-//
-// Existe para invertir el modo de falla. Hasta ahora un juego con una topologia
-// que no habiamos visto producia un crash y una regla reactiva nueva; con esto
-// produce un bloque de diagnostico y nada mas. Es la pieza que hace que "romperse
-// por juego" deje de ser una opcion del codigo.
-enum class Phase { ARMED, VERIFIED, ACTIVE, PASSIVE };
-static volatile LONG g_phase = (LONG)Phase::ARMED;
 static inline bool phase_active(void) { return g_phase == (LONG)Phase::ACTIVE; }
 static inline bool phase_passive(void) { return g_phase == (LONG)Phase::PASSIVE; }
 static void evaluate_invariants(void);
 // Alimenta g_present_count desde el runtime cuando no hay hook de Present.
 static void runtime_presents(void);
-extern int g_executing_copy;
-// Presentaciones vistas en el swapchain. Declarada aca porque el latch de
-// apply_override_now la necesita y vive antes que su definicion.
-extern volatile LONG g_present_count;
-extern bool g_executing_resolved;
 
 // ------------------------------------------------------------------- log ---
 //
 // Raw file calls, no CRT: some of this runs under the loader lock.
 
 static wchar_t g_log[MAX_PATH];
-static bool g_frac_enabled = false;   // mfg-frac.txt
-// Engancho el parche del byte de la cuenta de sub-frames? Es lo que permite que
-// la cuenta varie por frame. Cuando NO engancha, la unica palanca que queda es
-// la cuenta de la API, y esa dimensiona la reserva del plugin: pedir de mas ahi
-// no da un multiplicador mas alto, crashea el juego. Le paso a Halo Campaign
-// Evolved, que carga un sl.dlss_g de 447960 bytes en vez del de 625792 que
-// sabemos parchear: 'sites: 0' y aun asi pedimos cuenta 5. Tres crashes.
-// Arranca en true y solo puede caer: si CUALQUIER copia mapeada falla una de
-// las dos piezas, el freno se arma. En Halo hay dos copias -- la de
-// Engine\Plugins, donde no engancha nada, y la OTA 134656, donde el contador
-// SI engancha -- y una sola bandera pisada por la ultima copia dejaba el freno
-// desactivado justo en el juego que lo necesitaba.
-//
-// Y hacen falta las dos, no solo el contador. En la copia OTA de Halo el
-// contador engancho y la bandera de generacion no ('generation flag site not
-// unique, sites: 0'). Sin esa bandera, una cuenta de cero hace que el bucle no
-// produzca nada mientras el plugin cree que esta generando, y el frame se
-// presenta por un camino sin nada que presentar. El dump del crash de Halo cae
-// justo dentro de esa copia: 0xC0000005 en 190_E658703.dll +0x3F2E9.
-static bool g_wic_ok = true;
-static bool g_saw_any_copy = false;
-// Sitios del parche de la cuenta de la ULTIMA copia parcheada. La cuenta se
-// parchea adentro de patch_subframe_count, y el observador de M1 la necesita
-// por copia, no acumulada.
-static int g_wic_sites_last = -1;
-static bool g_quiet = false;          // mfg-quiet.txt: no per-window logging
-static bool g_nullalt = false;        // mfg-nullalt.txt: alternate between equals
-static bool g_slowalt = false;        // mfg-slowalt.txt
-static int  g_block_ms = 0;           // mfg-blockms.txt, 0 = default
-static bool g_peralt = false;         // mfg-peralt.txt: diffuse per frame
-// mfg-sub2.txt: SOLO para medir. Baja el piso del target por debajo de 200
-// en el camino de mfg-settings.txt, para poder medir 1.25x/1.50x/1.75x sin
-// bajar el piso del panel, que es justo lo que hay que decidir con esos
-// numeros. Sin el archivo, el comportamiento es identico al de antes.
-static bool g_sub2 = false;           // mfg-sub2.txt
-// mfg-twocopies.txt: SOLO para el banco. Contiene la ruta de una segunda copia
-// de sl.dlss_g; se carga a proposito para reproducir lo que hace Cyberpunk, que
-// mapea la del juego Y la del cache OTA. g_wic y g_count_imm son punteros unicos
-// y la segunda copia parcheada los pisa, asi que las escrituras por frame se van
-// a un modulo que no genera. El sample no lo hace solo: Streamline avisa
-// "eLoadDownloadedPlugins flag not passed to preferences", y esa bandera la pasa
-// la aplicacion en slInit, no un archivo de configuracion.
-static bool g_twocopies = false;      // mfg-twocopies.txt
-// mfg-ceilfirst.txt: A1. Mientras la interpolacion todavia no arranco,
-// declararle al plugin el TECHO del ciclo (lo+1) en vez de la cuenta de este
-// frame. La reserva del plugin se hace al encender: si en ese momento ve el
-// maximo que vamos a usar, la alternancia posterior queda siempre por debajo.
-//
-// MEDIDO Y SIN EFECTO. Cyberpunk con -benchmark y la ventana al frente, 226
-// ventanas de juego cada una: con A1 entrega 3.48x (p10 3.00, p90 4.33), sin A1
-// 3.49x (p10 3.02, p90 4.31), pidiendo 3.50 las dos. Son la misma corrida.
-//
-// Se queda porque documenta una palanca probada, no porque sirva. Ojo con dos
-// cosas si se retoma: declaro techo 3 y no 4, o sea que capturo el techo antes
-// de que el objetivo se asentara; y el 3.50 sale entero SIN la palanca, asi que
-// no habia techo que levantar -- lo que tapaba el resultado era la ventana sin
-// foco (ver dlssg-needs-window-focus en las memorias).
-static bool g_ceilfirst = false;      // mfg-ceilfirst.txt
-static volatile LONG g_cycle_ceiling = 0;   // lo+1 del ciclo en curso
-// Encendida o no. No hay consulta directa que sirva: slDLSSGGetState avisa que
-// hay que sincronizarla con el hilo de present. Se deduce de que lo presentado
-// supere a la base de Reflex, que es la medida honesta que ya tenemos.
-static volatile LONG g_interp_on = 0;
-static volatile LONG g_twocopies_pending = 0;
-// mfg-optsv3.txt: SOLO para el banco. GTA V llena DLSSGOptions con
-// structVersion 3 y el sample con 5, y eso se leyo de los logs de los dos.
-// En v3 no existe numFramesToGenerate, asi que la cuenta que force_into
-// escribe en p+36 la ignora el plugin: el sl.log del juego reporta
-// numFramesToGenerate=1 en las seis transiciones mientras el planificador
-// escribia 2. Con esto el sample manda v3 y el banco recorre el mismo camino.
-// Apagada por defecto; no cambia nada de lo que la dll hace en un juego.
-static bool g_optsv3 = false;
-// mfg-markergap.txt: SOLO para el banco. Contiene dos numeros, "cada" y
-// "cuanto", en segundos: cada N segundos deja de reenviar los marcadores de
-// Reflex/PCL durante M segundos. Es lo que GTA V hace solo -- su sl.log
-// muestra el id de frame de Reflex congelado en 13307 mientras el actual
-// llegaba a 23110, y DLSS-G se niega con
-// eDLSSGStatusFailReflexNotDetectedAtRuntime durante 72 s seguidos.
-// El sample nunca corta ese flujo, y por eso el banco no podia apagarse.
-// Apagada por defecto; en un juego la dll no hace nada de esto.
-typedef unsigned (*PFN_slSetMarker)(unsigned, void *);
-static PFN_slSetMarker g_orig_pclmarker = nullptr;
-static PFN_slSetMarker g_orig_reflexmarker = nullptr;
-static LONG g_markers_dropped = 0;
-static double g_marker_every = 0.0;
-static double g_marker_for = 0.0;
-static double g_marker_long_every = 0.0;
-static double g_marker_long_for = 0.0;
-static bool g_blockalt = false;       // mfg-blockalt.txt: blocks above 2.0x too
-static int  g_blocks = 0;             // mfg-blocks.txt, 0 = 32
 
 // True when a file of this name sits beside the dll. The switches are files
 // because the person installing this has the dll and nothing else, and the
@@ -229,8 +86,6 @@ static bool flag_file(const wchar_t *name) {
     return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES;
 }
 
-// Lo que hay al lado de la dll, leido una vez en DllMain (src/config.h).
-static config::Settings g_cfg;
 
 // Se abre y se cierra por linea, a proposito. Se probo dejar el handle abierto
 // -- seis llamadas al sistema por linea contra una sola apertura -- y en GTA V
@@ -375,17 +230,6 @@ static const unsigned char kDlssgOptionsGuid[16] = {
     0xa1, 0xe6, 0x3a, 0x9e, 0x86, 0x52, 0x56, 0xc5
 };
 
-// 0 AUTO, 1 OFF, 2..4 = 2x/3x/4x. DLSSGOptions carries the mode at +32
-// (DLSSGMode: eOff 0, eOn 1, eAuto 2) and the generated-frame count at +36,
-// so switching frame generation off is a different field from choosing a
-// multiplier -- writing a count of zero would not do it.
-// Streamline tells us, in the struct itself, whether eDynamic exists. The
-// version sits at +24 of every sl structure; DLSSGOptions reached version 5
-// in 2.11.1, which is where DLSSGMode::eDynamic and dynamicTargetFrameRate
-// were added. On 2.8.0 (version 3) a mode of 3 is eCount -- an invalid value,
-// not dynamic -- and the struct does not even extend to +116. So the row is
-// offered only when the game's own struct says it can be.
-static volatile LONG g_opts_version = 0;
 // Whether this Streamline knows DLSSGMode::eDynamic at all, decided from the
 // plugin's own image rather than from the first slDLSSGSetOptions the game
 // happens to make. Waiting for that call left the row greyed out on a build
@@ -427,8 +271,6 @@ static bool image_has(unsigned char *base, const char *needle) {
 // a denormal indistinguishable from zero -- so the wrong guess would have
 // read on screen as a working target while silently meaning "auto".
 
-static LONG g_saved_mode = 0;
-static bool g_override_said = false;
 
 static const unsigned char kDlssgStateGuid[16] = {
     0xe1, 0xc8, 0x8a, 0xcc,             // 0xcc8ac8e1, little endian
@@ -437,75 +279,10 @@ static const unsigned char kDlssgStateGuid[16] = {
     0x97, 0xfa, 0xe7, 0x41, 0x12, 0xf9, 0xbc, 0x61
 };
 
-typedef unsigned (*PFN_slDLSSGGetState)(const void *, void *, const void *);
 static PFN_slDLSSGGetState g_orig_getstate = nullptr;
 
-// What the plugin says it will accept. Zero means "not asked yet"; the panel
-// offers nothing above this once it is known.
-volatile LONG g_frames_max = 0;      // shared with overlay.h
 static volatile LONG g_asked_state = 0;
 
-typedef unsigned (*PFN_slDLSSGSetOptions)(const void *, const void *);
-typedef unsigned (*PFN_slGetFeatureFunction)(unsigned, const char *, void *&);
-static PFN_slDLSSGSetOptions g_orig_setoptions = nullptr;
-static PFN_slGetFeatureFunction g_orig_getfeaturefn = nullptr;
-// slInit: por aca pasa la aplicacion sus preferencias, y ahi vive la bandera
-// que decide si Streamline puede cargar plugins descargados por OTA.
-//
-//   eAllowOTA            = 1 << 3
-//   eLoadDownloadedPlugins = 1 << 6
-//
-// Cyberpunk las pasa y por eso carga el plugin de la cache; Halo no, y se queda
-// con el suyo de 447960 bytes, que no tiene el sitio del contador. La cache de
-// esta maquina tiene tres builds que SI lo tienen (133888, 134273, 134656).
-//
-// El offset de `flags` sale de sl_core_types.h: BaseStructure son 32 bytes
-// (next 8 + GUID 16 + structVersion 8) y despues showConsole, logLevel,
-// pathsToPlugins, numPathsToPlugins, pathToLogsAndData y tres callbacks dan 88.
-// Se verifica antes de escribir: mfg-ota.txt no modifica nada hasta que el
-// volcado confirme que ahi hay una mascara con sentido.
-typedef unsigned (*PFN_slInit)(void *, unsigned long long);
-static PFN_slInit g_orig_slinit = nullptr;
-static bool g_ota = false;              // mfg-ota.txt
-// La base propia va ENCENDIDA. mfg-sinbase.txt la apaga.
-//
-// Estaba al reves -- detras de mfg-snippet.txt -- y eso es justo lo que rompio
-// GTA V: sin el archivo, el juego caia a sus propios binarios y a la semantica
-// vieja, en silencio. Un usuario que solo tiene el dll no puede depender de
-// acordarse de poner un txt en cada juego.
-//
-// Si la carpeta no tiene los archivos, no se sustituye nada igual: el respaldo
-// es la ausencia de la base, no la ausencia de un flag.
-static bool g_snippet_on = true;
-// El interposer entra en la base como todos. mfg-sininterposer.txt lo saca.
-//
-// Estuvo excluido porque el banco fallaba 5 de 5 con el sustituido, y lo exclui
-// sin leer POR QUE fallaba -- que es para lo que existe el banco. El motivo real
-// es que se mapean DOS interposers, no que el modulo este mal: el del banco y el
-// nuestro son byte a byte el mismo archivo.
-// El interposer del JUEGO se respeta. mfg-coninterposer.txt lo vuelve a pisar.
-//
-// Estaba al reves, y el motivo por el que se pisaba murio medido. Se hacia por
-// Halo: su 2.7.30 no tiene un dlss_g parcheable -- el sitio de la cuenta existe
-// desde 2.11 -- asi que "habia que subir todo el set junto". Falso: los plugins
-// suben solos. Halo corriendo SU interposer 2.7.30 con nuestros nueve plugins
-// 2.12 entrega 4.02 pidiendo 4X y 5.98 pidiendo 6X, sobre 81 ventanas.
-//
-// Y forzarlo costaba: un juego compilado contra el host SDK 2.7.30 pierde las
-// constantes de sl.common bajo un interposer 2.12, y el plugin apaga la
-// generacion CUADRO A CUADRO. Medido, 108 warnings por segundo contra 31, y
-// 2.007x contra 4.02x.
-//
-// Ademas es la unica pieza que un juego puede traer como import estatico
-// -- Cyberpunk lo tiene en el puesto #5 y nosotros en el #26 -- asi que en la
-// mitad de los casos no habia nada que sustituir de todos modos, y de ahi
-// salieron los dos peores crashes del 2026-09-10.
-//
-// Solo lo usamos por tres exports -- slGetFeatureFunction, slInit y
-// slGetNewFrameToken -- que cualquier version exporta. No le parcheamos un byte.
-static bool g_interposer_out = true;
-// mfg-sllog.txt esta presente: ademas del log, se sube el nivel en Preferences.
-static bool g_sllog_on = false;
 // Probado en el sample del banco, que como Halo no pedia OTA: banderas 133 ->
 // 205, de un sl.dlss_g mapeado se pasa a tres -- uno de ellos el 134656 de
 // ProgramData, donde el parche del contador SI engancha -- y el fraccionario
@@ -513,75 +290,6 @@ static bool g_sllog_on = false;
 // 3.57) contra 3.51x sin OTA. Con tres copias mapeadas no se pierde nada.
 #include "slinit.h"
 
-// Enough of the last call to make it again ourselves. The header says
-// slDLSSGSetOptions is not thread safe, so the thread the game used is
-// recorded with it and the replay only happens on that same thread -- from
-// the present hook, which the game enters every frame.
-static unsigned char g_opt_copy[256];
-static unsigned char g_vp_copy[64];
-static volatile LONG g_opt_have = 0;
-static volatile LONG g_opt_thread = 0;
-static volatile LONG g_opt_pending = 0;
-// Lo que el JUEGO pide, que no es lo mismo que lo que pedimos nosotros.
-//
-// g_juego_quiere: su ultimo modo, 0 = eOff, 1 = eOn, -1 = todavia no lo vimos.
-// g_juego_pidio_on: si alguna vez lo vimos pedir eOn en esta corrida.
-static volatile LONG g_game_wants = -1;
-static volatile LONG g_game_asked_on = 0;
-// La cuenta que el plugin tiene REALMENTE aplicada, no la que queremos.
-//
-// bound y reserva tienen que moverse juntos: bound = API + 1 anda, bound mayor
-// escribe fuera de la reserva y crashea con 0xC0000005, bound menor detiene la
-// presentacion. No hay margen.
-//
-// El panel cambiaba g_force_generated y dejaba el envio a la API pendiente
-// mientras fractional_tick escribia el byte en el frame siguiente: subir de
-// modo ponia el bound en 5 con reserva para 4. Halo cambio a 6X a los 59 s y
-// murio a los 68 -- la escritura fuera de rango corrompe y el crash llega
-// despues. No aparecio antes porque el banco y Cyberpunk fijan el multiplicador
-// al arrancar y no lo cambian en caliente.
-// 6X queda fuera hasta que el bound deje de necesitar +1.
-//
-// El byte del bound lleva cuenta+1, porque nuestro guard de entrada consume una
-// iteracion (sin eso cada ratio salia un frame corto y el pacing se derrumbaba).
-// El array de sub-frames tiene 6 ranuras inline -- 5 generados y el real -- y
-// los campos vivos del contexto empiezan justo donde termina.
-//
-// A 5X el bound es 5: un desborde de una posicion cae DENTRO del array y no
-// hace nada. A 6X el bound es 6 y cae sobre los campos vivos. Por eso es 6X en
-// particular el que se rompe, y no los de abajo: no tiene holgura.
-//
-// Medido jugando Halo: 2X y 4X andan y sostienen la sesion; 6X mata el juego,
-// tres veces, sin evento WER ni dump -- corrompe y muere despues.
-//
-// Se limita en las DOS mitades a la vez, la cuenta de la API y el byte, porque
-// frenar una sola ya salio mal antes: "freno: la cuenta se limita a 1" con el
-// byte siguiendo al 3, y crash a los 36 s.
-//
-// mfg-x6.txt lo vuelve a habilitar para investigarlo. El arreglo de fondo es
-// encontrar por que el bound necesita el +1 y sacarlo.
-static bool g_permitir_x6 = false;
-// 5 es el maximo del plugin (6X). El tope en 4 era una mitigacion del crash
-// que ademas limitaba 5X, y la causa resulto ser otra.
-// Las direcciones que se parchearon para subir el tope, para releerlas despues.
-//
-// Hace falta porque el parche engancho (2 sitios) y el campo siguio en 5. Dos
-// causas posibles y no se adivinan: o el parche no quedo vivo en la copia que
-// realmente corre, o NGX contesta 5 y el clamp min(NGX,6) lo deja en 5.
-// Releyendo el byte en memoria se distingue.
-// El tope 6 va ENCENDIDO. mfg-sinseis.txt lo baja a 5.
-//
-// Estaba detras de mfg-seis.txt "hasta que este medido", y ya esta medido: con
-// nuestro snippet entrega 6.00 con cero fallos NGX y sin artefactos. Dejarlo
-// como habilitador es el error que la regla de polaridad prohibe -- el usuario
-// recibe un dll y nada mas, y un juego sin el archivo cae al 5 en silencio.
-//
-// Los dos parches que lo implementan son seguros por contenido, no por fe:
-// patch_tope_seis busca dos inmediatos exactos y no hace nada si no estan, y
-// patch_snippet_max solo corre si la semantica dice que el snippet es el nuestro
-// -- forzar 6 sobre la build de julio, que topa en 3 por arquitectura, es
-// exactamente lo que hizo crashear a Halo.
-static bool g_six = true;             // mfg-sinseis.txt lo apaga
 
 // Con NUESTRO snippet, la cuenta ES el multiplicador.
 //
@@ -655,13 +363,6 @@ static void detectar_semantica(unsigned char *base) {
                        : "semantica: la cuenta es el MULTIPLICADOR");
 }
 
-static volatile unsigned char *g_six_sites[4] = { nullptr, nullptr, nullptr, nullptr };
-static int g_six_n = 0;
-static volatile LONG g_max_declared = 0;   // 0 = todavia no se leyo
-// mfg-topefijo.txt: vuelve al tope de 5 de antes, para poder MEDIR la linea
-// base sin recompilar. Diagnostico local, nunca el arreglo: sin el archivo el
-// dll se comporta como se envia.
-static bool g_tope_fijo = false;
 
 static LONG count_cap(void) {
     (void)g_permitir_x6;
@@ -679,9 +380,6 @@ static LONG count_cap(void) {
     const LONG techo = (g_six || count_is_multiplier()) ? 6 : 5;
     return (d >= 1 && d <= techo) ? d : 5;
 }
-// Base del sl.dlss_g que estamos parcheando, para poder leerle campos.
-static const unsigned char *g_dlssg_base = nullptr;
-static volatile LONG g_api_applied = -1;
 static void set_count_now(LONG n);   // definida mas abajo
 
 // Que sigue [global+0x4168]: el techo declarado a la API, o lo generado?
@@ -931,17 +629,6 @@ static LONG sonda_4168(void) {
     if (!leer_ok(pp + 0x4168, &v, 4)) return -1;
     return v;
 }
-// Set when the game itself configures DLSS-G, cleared when the next frame
-// begins. While it is set, our replay stays out of the way.
-//
-// The plugin names this failure in its own log, once per frame:
-//   Repeated slDLSSGSetOptions() call for the frame 9411. A redundant call
-//   or a race condition with Present().
-// Our replay fired on every frame token whether or not the game had just set
-// the options for that same frame -- two calls for one frame. That is what
-// collapsed 54 fps to 22, not the zero count and not which path the frame
-// took through presentCommon.
-static volatile LONG g_game_set_this_frame = 0;
 
 // Copies up to `want` bytes without running off the end of the page the
 // struct sits in: the real size varies by struct version and reading past a
@@ -1041,13 +728,6 @@ static unsigned hk_slGetFeatureFunction(unsigned feature, const char *name, void
     return r;
 }
 
-// The game asks for a frame token once per frame, from its own render thread
-// -- which is the thread that called slDLSSGSetOptions and the only one it is
-// safe to call it from again. With DLSS-G on, Present is Streamline's thread,
-// so the replay cannot happen there; the log said so outright.
-typedef unsigned (*PFN_slGetNewFrameToken)(void *&, const unsigned *);
-static PFN_slGetNewFrameToken g_orig_frametoken = nullptr;
-static void *g_frametoken_addr = nullptr;      // found at startup, hooked later
 static void apply_override_now(void);
 
 static void query_state(void);
@@ -1055,15 +735,6 @@ static void query_state(void);
 
 #include "patches.h"
 
-// N generated frames on the next batch. Zero is not expressible here -- the
-// loop is a do-while, so its body has already run once by the time the bound
-// is tested, and one generated frame is the floor.
-// What is actually in force, which is not the same as g_force_generated once
-// the byte is being written directly: a mode picked by hand leaves that
-// variable behind, and dividing the measured rate by a stale multiplier makes
-// the base look far lower than it is -- which asks for more generation, which
-// makes it look lower still.
-static volatile LONG g_count_live = 1;
 
 
 
@@ -1073,16 +744,6 @@ static volatile LONG g_count_live = 1;
 // the game is actually rendering at, with the ceiling the plugin gave us.
 #include "writer.h"
 
-// Re-reading the selection while the game runs, so a target change can be
-// measured rather than deduced.
-//
-// The goal asks that a new target show up in the next window, and the only way
-// to see that was for a person to move the panel slider mid-session. The file
-// is the same one the panel writes, so re-reading it makes the bench able to
-// change the target during a run and time how long the counted ratio takes to
-// follow. Behind mfg-watch.txt: it is a file open per interval, which nothing
-// shipped should be doing.
-static bool g_watch_settings = false;
 static void settings_load(void);
 static void settings_watch(void) {
     if (!g_watch_settings) return;
@@ -1098,11 +759,6 @@ static void settings_watch(void) {
 
 #include "frametoken.h"
 
-// Remembered across runs: the mode picked in the panel and, for DYNAMIC, the
-// frame-rate target. Nothing else -- the flag files are a separate thing and
-// are not rewritten from here, so a file the player created by hand is never
-// silently replaced by one of ours.
-static volatile LONG g_settings_dirty = 0;
 
 static void settings_save(void) {
     wchar_t p[MAX_PATH];

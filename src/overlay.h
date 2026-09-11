@@ -50,7 +50,6 @@ extern bool g_ov_enabled;
 static void log_line(const char *text);
 static void log_num(const char *label, unsigned long long v);
 
-static volatile bool g_ov_visible = false;
 
 // ---- font ---------------------------------------------------------------
 
@@ -120,17 +119,7 @@ static unsigned *g_hud_px = nullptr;
 static HWND g_hud_hwnd = nullptr;
 static HDC  g_hud_dc = nullptr;
 static HBITMAP g_hud_bmp = nullptr;
-static bool g_hud_on = false;            // lo enciende el casillero del panel
 static bool g_hud_open = false;          // si la ventana esta creada y mostrada
-// Los alimenta el hook de present y la sonda de Reflex.
-static volatile LONG g_hud_fps_x10 = 0;
-// La base, para poder mostrar "base/presentadas" en vez de un numero solo.
-//
-// Un "342 FPS" no dice nada por si mismo: no se sabe si son 57 x6 o 171 x2, que
-// se ven y se sienten distinto. Los dos numeros juntos son el multiplicador a
-// simple vista, sin tener que abrir el panel.
-static volatile LONG g_hud_base_x10 = 0;
-static volatile LONG g_hud_lat_us = 0;
 
 // The multiplier, times a hundred: 150 is 1.5x. A multiplier and not a target
 // frame rate, which is what this asked for at first and what made it behave
@@ -215,13 +204,8 @@ static int ov_fps_index(int fps) {
     return best;
 }
 
-static float g_ov_mx = 0.0f, g_ov_my = 0.0f;
-static int   g_ov_hot = -1;
 static unsigned g_ov_frame = 0;
 
-// Typing into the value box, polled like every other key here so a game that
-// never delivers WM_CHAR cannot stop it.
-static bool g_ov_editing = false;
 static char g_ov_edit[5] = { 0, 0, 0, 0, 0 };
 static int  g_ov_editlen = 0;
 

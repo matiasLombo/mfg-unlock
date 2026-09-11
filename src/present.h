@@ -21,6 +21,32 @@
 // y [[measure-with-the-runtime-counter]].
 #pragma once
 
+// Globales que solo usa este modulo (movidas de proxy.cpp).
+// El reloj de la PANTALLA, que es otro que el de Present.
+//
+// Todo lo de arriba mide intervalos entre LLAMADAS a Present. NVIDIA dice
+// explicitamente que eso no sirve para juzgar fluidez con DLSS-G: el plugin
+// retrasa la imagen por hardware DESPUES de Present(), y la guia de
+// ProgrammingGuideDLSS_G manda medir MsBetweenDisplayChange y no
+// MsBetweenPresents. Explica de paso por que el pacer daba vuelta toda la
+// distribucion de intervalos y no cambiaba nada visible ([[present-timing-is-
+// not-fluidity]]): movia el reloj que no se ve.
+//
+// SyncQPCTime es el instante en que el panel escaneo la ultima imagen. Cuando
+// cambia, hubo un cambio de imagen de verdad; si no cambia entre dos presents,
+// esa presentacion no llego a la pantalla como imagen propia. Esto tambien
+// responde la pregunta que quedo abierta en note_display -- si de cada lote de
+// 4 llega una sola o si el driver devuelve la estructura vieja -- porque
+// presentaciones por cambio de imagen lo dice directo.
+static long long g_disp_qpc = 0;      // SyncQPCTime del ultimo cambio visto
+static unsigned  g_disp_refresh = 0;  // PresentRefreshCount en ese cambio
+static int    g_freeze_said = 0;          // tope de lineas del diagnostico
+static long long g_pres_qpc = 0;            // when the last present went out
+// The swap chain, kept so the runtime's own present counter can be sampled
+// from anywhere -- specifically from the frame-token hook, once per rendered
+// frame, off the present path entirely.
+static IDXGISwapChain *g_swapchain = nullptr;
+
 // ---- the same measurement for D3D12 ---------------------------------------
 //
 // The hook above is vkQueuePresentKHR, so it measures Vulkan and nothing else.
@@ -40,7 +66,6 @@
 // Rows land with src=2. img and meter stay empty: they are read out of the
 // Vulkan present info, and there is no equivalent to read here.
 
-typedef HRESULT(STDMETHODCALLTYPE *PFN_DXGIPresent)(IDXGISwapChain *, UINT, UINT);
 // El PRIMER original enganchado. Se conserva solo como bandera de "ya hay
 // enganche" para el codigo que pregunta != nullptr; para llamar al original
 // se usa present_original_de(self), nunca este puntero.
@@ -116,7 +141,6 @@ static PFN_DXGIPresent present_original_for(IDXGISwapChain *self) {
 // milliseconds, so it sleeps on a high-resolution timer for the bulk and
 // spins the last stretch.
 
-static bool g_native_pacer_found = false;  // sticky: one plugin with sites is enough
 // Timestamps on the *natural* clock -- real time minus everything this pacer
 // has slept. Measuring on the real clock fed our own delays back into the
 // average we derive the delays from, a closed loop whose only brake was the
@@ -493,7 +517,6 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
 // Slot 12: IUnknown 0-2, IDXGIObject 3-6, IDXGIDevice 7-11, then
 // SetMaximumFrameLatency. 12 * 8 = 0x60, matching the `call qword ptr [rax+0x60]`
 // the pin patch was written against.
-typedef HRESULT (STDMETHODCALLTYPE *PFN_SMFL)(IUnknown *, UINT);
 static PFN_SMFL g_orig_smfl = nullptr;
 static HRESULT STDMETHODCALLTYPE hk_smfl(IUnknown *self, UINT n) {
     InterlockedIncrement(&g_smfl_calls);
@@ -795,19 +818,6 @@ static void adopt_existing_swapchain(void) {
                 : "adopcion: no se pudo parchear el slot");
 }
 
-// Strip FRAME_LATENCY_WAITABLE_OBJECT at creation, behind mfg-nowaitable.txt.
-//
-// The producer spends 98% of its time outside both hooks -- 2% in Present, 0%
-// in the frame-token call -- and the swap chain turns out to be created with
-// flag 0x800 and 3 buffers. An app with a waitable swap chain blocks on that
-// handle before starting a frame, which is a gate that never passes through
-// us. Taking the flag away is the measurement that says whether it is the one
-// holding the base at limit/(ceiling + 1).
-//
-// Diagnostic only. An app that asks for the waitable handle on a chain created
-// without the flag gets a failure, so this can break the target outright --
-// which is itself an answer, and the integer controls will say so.
-static bool g_no_waitable = false;
 static UINT strip_waitable(UINT flags) {
     if (!g_no_waitable) return flags;
     return flags & ~0x40u;
@@ -936,7 +946,6 @@ static HRESULT WINAPI hk_f2(UINT flags, REFIID riid, void **out) {
 
 static bool g_dxgi_armed = false;
 
-static bool g_debug = false;      // mfg-debug.txt: developer diagnostics
 
 static void arm_dxgi_recorder() {
     // Esto estuvo detras de mfg-debug.txt y no debia estarlo.
