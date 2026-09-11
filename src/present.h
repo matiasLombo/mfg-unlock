@@ -589,7 +589,7 @@ static IDXGISwapChain *pick_swapchain(unsigned *count_out) {
     if (dropped) log_line("present: un swapchain adoptado ya no existe; se suelta");
     if (c != g_swapchain) {
         g_swapchain = reinterpret_cast<IDXGISwapChain *>(c);
-        if (c != nullptr) log_line("present: cambia el swapchain que se cuenta (el que mas presento)");
+        if (c != nullptr) log_line("present: cambia el swapchain que se cuenta (vuelve el anterior)");
     }
     return g_swapchain;
 }
