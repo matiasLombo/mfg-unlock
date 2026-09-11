@@ -35,6 +35,7 @@
 #include "politica.h"
 #include "config.h"
 #include "diag.h"
+#include "controlador.h"
 
 // The panel's own state, defined here and shared with overlay.h. It is a
 // window of ours now, not something drawn into the game's frame -- see the
@@ -3810,61 +3811,18 @@ static inline bool sel_is_frac(void) {
 // 3.78 (sesgo 0.995) y pidiendo 2.33 entrega 2.47 (sesgo 0.941, un +6%). Un
 // escalar unico converge al promedio, 0.977, que deja +3% arriba y -2.5% abajo
 // -- justo la forma del residuo que quedaba.
-static double g_dyn_bias[6] = { 1.0, 1.0, 1.0, 1.0, 1.0, 1.0 };
-
-static inline int dyn_bucket(double ratio) {
-    int b = (int)ratio;
-    if (b < 2) b = 2;
-    if (b > 5) b = 5;
-    return b;
-}
-// El ratio pedido, promediado sobre la ventana. La ganancia compara pedido
-// contra entregado, y con el adelanto corriendo por frame el pedido se mueve
-// unas tres veces por ventana: tomar el valor del final contra el promedio
-// entregado hacia que la ganancia se paseara hasta 1.07 -- un exceso fijo de
-// +5 a +10% en los tramos estables. Bloquear el aprendizaje en esas ventanas
-// tampoco sirve: casi ninguna califica, la ganancia se queda en 1.0 y el
-// exceso de entrega real de ~4% queda sin corregir, con la mediana en 145.
-// Promediar el pedido es lo unico que compara los dos numeros sobre el mismo
-// periodo.
-static double g_dyn_asked_sum = 0.0;
-static LONG g_dyn_asked_n = 0;
-
-// El integrador de DYNAMIC, apagado por defecto desde 2026-09-09.
-//
-// El controlador tenia DOS lazos para el mismo trabajo: el feedforward
-// target/base, que ya calcula el ratio necesario, mas el sesgo aprendido por
-// banda, que corrige el error de modelo -- y encima un integrador (debt) sobre
-// el error de presentaciones. El integrador es redundante con el sesgo y es el
-// que rompe: no hay perturbacion persistente que rechazar cuando la base se
-// mide directamente.
-//
-// Comprobado comparando dos corridas de Cyberpunk con el mismo binario:
-//
-//     corrida   objetivo efectivo (nominal 165)   sesgo
-//     buena     153-160                           0.88-1.06
-//     mala      274 en 168 de 220 cambios         1.25 (su tope)
-//
-// En la mala, integrador y sesgo quedaron los dos clavados en el riel y el
-// controlador pidio 6x permanente sin recuperarse. salida_saturada congela el
-// inc positivo pero NO desenrolla la deuda ya acumulada, y el sesgo no tenia
-// ese guard, asi que siguio aprendiendo con la salida recortada.
-//
-// Ademas las unidades no cerraban: debt acumula FRAMES y se sumaba a un rate
-// (target + debt*2.0), asi que la ganancia efectiva dependia del periodo de
-// tick. Y el clamp de +-33% con ganancia 2 daba +-66% del setpoint, cuando la
-// corrida buena solo necesito +-7%.
-//
-// Se deja detras de mfg-deuda.txt para poder correr el A/B con el MISMO
-// binario, que es la unica forma de comparar dos controladores sin cambiar
-// tambien el codigo debajo.
+// El estado del controlador vive en src/controlador.h (ctl::Estado); aca
+// queda una instancia y los dos envoltorios que leen el mundo y aplican.
+static ctl::Estado g_ctl;
+// El integrador de deuda del controlador. Redundante con el sesgo por
+// tramo y el que rompia (dos corridas de Cyberpunk con el mismo binario:
+// buena 153-160, mala 274 con deuda y sesgo clavados en el riel). Se
+// deja detras de mfg-sin-deuda.txt para el A/B; la regla esta en
+// controlador.h.
 static bool g_usar_deuda = true;
+
 static bool g_dyn_diag = false;        // mfg-dyndiag.txt: diagnostico por cambio de ratio
 static bool g_latch_reparto = true;    // mfg-nolatch.txt lo apaga, ver fractional_tick
-// Salida recortada en el ultimo tick: mientras lo este, el sesgo no aprende.
-// Sin esto el sesgo aprende de un tramo donde la entrega estaba limitada por el
-// techo y no por el modelo, que es como llego a 1.25.
-static bool g_dyn_recortado = false;
 // Saturacion: el ratio mas barato que sostiene las presentadas que ya se logran.
 //
 // Arriba de cierto punto, subir el multiplicador NO compra frames. La base se
@@ -3892,115 +3850,24 @@ static bool g_dyn_recortado = false;
 //
 // mfg-sinsat.txt lo apaga, para poder comparar.
 static bool   g_sat_on = true;
-static double g_sat_pres = 0.0;      // las presentadas mas altas vistas aca
-static double g_sat_ratio_max = 0.0; // techo de ratio, 0 = sin limite
-static double g_sat_prev_asked = 0.0, g_sat_prev_pres = 0.0;
-static bool   g_sat_quieto = false;   // ya se encontro el piso: no tantear mas
 
-static void sat_reset(const char *por_que) {
-    if (g_sat_ratio_max > 0.0) log_line(por_que);
-    g_sat_pres = 0.0;
-    g_sat_ratio_max = 0.0;
-    g_sat_quieto = false;
-    g_sat_prev_asked = 0.0;
-    g_sat_prev_pres = 0.0;
-}
+// Los dos envoltorios del controlador: leen los globales, llaman a
+// ctl::control / ctl::aplicar y aplican lo que sale. Las guardas de
+// seleccion, de base asentada y del refresh son de este lado porque leen
+// el mundo; la regla esta en controlador.h y se pincha en
+// tools/test_controlador.cpp.
+struct CtlLog {
+    void linea(const char *t) { log_line(t); }
+    void num(const char *t, unsigned long long v) { log_num(t, v); }
+};
 
 static void dyn_control(double base_fps, double presented_fps) {
     if (g_force_sel != kSelDynFuture) return;
-    if (base_fps <= 1.0 || presented_fps <= 1.0) return;
-    static double last_base = 0.0;
-    const bool stable = last_base > 1.0 &&
-                        (base_fps > last_base ? base_fps - last_base
-                                              : last_base - base_fps) < 4.0;
-    last_base = base_fps;
-    const double asked_avg = g_dyn_asked_n > 0
-                           ? g_dyn_asked_sum / (double)g_dyn_asked_n : 0.0;
-    g_dyn_asked_sum = 0.0;
-    g_dyn_asked_n = 0;
-    // Se probo exigir dos ventanas estables seguidas antes de aprender, por si
-    // la ventana posterior a un escalon ensuciaba la ganancia: la mediana quedo
-    // en 143 igual y el resultado en 64% contra 66%, o sea nada. El sesgo
-    // residual de +2% no viene de ahi y sigue sin explicacion.
-    if (!stable) {
-        // Lo aprendido vale para ESTE punto de operacion. Si la base dio un
-        // escalon, el techo de presentadas es otro y hay que volver a medirlo.
-        sat_reset("sat: la base cambio, se olvida el techo");
-        return;
-    }
-    if (g_dyn_recortado) return;   // salida recortada: el error no es del modelo
-    if (asked_avg < 2.0) return;
-    const double delivered = presented_fps / base_fps;
-    if (delivered <= 0.5) return;
-    // Se registran los dos para poder ver si el sesgo depende del punto de
-    // operacion: un solo escalar no puede corregir a ratio 2.4 y a 3.8 a la vez
-    // si el planificador se desvia distinto en cada uno.
-    log_num("dynbias: asked x100 ", (unsigned)(asked_avg * 100.0 + 0.5));
-    log_num("  delivered x100 ", (unsigned)(delivered * 100.0 + 0.5));
-    log_num("  at base ", (unsigned)(base_fps + 0.5));
-    if (g_sat_on) {
-        if (presented_fps > g_sat_pres) g_sat_pres = presented_fps;
-        // Subir el ratio y no cobrar frames: eso es el techo, y el ratio de la
-        // ventana anterior ya lo alcanzaba.
-        if (g_sat_ratio_max <= 0.0 && g_sat_prev_asked > 0.0 &&
-            asked_avg > g_sat_prev_asked + 0.15 &&
-            presented_fps < g_sat_prev_pres * 1.02) {
-            g_sat_ratio_max = g_sat_prev_asked;
-            log_num("sat: techo detectado, presentadas x10 ",
-                    (unsigned)(g_sat_pres * 10.0 + 0.5));
-            log_num("  el ratio se limita a x100 ",
-                    (unsigned)(g_sat_ratio_max * 100.0 + 0.5));
-            log_num("  se venia pidiendo x100 ", (unsigned)(asked_avg * 100.0 + 0.5));
-        } else if (g_sat_ratio_max > 0.0 && !g_sat_quieto) {
-            // Ya con techo: se tantea hacia abajo mientras las presentadas
-            // aguanten, y se vuelve un escalon si se caen. El paso es la banda
-            // muerta del controlador, asi que cada tanteo es una escritura y no
-            // una rafaga.
-            if (presented_fps >= g_sat_pres * 0.98) {
-                if (g_sat_ratio_max > 2.10) {
-                    g_sat_ratio_max -= 0.10;
-                    log_num("sat: mas barato, ratio x100 ",
-                            (unsigned)(g_sat_ratio_max * 100.0 + 0.5));
-                }
-            } else if (presented_fps < g_sat_pres * 0.97) {
-                // Un paso atras, del MISMO tamano, y se para.
-                //
-                // La primera version subia 0.20 y bajaba 0.10. Con las
-                // presentadas alternando por ruido, cada par de ventanas dejaba
-                // un neto de +0.10 y el techo trepaba en vez de bajar. Medido en
-                // GTA V: 4.34 -> 4.24 -> 4.44 -> 4.34 -> 4.54 -> 4.74 -> ... 49
-                // bajadas contra 27 subidas y el techo terminando en 5.24, o sea
-                // de vuelta en el peor punto de la tabla y con la latencia en
-                // 71 ms. Un trinquete: la correccion mas grande que el tanteo
-                // convierte el ruido en deriva.
-                //
-                // Simetrico ya no deriva, pero seguiria oscilando alrededor del
-                // punto de quiebre y cada oscilacion es una escritura de
-                // opciones. Asi que ademas se congela: el primer paso que duele
-                // define el piso de este punto de operacion, y no se toca mas
-                // hasta que la base cambie -- que es cuando sat_reset olvida
-                // todo, porque ahi el techo es otro.
-                g_sat_ratio_max += 0.10;
-                g_sat_quieto = true;
-                log_num("sat: piso encontrado, ratio queda en x100 ",
-                        (unsigned)(g_sat_ratio_max * 100.0 + 0.5));
-            }
-        }
-        g_sat_prev_asked = asked_avg;
-        g_sat_prev_pres = presented_fps;
-    }
-    const double inst = asked_avg / delivered;
-    const int bk = dyn_bucket(asked_avg);
-    g_dyn_bias[bk] += (inst - g_dyn_bias[bk]) * 0.25;
-    if (g_dyn_bias[bk] < 0.80) g_dyn_bias[bk] = 0.80;
-    if (g_dyn_bias[bk] > 1.25) g_dyn_bias[bk] = 1.25;
+    CtlLog log;
+    const ctl::Config c{ g_sat_on, g_usar_deuda };
+    ctl::control(g_ctl, c, base_fps, presented_fps, log);
 }
 
-// El adelanto, por frame. Corre sobre g_base_fps, que se actualiza en cada
-// frame, y no sobre la ventana de 45: reaccionar una ventana tarde dejaba
-// ocho ventanas en 170-199 fps despues de cada escalon de base, que era el
-// techo de la version anterior. La banda muerta es lo que evita que correr
-// por frame se convierta en una escritura de opciones por frame.
 // Muestras minimas antes de que la salida del estimador valga una decision.
 // Cuatro de las ocho del anillo: a 33 fps son 120 ms de espera, y a 300 fps
 // son 13. Ocho seria esperar el anillo entero y perder el escalon que el
@@ -4010,8 +3877,6 @@ static const int kCtrlMinMuestras = 4;
 static void dyn_apply(double base_fps) {
     if (g_force_sel != kSelDynFuture) return;
     if (base_fps <= 1.0) return;
-    // Recien reseteado el anillo, la base es un frame suelto. Decidir con eso
-    // fue lo que puso 6.00 en el menu de Halo. Ver g_ctrl_n.
     if (g_ctrl_fps > 0.0 && g_ctrl_n < kCtrlMinMuestras) {
         static int callado = 0;
         if (++callado % 240 == 1) {
@@ -4028,203 +3893,22 @@ static void dyn_apply(double base_fps) {
         if (g_refresh_hz <= 0) g_refresh_hz = 60;
         log_num("dynamic: refresh is ", (unsigned)g_refresh_hz);
     }
-    const double target = (g_dyn_fps > 0) ? (double)g_dyn_fps
-                                          : (double)g_refresh_hz;
-    // El tramo se elige con la estimacion sin corregir, para no depender de la
-    // correccion que se esta por aplicar.
-    // Termino integral sobre presentaciones adeudadas. El objetivo se mide
-    // sobre promedios de ventana, y perseguir solo la tasa instantanea deja el
-    // sobrepaso del escalon dentro del promedio: 10 frames a 224 y 35 a 140 dan
-    // 158, que es justo el grupo de ventanas que sobraba. Si despues de un
-    // sobrepaso se entrega de menos, el promedio vuelve al objetivo.
-    static double debt = 0.0;          // presentaciones adeudadas
-    // Cuantas veces los frenos nuevos impidieron que la deuda creciera. Si
-    // esto se acerca al total de llamadas, el termino integral quedo anulado y
-    // el controlador degrado a proporcional puro: hay que saberlo, no suponerlo.
-    static unsigned long g_dyn_llamadas = 0, g_dyn_frenos_tiron = 0, g_dyn_frenos_base = 0;
-    static bool salida_saturada = false;   // el ratio quedo pegado al techo
-    static LONG last_pc = 0;
-    static LONGLONG last_qpc = 0;
-    // QPC y no GetTickCount64. Esta funcion corre por frame -- cada 4.7 ms a
-    // 212 fps -- y el tick tiene grano de ~15 ms. Como last_pc se actualizaba
-    // en CADA llamada pero now_ms solo avanzaba cuando saltaba el tick, el
-    // delta de presentaciones cubria 4.7 ms y el de tiempo 15 ms: dos
-    // intervalos distintos. La deuda ganaba ~1.5 presentaciones inventadas por
-    // tick, sin relacion con el rendimiento, hasta saturar en su tope.
-    //
-    // Medido en Cyberpunk: deuda +24 de mediana llegando a 54.45, objetivo
-    // efectivo 213 contra un objetivo de 165, ratio crudo 6.2 donde tocaba 4.2.
-    // Es el mismo defecto que 275cf16 arreglo en el reloj de bloques.
     LARGE_INTEGER qnow; QueryPerformanceCounter(&qnow);
-    const LONGLONG now_q = qnow.QuadPart;
-    const LONG pc = g_rt_present_count;
-    if (last_qpc != 0 && now_q > last_qpc && g_qpc_freq > 0 && pc >= last_pc) {
-        const double secs = (double)(now_q - last_qpc) / (double)g_qpc_freq;
-        if (secs < 0.5) {              // un salto largo es un cambio de escena
-            double inc = target * secs - (double)(pc - last_pc);
-            // Anti-windup. Si el ratio ya esta pegado al techo de 6x, pedir mas
-            // no puede traer mas presentaciones, asi que la deuda deja de
-            // crecer. Sin esto se enrolla contra un objetivo inalcanzable y el
-            // lazo se realimenta: satura la deuda, pide 6x, el juego se atora,
-            // se presentan menos frames todavia, la deuda crece mas.
-            //
-            // Medido en GTA V: deuda clavada en su tope de 54.45, sesgo en
-            // 1.25, ratio pedido 5.49 con base 62 -- 340 fps exigidos -- y el
-            // juego tildandose con frenos de 200 ms. La misma partida con el
-            // codigo anterior pedia 3.01.
-            //
-            // Solo se frena el crecimiento: bajar siempre se permite, que es
-            // como el lazo sale de la saturacion cuando el juego se recupera.
-            if (salida_saturada && inc > 0.0) inc = 0.0;
-
-            // Y dos frenos mas, por un crash de Halo en los menus.
-            //
-            // El anti-windup de arriba llegaba tarde: salida_saturada solo se
-            // encendia con el ratio YA arriba de 6, y toda la fuga ocurria en la
-            // trepada. Medido en los 160 ms previos al crash:
-            //
-            //   49656  ratio 3.03  base 54  deuda 0     objetivo 165
-            //   49750  ratio 4.06  base 47  deuda 1271  objetivo 190
-            //   49813  ratio 4.56  base 45  deuda 1919
-            //   50110  "needs more than 6x"  ratio 6.00 -> crash
-            //
-            // La deuda fue de 0 a 19.19 presentaciones en 160 ms con el ratio
-            // entre 3 y 4.6, o sea sin saturar nunca. Inflo el objetivo de 165
-            // a 198 fps -- un objetivo que no pidio nadie -- y de ahi salio el
-            // 6x. En esa ventana el conteo recorrio todos los buckets, el 0 seis
-            // veces, con un present de 318 ms y 594 ms de latencia de driver.
-            //
-            // 1) Tiron: si el intervalo entre llamadas se fue al doble de lo que
-            //    la base dice que deberia durar un frame, el juego se esta
-            //    atorando. Pedirle mas es empujar a alguien que ya se cae: el
-            //    lazo se realimenta solo. La deuda deja de crecer; bajar sigue
-            //    permitido, que es como sale de ahi.
-            const double esperado = (base_fps > 1.0) ? (1.0 / base_fps) : 0.02;
-            const bool tiron = (secs > esperado * 2.0);
-
-            // 2) Base no confiable: en un menu o una carga el juego casi no
-            //    renderiza y la base salta (54 -> 47 -> 41 -> 45 en el crash).
-            //    Con la base moviendose asi, el objetivo calculado no significa
-            //    nada y la deuda solo acumula ruido.
-            static double base_prev = 0.0;
-            bool base_inestable = false;
-            if (base_prev > 1.0 && base_fps > 1.0) {
-                const double d = (base_fps > base_prev)
-                                 ? (base_fps - base_prev) / base_prev
-                                 : (base_prev - base_fps) / base_prev;
-                base_inestable = (d > 0.12);
-            }
-            base_prev = base_fps;
-
-            ++g_dyn_llamadas;
-            if ((tiron || base_inestable) && inc > 0.0) {
-                inc = 0.0;
-                if (tiron) ++g_dyn_frenos_tiron; else ++g_dyn_frenos_base;
-            }
-            debt += inc;
-            // Acotada a un tercio de segundo de objetivo: sin esto se enrolla
-            // durante un apagon y despues descarga todo junto.
-            const double lim = target * 0.33;
-            if (debt > lim) debt = lim;
-            if (debt < -lim) debt = -lim;
-        } else {
-            debt = 0.0;
-        }
-    }
-    last_pc = pc;
-    last_qpc = now_q;
-    // La deuda se paga en medio segundo. Se probo en 0.8 -- factor 1.2 -- para
-    // achicar el subdisparo que quedaba, y salio peor: 79% contra 87%, con las
-    // ventanas altas de vuelta en 150-179. Pagar mas lento deja que el
-    // sobrepaso del escalon entre otra vez en el promedio de la ventana.
-    const double target_eff = g_usar_deuda ? (target + debt * 2.0) : target;
-    const double raw = (target_eff > 1.0 ? target_eff : 1.0) / base_fps;
-    double want = raw * g_dyn_bias[dyn_bucket(raw)];
-    // El techo es el estructural, 6.0.
-    //
-    // Se probo bajarlo a 4.0 despues de un crash de GTA V: las ultimas lineas
-    // mostraban cuenta de API 5, una reserva de 763 MB y un "NGX evaluate
-    // feature failed". Pero es UNA sola muestra, y en el banco 5.50x -- que es
-    // cuenta 4 y 5 -- corrio muchas veces sin crashear. O sea la cuenta alta por
-    // si sola no es la causa, y el limite costaba precision real: 79% de
-    // ventanas dentro del +-5% contra 89%. Se retira hasta tener una causa
-    // demostrada en vez de una coincidencia.
-    // Al techo, no por encima. Antes decia (want > 6.0), asi que un pedido de
-    // exactamente 6.0 -- que es el maximo estructural y por lo tanto saturacion
-    // plena -- contaba como no saturado y la deuda seguia creciendo.
-    salida_saturada = (want >= 6.0);
-    g_dyn_recortado = (want >= 6.0 || want <= 2.0);
-    // Back-calculation: lo que la salida NO pudo entregar se saca de la deuda.
-    //
-    // Antes la deuda solo se congelaba (salida_saturada frena el inc positivo) y
-    // nunca se desenrollaba, asi que una vez en el riel el controlador pedia 6x
-    // para siempre. Medido: objetivo efectivo 274 contra 165 nominal en 168 de
-    // 220 cambios, con el sesgo tambien clavado en su tope de 1.25.
-    //
-    // Se descuenta el exceso convertido a la misma unidad en que entra la deuda:
-    // exceso de ratio x base = fps que se pidieron de mas, dividido por la
-    // ganancia 2.0 (que es 1/0.5s, el horizonte de correccion).
-    {
-        const double techo = 6.0, piso = 2.0;
-        const double recorte = want > techo ? want - techo
-                             : (want < piso ? want - piso : 0.0);
-        if (recorte != 0.0 && g_usar_deuda) {
-            debt -= recorte * base_fps / 2.0;
-            const double lim2 = target * 0.33;
-            if (debt > lim2) debt = lim2;
-            if (debt < -lim2) debt = -lim2;
-        }
-    }
-    // El techo medido, antes que el estructural.
-    //
-    // Pedir mas que esto no entrega un frame mas: solo baja la base y sube la
-    // latencia. Es el unico lugar donde el controlador puede saberlo, porque es
-    // el unico que ve lo entregado contra lo pedido.
-    if (g_sat_on && g_sat_ratio_max >= 2.0 && want > g_sat_ratio_max) {
-        static LONG dicho = -1;
-        const LONG q = (LONG)(g_sat_ratio_max * 100.0 + 0.5);
-        if (dicho != q) {
-            dicho = q;
-            log_num("dynamic: recortado al techo medido, ratio x100 ", (unsigned)q);
-        }
-        want = g_sat_ratio_max;
-    }
-    if (want > 6.0) {
-        static bool said_hi = false;
-        if (!said_hi) {
-            said_hi = true;
-                log_num("dynamic: target needs more than 6x at this base, fps ",
-                    (unsigned)target);
-            log_num("  base is ", (unsigned)(base_fps + 0.5));
-        }
-        want = 6.0;
-    }
-    if (want < 2.0) want = 2.0;
-    // Se acumula todos los frames, se cambie o no el ratio: la ganancia necesita
-    // el promedio de lo pedido durante la ventana, no el ultimo valor.
-    g_dyn_asked_sum += (double)g_dyn_target / 100.0;
-    ++g_dyn_asked_n;
-    LONG next = (LONG)(want * 100.0 + 0.5);
+    ctl::EntradaAplicar in;
+    in.base_fps = base_fps;
+    in.target = (g_dyn_fps > 0) ? (double)g_dyn_fps : (double)g_refresh_hz;
+    in.now_qpc = qnow.QuadPart;
+    in.qpc_freq = g_qpc_freq;
+    in.pc = g_rt_present_count;
+    in.dyn_target = g_dyn_target;
+    CtlLog log;
+    const ctl::Config c{ g_sat_on, g_usar_deuda };
+    const ctl::SalidaAplicar s = ctl::aplicar(g_ctl, c, in, log);
+    if (!s.cambia) return;
     const LONG cur = g_dyn_target;
-    // No se compensa el retardo de escritura, y esta probado. Entre escribir un
-    // ratio y que las presentaciones lo reflejen pasan 9 o 10 frames -- medido
-    // con la sonda: "0 6 3 5 4 7 2 4 4 4 3 3 3 3 3 3" tras bajar desde 6.00 --
-    // asi que parecia razonable pedir de mas durante un escalon para llegar
-    // antes. Con un 20% extra el resultado cae de 72% a 61% de ventanas en
-    // banda y aparece subdisparo, una ventana en 104 fps contra 140. El
-    // retardo es el piso de reaccion y adelantarse cuesta mas de lo que ahorra.
-    const LONG diff = next > cur ? next - cur : cur - next;
-    // Banda muerta de 0.10, y no menos. A base 59 son 5.9 fps -- el 4.2% del
-    // objetivo -- asi que parecia el piso de precision del controlador y se
-    // probo bajarla a 0.03 con un minimo de tiempo entre escrituras. Salio
-    // PEOR: 51% de ventanas en banda contra 63%, la mediana se corrio de 140 a
-    // 138 y las escrituras pasaron de 110 a 196. Cada escritura de opciones
-    // cuesta mas de lo que la zona muerta desvia, que es algo que este proyecto
-    // ya sabia y aca se volvio a comprobar.
-    if (diff < 10) return;
+    const LONG next = (LONG)s.next;
     g_dyn_target = next;
-    // Solo la primera bajada grande de ratio, que es el caso del sobrepaso.
-    if (!g_probe_done && g_probe_left == 0 && cur - next > 80) {
+    if (!g_probe_done && g_probe_left == 0 && s.sonda) {
         g_probe_left = 16;
         g_probe_i = 0;
         g_probe_pc0 = g_rt_present_count;
@@ -4233,42 +3917,18 @@ static void dyn_apply(double base_fps) {
     }
     g_dyn_said = 0;
     g_opt_pending = 1;
-    // Diagnostico de alta frecuencia: APAGADO salvo que se pida.
-    //
-    // log_line abre y cierra el archivo POR LINEA -- a proposito, para que el
-    // log se pueda leer en vivo ([[log-must-stay-readable-live]]). Este bloque
-    // son 9 lineas y corre en cada cambio de ratio: medido en Cyberpunk, 1020
-    // cambios en 130 s, o sea ~70 aperturas de archivo por segundo en RAFAGAS
-    // de 9, y todo eso en el hilo de render -- dyn_apply se llama desde
-    // note_rendered_frame. Los modos fijos hacen cero.
-    //
-    // El usuario que instala solo el dll, que son todos ([[ships-as-one-dll]]),
-    // pagaba esto sin saberlo: g_log siempre apunta a mfg-unlock.log al lado
-    // del dll, y este bloque no respetaba mfg-quiet.txt.
-    //
-    // Que esa clase de escritura en este hilo hace dano ya se vio hoy: agregar
-    // 12 lineas por ventana en el camino del cambio de cuenta hizo que DLSS-G
-    // no enganchara en 4 de 4 corridas mientras los modos fijos validaban a la
-    // primera.
-    //
-    // Se enciende con mfg-dyndiag.txt, que es lo que hay que poner para
-    // diagnosticar el controlador. Las lineas de baja frecuencia -- arranque,
-    // parches, veredicto -- no se tocan.
     if (!g_dyn_diag) return;
     log_num("dynamic: ratio now x100 ", (unsigned)next);
     log_num("  from base ", (unsigned)(base_fps + 0.5));
-    // Por que pide lo que pide. En Cyberpunk pidio 5.97 con base 40 y objetivo
-    // 165, cuando el ratio crudo es 4.13: el exceso sale de aca o del sesgo, y
-    // razonarlo desde el codigo fallo dos veces seguidas.
-    log_num("  frenos por tiron ", (unsigned long long)g_dyn_frenos_tiron);
-    log_num("  frenos por base inestable ", (unsigned long long)g_dyn_frenos_base);
-    log_num("  llamadas del controlador ", (unsigned long long)g_dyn_llamadas);
+    log_num("  frenos por tiron ", (unsigned long long)g_ctl.frenos_tiron);
+    log_num("  frenos por base inestable ", (unsigned long long)g_ctl.frenos_base);
+    log_num("  llamadas del controlador ", (unsigned long long)g_ctl.llamadas);
     log_num("  deuda x100 (mas 32768 si es negativa) ",
-            (unsigned)(debt < 0.0 ? 32768u + (unsigned)(-debt * 100.0 + 0.5)
-                                  : (unsigned)(debt * 100.0 + 0.5)));
-    log_num("  objetivo efectivo ", (unsigned)(target_eff + 0.5));
-    log_num("  ratio crudo x100 ", (unsigned)(raw * 100.0 + 0.5));
-    log_num("  sesgo x100 ", (unsigned)(g_dyn_bias[dyn_bucket(raw)] * 100.0 + 0.5));
+            (unsigned)(g_ctl.debt < 0.0 ? 32768u + (unsigned)(-g_ctl.debt * 100.0 + 0.5)
+                                        : (unsigned)(g_ctl.debt * 100.0 + 0.5)));
+    log_num("  objetivo efectivo ", (unsigned)(s.target_eff + 0.5));
+    log_num("  ratio crudo x100 ", (unsigned)(s.raw * 100.0 + 0.5));
+    log_num("  sesgo x100 ", (unsigned)(s.sesgo * 100.0 + 0.5));
 }
 
 static void dynamic_tick(void) {
