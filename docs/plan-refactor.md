@@ -14,10 +14,10 @@ Antes de cada instalacion: `sh tools/test-host.sh`.
 | F0 | la decision de `force_into` | `src/politica.h` | `tools/test_politica.cpp` (30 casos de los logs) | extraido b02a46e, cableado 67c76a5; falta correr los 3 juegos |
 | F1 | configuracion: 43 archivos + `mfg-settings.txt` | `src/config.h` | `tools/test_config.cpp` (carpetas reales) | extraido b60b811, cableado a422a66, `mfg-config.txt` 486173e; falta correr |
 | F2 | diagnostico: una linea por capa e invariante | `src/diag.h` | `tools/test_diag.cpp` (formato exacto) | extraido 9107123, cableado 71aa84c; falta correr |
-| F3 | el controlador DYNAMIC (`dyn_control`, `dyn_apply`, sat, sesgo) | `src/controlador.h` | ventanas grabadas de GTA V/Cyberpunk | |
-| F4 | el planificador fraccional (`fractional_tick`, latch, bloques) | `src/reparto.h` | cadencias medidas ([[fractional-by-block-alternation]]) | |
-| F5 | los parches de binario (`patch_*`, `image_has`) | `src/parches.h` | busqueda de sitios sobre el snippet real de la cache | |
-| F6 | `resolve.h` y `politica.h` reconciliados caso por caso | uno solo | los dos tests, unidos | |
+| F3 | el controlador DYNAMIC (`dyn_control`, `dyn_apply`, sat, sesgo) | `src/controlador.h` | `tools/test_controlador.cpp` (la tabla de GTA V, 28 casos) | extraido ee4cca5, cableado 3ac6c14; Cyberpunk DYNAMIC 72% en banda |
+| F4 | el reparto por bloques de `fractional_tick` | `src/reparto.h` | `tools/test_reparto.cpp` (juego simulado, 2.10-2.90 al 1%) | extraido c8d7384, cableado 5c518e6; Cyberpunk CUSTOM 2.55 -> 2.55 |
+| F5 | los sitios de los `patch_*` que corren en sesion | `src/sitios.h` | `tools/test_sitios.cpp` (los dll reales de la cache 2.12) | extraido b345fd6, cableado 2f02034; Cyberpunk 6X -> 5.98, mismos conteos |
+| F6 | `resolve.h` contra `politica.h` | -- | en `test_politica`, seccion F6 | a0e8a88: coinciden en fijos y pausa; DOS divergencias pinchadas, no unificadas (necesitan juego) |
 
 ## Lo que salio de F0 y no se corrigio (a proposito)
 
@@ -44,6 +44,10 @@ foco sostenido, cero `window not focused`:
 | 71aa84c | 8 | corrida entera, 410 ventanas, 0 excepciones (idem) | `dyn-71aa84c-ok-prev` |
 | afd69fe | 8 | corrida entera, 401 ventanas, 65 de juego, presentadas 176 (p10 155, p90 184), **68% dentro del 5% de 180**, 0 INVARIANTE | `cp-dyn-steam-ok` |
 
+| 3ac6c14 (F3) | 8 | 437 ventanas, 61 de juego, presentadas 174 (p10 164, p90 184), **72% dentro del 5% de 180**, 52 `dynbias`, 0 INVARIANTE | `cp-dyn-f3-ok-prev` |
+| 5c518e6 (F4) | 7 (CUSTOM 2.55) | 421 ventanas, 70 de juego, base 42, **2.55 mediana** (p10 1.93, p90 2.97 por ventana), 134 cambios por lado, 0 INVARIANTE | `cp-custom255-f4-ok-prev` |
+| 2f02034 (F5) | 6 | 415 ventanas, 54 de juego, base 35, **5.98** (p10 4.32, p90 6.58), conteos de sitios identicos (2/2/2/1/1/1/1), 0 INVARIANTE | `cp-6x-f5-ok` |
+
 Las lineas de politica (`cuenta: el modo fijo pedia 5`, `override:`,
 `numFramesToGenerateMax CAMBIO a 6`) son identicas antes y despues del rewire
 de F0 (hud-cero-prev contra cp-6x-steam-ok). F0-F2 invisibles en Cyberpunk.
@@ -55,8 +59,24 @@ excepcion: ntdll+0x64125 escribiendo en 0x36 con `cuenta pedida 2, aplicada
 el swapchain del juego. Queda como hipotesis abierta, no como causa; si vuelve,
 ese log es el primero que hay que mirar.
 
+## Donde quedo (2026-09-11, build 681341 = a0e8a88, instalado en los tres)
+
+- `src/proxy.cpp`: 10.200 -> 9.408 lineas; 248 -> 216 globales; 0 `flag_file`
+  sueltos. Siete headers puros con siete tests de host (`sh tools/test-host.sh`,
+  ~1 s): politica, config, diag, controlador, reparto, sitios, resolve.
+- Objetivos del goal: diagnostico en una linea (F2, `docs/diagnostico.md`);
+  politica probable en el host (F0, F3, F4, F6); configuracion en un archivo
+  (F1, `docs/configuracion.md`); parches verificables contra los dll reales
+  (F5). "Un modulo en un archivo" avanzo para esos siete; los hooks, la
+  carga del set, la ventana de medicion y el HUD siguen en proxy.cpp.
+- Cada rewire quedo verificado en Cyberpunk desde Steam (la topologia real);
+  GTA V y Halo tienen el build instalado y sin correr.
+
 ## Que necesita una corrida con alguien jugando
 
-- GTA V y Halo con build afd69fe (instalado, mode 6): `VEREDICTO ACTIVO`, 0
-  `INVARIANTE`, `numFramesToGenerate` recibido == 6. GTA V no tiene benchmark
+- GTA V y Halo con build 681341 (instalado, mode 6): `VEREDICTO ACTIVO`, 0
+  `INVARIANTE`, `numFramesToGenerate` recibido == 6, y el multiplicador
+  entregado como antes (Halo 4X 4.02 / 6X 5.98). GTA V no tiene benchmark
   ([[gtav-benchmark-roto]]) y Halo no genera en el menu.
+- Las dos divergencias de F6 (Halo con eOff sin eOn previo; sel 0 con base
+  sustituida) solo se pueden decidir con esos juegos.
