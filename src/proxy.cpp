@@ -98,6 +98,9 @@ static inline bool fase_activa(void) { return g_fase == (LONG)Fase::ACTIVO; }
 static inline bool fase_pasiva(void) { return g_fase == (LONG)Fase::PASIVO; }
 static void evaluar_invariantes(void);
 extern int g_copia_ejecuta;
+// Presentaciones vistas en el swapchain. Declarada aca porque el latch de
+// apply_override_now la necesita y vive antes que su definicion.
+extern volatile LONG g_present_count;
 extern bool g_ejecuta_resuelto;
 
 // ------------------------------------------------------------------- log ---
@@ -1634,18 +1637,54 @@ static void apply_override_now(void) {
     //
     // No se pierde el cambio: g_opt_pending queda puesto y sale en el Present
     // siguiente que pase el filtro.
+    // Tres condiciones, no una. El tiempo solo no alcanza.
+    //
+    // (1) DWELL. 150 ms desde el ultimo envio: el enfriamiento del plugin son
+    //     100 ms y arranca cuando el libera, no cuando nosotros llamamos, asi
+    //     que mandar justo en el borde es una carrera.
+    //
+    // (2) PRESENTACIONES. El tiempo puede pasar sin que el juego presente --
+    //     una carga, una pausa, un hitch -- y ahi 150 ms no significan que el
+    //     plugin haya tenido frames para reconstruir. Ocho presentaciones es el
+    //     equivalente en trabajo, no en reloj.
+    //
+    // (3) CONFIRMACION. Lo mas importante y lo que faltaba: no se manda un
+    //     cambio nuevo si el ANTERIOR todavia no se observo efectivo.
+    //     g_api_aplicada se lee de vuelta del struct despues de cada llamada,
+    //     asi que comparar contra lo ultimo enviado dice si el plugin ya lo
+    //     tomo. Sin esto se pueden encolar cambios sobre un plugin que sigue
+    //     rearmando, que es exactamente la secuencia 4 -> 2 -> 4 en 94 ms que
+    //     termino en 0xC0000005 leyendo [nulo+0x64].
+    //
+    // Lo que no se cumple no se pierde: g_opt_pending queda puesto y el envio
+    // sale en el Present siguiente que pase las tres.
     {
         static LARGE_INTEGER frec = { };
         static LONGLONG ultimo = 0;
+        static LONG pres_ultimo = 0;
+        static LONG enviado_ultimo = -1;
         if (frec.QuadPart == 0) QueryPerformanceFrequency(&frec);
         LARGE_INTEGER ahora;
         QueryPerformanceCounter(&ahora);
         if (ultimo != 0 && frec.QuadPart > 0) {
             const double ms = (double)(ahora.QuadPart - ultimo) * 1000.0 /
                               (double)frec.QuadPart;
-            if (ms < 150.0) return;
+            if (ms < 150.0) return;                                  // (1)
+            if (g_present_count - pres_ultimo < 8) return;           // (2)
+            if (enviado_ultimo >= 0 && g_api_aplicada != enviado_ultimo) {
+                static LONG dicho = -1;                              // (3)
+                if (dicho != enviado_ultimo) {
+                    dicho = enviado_ultimo;
+                    log_num("latch: el cambio anterior aun no se observo; se espera. pedido ",
+                            (unsigned)enviado_ultimo);
+                    log_num("  aplicado en la API ", (unsigned)g_api_aplicada);
+                }
+                return;
+            }
         }
         ultimo = ahora.QuadPart;
+        pres_ultimo = g_present_count;
+        enviado_ultimo = g_force_generated;
     }
     // Lo mismo que en force_into: si el juego la apago, el reenvio la volveria a
     // encender por la puerta de atras.
@@ -3249,7 +3288,7 @@ static double g_rate_lo = 0.0;        // last cycle's rate in each state, kept
 static double g_rate_hi = 0.0;        // across the reset that clears the counters
 static int    g_lo_frames_seen = 0;   // rendered frames while the low count ran
 static int    g_hi_frames_seen = 0;   // and while the high one did
-static volatile LONG g_present_count = 0;   // presents seen at the swap chain
+volatile LONG g_present_count = 0;   // presents seen at the swap chain
 static long long g_pres_qpc = 0;            // when the last present went out
 static volatile LONG g_last_change_pres = 0; // present index at the last count change
 // Cuando cambio la cuenta, en reloj real, y la curva de recuperacion.
