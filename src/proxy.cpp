@@ -7002,6 +7002,60 @@ static void hook_swapchain_present(void *sc) {
     // advanced 66 to 69 in each, so the run reported 1.00 where the runtime
     // said 1.49. The failure is silent and reads as a clean integer, which at
     // 1.10x would be indistinguishable from a correct answer.
+    // Solo se engancha un slot que TODAVIA apunta a dxgi.dll.
+    //
+    // Si ahi ya hay otro hook, apilarnos encima forma un lazo: nuestro hook
+    // llama a lo que guardamos como original -- el hook del otro -- y ese llama
+    // a lo que guardo EL como original, que es el slot, que ahora somos
+    // nosotros. Cada present se llama a si mismo hasta agotar la pila.
+    //
+    // Medido en Cyberpunk lanzado desde Steam, 2026-09-11:
+    //
+    //   present: RECURSION, profundidad 4244
+    //   EXCEPCION 0xC00000FD en gameoverlayrenderer64.dll
+    //
+    // El overlay de Steam engancha el mismo slot. Con el exe lanzado directo no
+    // se inyecta, y el mismo juego corria 170 s sin una excepcion. Esa
+    // diferencia estuvo a la vista horas y la descarte porque el log no nombraba
+    // al overlay; lo nombro recien cuando el freno de recursion dejo la
+    // profundidad escrita.
+    //
+    // [[never-byte-detour-present]] ya decia que el overlay de Steam engancha
+    // esto mismo. Lo que faltaba era la guarda en ESTE camino.
+    //
+    // Perder el hook cuesta instrumentacion, no funcionalidad: las
+    // presentaciones se cuentan con PresentCount del runtime, que es el
+    // instrumento honesto de todas formas ([[measure-with-the-runtime-counter]]).
+    {
+        HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
+        HMODULE dueno = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)vt[8], &dueno);
+        if (dueno != nullptr && dxgi != nullptr && dueno != dxgi &&
+            vt[8] != (void *)&hk_dxgi_present) {
+            static bool dicho = false;
+            if (!dicho) {
+                dicho = true;
+                // El nombre del modulo, en ASCII, sin depender de log_ruta
+                // que se define mas abajo en el archivo.
+                wchar_t nom[MAX_PATH] = { 0 };
+                GetModuleFileNameW(dueno, nom, MAX_PATH);
+                char corto[96];
+                int c = 0, ini = 0;
+                for (int i = 0; nom[i] != 0; ++i)
+                    if (nom[i] == 92 || nom[i] == 47) ini = i + 1;
+                for (int i = ini; nom[i] != 0 && c < 94; ++i)
+                    corto[c++] = (char)(nom[i] < 128 ? nom[i] : '?');
+                corto[c] = 0;
+                log_line("present: el slot YA lo engancho otro; no nos apilamos");
+                log_line(corto);
+                log_line("  (apilarse forma un lazo entre los dos hooks:");
+                log_line("   medido en Cyberpunk desde Steam, profundidad 4244)");
+            }
+            return;
+        }
+    }
     DWORD prot = 0;
     if (!VirtualProtect(&vt[8], sizeof(void *), PAGE_READWRITE, &prot)) return;
     // El original de ESTA vtable, registrado antes de escribir el slot. El
