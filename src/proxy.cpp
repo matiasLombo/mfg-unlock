@@ -36,6 +36,7 @@
 #include "config.h"
 #include "diag.h"
 #include "controlador.h"
+#include "reparto.h"
 
 // The panel's own state, defined here and shared with overlay.h. It is a
 // window of ours now, not something drawn into the game's frame -- see the
@@ -142,7 +143,6 @@ static int g_wic_sitios_ultima = -1;
 static bool g_quiet = false;          // mfg-quiet.txt: no per-window logging
 static bool g_nullalt = false;        // mfg-nullalt.txt: alternate between equals
 static bool g_slowalt = false;        // mfg-slowalt.txt
-static int  g_slowalt_len = 240;       // rendered frames per block
 static int  g_block_ms = 0;           // mfg-blockms.txt, 0 = default
 static bool g_peralt = false;         // mfg-peralt.txt: diffuse per frame
 // mfg-sub2.txt: SOLO para medir. Baja el piso del target por debajo de 200
@@ -3196,10 +3196,6 @@ static double g_last_dt = 0.0;        // and the most recent one, for the spread
 static double g_win_time = 0.0;       // elapsed in the current counting window
 static int    g_win_frames = 0;       // rendered frames in it
 static double g_rendered_fps = 0.0;   // frames / elapsed, unbiased
-static double g_rate_lo = 0.0;        // last cycle's rate in each state, kept
-static double g_rate_hi = 0.0;        // across the reset that clears the counters
-static int    g_lo_frames_seen = 0;   // rendered frames while the low count ran
-static int    g_hi_frames_seen = 0;   // and while the high one did
 volatile LONG g_present_count = 0;   // presents seen at the swap chain
 static long long g_pres_qpc = 0;            // when the last present went out
 static volatile LONG g_last_change_pres = 0; // present index at the last count change
@@ -3285,8 +3281,6 @@ static int    g_disp_skip = 0;        // cambios que saltaron mas de un refresh
 static unsigned  g_ref_first = 0;
 static unsigned  g_ref_last = 0;
 static long long g_ref_qpc0 = 0;
-static double g_lo_time = 0.0;
-static double g_hi_time = 0.0;
 static double g_token_fps = 0.0;      // and the rate that follows from it
 static double g_token_dt_fast = 0.0;  // la misma senal, para el controlador
 static double g_base_fps = 0.0;       // that, divided by the multiplier in force
@@ -3814,6 +3808,8 @@ static inline bool sel_is_frac(void) {
 // El estado del controlador vive en src/controlador.h (ctl::Estado); aca
 // queda una instancia y los dos envoltorios que leen el mundo y aplican.
 static ctl::Estado g_ctl;
+// Y el del reparto fraccional por bloques (src/reparto.h).
+static rep::Estado g_rep;
 // El integrador de deuda del controlador. Redundante con el sesgo por
 // tramo y el que rompia (dos corridas de Cyberpunk con el mismo binario:
 // buena 153-160, mala 274 con deuda y sesgo clavados en el riel). Se
@@ -4100,602 +4096,24 @@ static void fractional_tick(void) {
     static int hi_frames = 0;
     if (pos == 0) {
         if (g_slowalt) {
-        // Whole blocks at lo, then whole blocks at lo+1, in the proportion the
-        // fraction asks for. The loop byte follows the API exactly so the two
-        // can never disagree, which is the condition every crash so far
-        // violated.
-        // Eight blocks to a cycle, so the whole pattern fits inside a few
-        // seconds. A hundred blocks -- the first attempt -- made a cycle of
-        // 12000 rendered frames, and a run that renders 540 never reached the
-        // second half of it, which is why the count looked as though it never
-        // alternated at all.
-        // Blocks measured in time, not in rendered frames.
-        //
-        // A block at the low count renders far faster than one at the high
-        // count -- 167 fps against 89.8 with generation off and on -- so equal
-        // frame counts are unequal durations, and what a player sees is the
-        // time-weighted mix, not the frame-weighted one. Counting frames made
-        // the low blocks occupy 5.7 seconds against 10.7 for the high ones
-        // while the arithmetic assumed they were equal, which is most of why
-        // 1.50x delivered 1.81-1.90.
-        static double sa_clock = 0.0;
-        // Advanced once per rendered frame, not once per token call.
-        //
-        // fractional_tick runs per slGetNewFrameToken call and the sample makes
-        // about seven of those per rendered frame, so summing g_last_dt here
-        // ran the schedule clock roughly seven times too fast: a nominal 8 s
-        // block was about 1.1 s of wall time, and every block length in this
-        // file's measurements was off by that factor. g_last_dt only changes
-        // when a burst ends, so adding it once per change is once per frame.
-        // Once per frame, because the caller is now gated on the frame index.
-        // The edge check that used to stand here was undoing the burst, and
-        // against a gated caller it would drop any frame whose dt repeated.
-        //
-        // AHORA MIDE TIEMPO, NO LLAMADAS.
-        //
-        // Sumaba g_last_dt una vez por llamada que pasaba el gate, y eso es un
-        // conteo de llamadas disfrazado de reloj. Dos formas de romperse, las
-        // dos hacia el mismo lado:
-        //
-        //   - g_last_dt es el ULTIMO intervalo observado, no el transcurrido
-        //     desde la vuelta anterior. Si el juego hace mas de una llamada por
-        //     frame -- Cyberpunk hace 2.6 despues del gate, medido: 288504
-        //     llamadas contra 110847 que pasan -- el reloj avanza 2.6 veces mas
-        //     rapido y los bloques salen 2.6 veces mas cortos.
-        //   - Las llamadas con dt fuera de [2ms, 200ms] NO actualizan g_last_dt
-        //     pero igual suman el valor viejo. Una rafaga de cinco llamadas en
-        //     un milisegundo suma cinco intervalos completos.
-        //
-        // Consecuencia medida en Cyberpunk con CUSTOM 2.50: la cuenta de la API
-        // cambiaba cada 140 ms de mediana y con minimos de 0 ms, cuando el ciclo
-        // pide un cambio cada 384 ms. Cambiar la cuenta asi de rapido es la
-        // condicion de crash ya documentada -- treinta frames renderizados es lo
-        // que corre limpio -- y el juego se caia. Con 2X entero no se cae porque
-        // no alterna la cuenta.
-        //
-        // El reloj de pared no depende de nada de eso: se llame una vez o cien
-        // por frame, la suma de los intervalos reales es el tiempo real. Y el
-        // horario esta expresado en segundos, asi que la fuente correcta son
-        // segundos.
+        // El reparto vive en src/reparto.h (rep::tick) y se pincha en
+        // tools/test_reparto.cpp. Aca: el reloj, la configuracion, y aplicar
+        // la cuenta que salga -- la llamada a la API y el byte.
+        double dt = 0.0;
         {
             static LONGLONG prev_qpc = 0;
             LARGE_INTEGER ahora;
             QueryPerformanceCounter(&ahora);
-            if (prev_qpc != 0 && g_qpc_freq > 0) {
-                const double d = (double)(ahora.QuadPart - prev_qpc) / (double)g_qpc_freq;
-                // Un salto largo es una pantalla de carga o un menu, no tiempo
-                // de juego: se ignora en vez de saltear medio ciclo de golpe.
-                if (d > 0.0 && d < 0.5) sa_clock += d;
-            }
+            if (prev_qpc != 0 && g_qpc_freq > 0)
+                dt = (double)(ahora.QuadPart - prev_qpc) / (double)g_qpc_freq;
             prev_qpc = ahora.QuadPart;
         }
-        // Read from mfg-blockms.txt when present, so the block length can be
-        // swept without a rebuild. The unit is milliseconds of the cadence
-        // clock, which advances once per frame-token call -- about seven times
-        // per rendered frame -- so 750 here is ~125 ms of wall clock, not 750.
-        // Eight seconds, measured. The cost of this whole approach is the
-        // count changing, and it scales with how often that happens -- nothing
-        // else. Presented fps against block length, 2.50x, same scene:
-        //
-        //   0.5 s   66 changes  42.7% off-refresh  141.0 fps
-        //   0.75 s  47          37.0%              148.4
-        //   4 s      8          10.5%              158.0
-        //   8 s      4           3.3%              163.1
-        //   12 s     3           0.3%              165.3
-        //
-        // The null control settles what causes it: run the same scheduler, the
-        // same clock and the same slDLSSGSetOptions replay at every boundary
-        // but with both values equal, and the cost vanishes entirely (0.0-0.3%,
-        // 165.3 fps). So it is neither the API calls nor our own logging --
-        // silencing that changed nothing -- it is the count taking a different
-        // value.
-        //
-        // 8 s rather than 12: the ratio still averages correctly (2.48 asked
-        // 2.50, over 47 windows) and the presented rate holds 167 fps with two
-        // dips in 47 windows, at the block boundaries. Longer blocks buy the
-        // last 2 fps and make the average slower to settle, which would matter
-        // if the target ever moved.
-        // 1.1 s, and the old 8.0 here was never 8 seconds. The clock this
-        // reads advanced once per frame-token call, seven of those per frame,
-        // so the block that called itself 8 s lasted about 1.1 s of wall time
-        // -- and 1.1 s is the length that measured 163 fps presented with 3.3%
-        // of presents off-refresh. Gating the token hook on the frame index
-        // made the clock honest, which would have stretched the same setting
-        // to a 256 s cycle: whole minutes parked on one integer count. The
-        // number changes so the behaviour does not.
-        // 16 ms, so a whole cycle of 32 blocks lands at 0.512 s and a window
-        // of 45 frames sees both states instead of sitting inside one. Longer
-        // blocks read whole integers per window whatever the request is: at
-        // 1.1 s, 1.50x reads 1.00 with an IQR of 1.00.
-        //
-        // OJO: el comentario que estaba aca decia que el camino de bloques solo
-        // corre debajo de 2.0x. Es falso desde e34e680 -- "Bloques en todo el
-        // rango", unas lineas mas abajo -- porque g_peralt esta apagado por
-        // defecto y con el la difusion por frame nunca se elige. Los bloques
-        // corren en TODO el rango.
-        //
-        // Eso deja esta constante sirviendo a dos regimenes con requisitos
-        // opuestos. Los 16 ms se eligieron por lo de abajo de 2.0x: ahi el
-        // estado bajo apaga la generacion, entrar y salir cuesta una
-        // presentacion, y el ciclo entero tiene que entrar en una ventana de
-        // medicion. Arriba de 2.0x el comentario de mas abajo dice que difundir
-        // por frame es gratis, y la tabla de esta misma funcion dice que
-        // bloques largos entregan mas fps con muchisimos menos cambios de
-        // cuenta. Cada cambio de cuenta hace que el plugin libere y reserve del
-        // orden de 750 MB, medido en GTA V.
-        //
-        // MEDIDO. A 2.50x, misma escena, 47 ventanas cada uno, y la
-        // distribucion es por ventana con PresentCount, nunca la media sola:
-        //
-        //   bloque  ciclo    vram   cambios   distribucion por ventana
-        //   16 ms   0.512 s   297     148     46 de 47 en 2.50
-        //   24 ms   0.768 s   272      98     47 de 47 en 2.50
-        //   125 ms  4.0 s     233      20     15 en 2.00 y 18 en 3.00
-        //
-        // Los 24 ms son el arreglo: un tercio menos de reconfiguraciones de
-        // latencia sin pagar nada en cadencia. La distribucion no empeora --
-        // 47 de 47 contra 46 de 47, que es la misma cosa, no una mejora.
-        //
-        // Los 125 ms son el extremo, no el candidato: un ciclo de 4 s es ocho
-        // ventanas de medicion, y ahi si se rompe. Pero eso no es un artefacto
-        // del instrumento: un ciclo de 4 s es literalmente dos segundos a 2x y
-        // dos a 3x, y eso el jugador lo ve. El compromiso no es continuo, tiene
-        // un codo, y el codo esta arriba de 0.768 s.
-        //
-        // El techo de 24 ms no es arbitrario. El ciclo son 32 bloques, o sea
-        // 0.768 s, y la ventana de 45 frames a base 59 dura 0.763 s: el ciclo
-        // entra justo. Subir mas el bloque saca el ciclo de la ventana, que es
-        // el punto donde toda ventana lee un entero entero -- primero deja de
-        // medirse, y despues, mas arriba, deja de servir.
-        //
-        // Y de paso corrige la premisa que se venia repitiendo: las reservas de
-        // VRAM casi no son nuestras. 297 -> 272 -> 233, y 233 es lo que mide un
-        // entero fijo que hace tres cambios de cuenta en toda la corrida. El
-        // piso es del plugin y lo nuestro agrega unas 64. Lo que si escala con
-        // nuestros cambios son las reconfiguraciones de latencia: 148, 98, 20, 3.
-        //
-        // La condicion es lo >= 1, no "arriba de 2.0x", porque el mecanismo por
-        // el que se eligieron los 16 ms es que el estado bajo apague la
-        // generacion. Con lo == 0 entrar y salir cuesta una presentacion y solo
-        // los 16 ms sobreviven la transicion; con lo >= 1 la generacion nunca
-        // se apaga y esa razon no aplica. Debajo de 2.0x no se toca nada.
-        const double kBlockSecs = g_block_ms > 0 ? (double)g_block_ms / 1000.0
-                                                 : (lo >= 1 ? 0.024 : 0.016);
-        // Thirty-two blocks, not eight. The split is quantised to 1/kBlocks of
-        // the cycle, and below 2.0x the rate weighting pushes the useful range
-        // to one end: 1.90x wants 94% of the time generating, which eight
-        // blocks can only render as 8/8 -- a flat 2.00x, 5% high. Thirty-two
-        // brings every point inside 1%. The block *length* is unchanged, so the
-        // count changes no more often than before; only the cycle is longer.
-        // Blocks per cycle, from mfg-blocks.txt when present.
-        //
-        // The pair (block length, blocks per cycle) has to keep the whole cycle
-        // inside the 45-frame window or every window reads a whole integer.
-        //
-        // It was added to test whether the base rate being refresh/(ceiling + 1)
-        // instead of the cadence average is a pacer that never settles: fewer
-        // and longer blocks give it a longer stretch at the low count. It is
-        // not. At 2.50x, with the cycle held inside the window throughout:
-        //
-        //   per frame            base 55   presented 136
-        //   8 blocks x 60 ms     base 55   presented 139
-        //   4 blocks x 100 ms    base 55   presented 137
-        //   16 blocks x 30 ms    base 55   presented 138
-        //
-        // Stretches of 200 ms at the low count read the same as changing every
-        // frame. The pinning does not depend on settling time, so no
-        // arrangement of the same two counts moves it.
-        //
-        // What it is, stated as a law that fits the data rather than as a
-        // suspicion: the producer is throttled to refresh/(ceiling + 1)
-        // rendered frames per second even on the frames that generate fewer, so
-        //
-        //     presented = refresh * ratio / (ceiling + 1)
-        //
-        // That holds to within 1 fps on 2.00, 2.25, 2.50, 2.75, 3.00, 1.50,
-        // 1.75 and 1.90, and it breaks at exactly the two points where the
-        // mechanism does not apply -- 1.10x and 1.25x, whose low state is count
-        // 0, where the real frame presents down the ordinary path with no pacer
-        // in it. The loss is display slots left empty: at 2.25x, 2.25 of every
-        // 3 are used and the missing 41 fps are the other quarter.
-        //
-        // So the fix has an exact target: make the throttle follow the count
-        // that frame actually generates instead of the cadence ceiling. Then a
-        // ratio at or above 2.0 saturates the display the way both neighbouring
-        // integers already do. It lives in the pacer inside sl.dlss_g.dll, and
-        // it is not attempted here.
-        const int kBlocks = g_blocks > 0 ? g_blocks : 32;
-        const double cycle_secs = kBlockSecs * (double)kBlocks;
-        bool cycle_wrapped = false;
-        // Donde ARRANCA la corrida de bloques altos dentro del ciclo.
-        //
-        // Antes empezaba siempre en el bloque 0, asi que la cadencia llevaba una
-        // periodicidad fija del largo del ciclo (0.768 s). En la literatura de
-        // PWM eso es un tono, y la familia que lo rompe sin tocar el promedio se
-        // llama random pulse position modulation: mueve DONDE cae el pulso, no
-        // cuantos flancos tiene. Aca sale gratis -- la corrida sigue siendo
-        // contigua (envuelve por el final del ciclo), asi que siguen siendo
-        // exactamente 2 cambios de cuenta por ciclo, que es lo que hace barata
-        // la alternancia frente a repartir parejo.
-        //
-        // NO se espera que se note: el jitter medido es ~0.55 ms contra un
-        // umbral reportado de ~8 ms. Se hace porque el tono fijo no tiene por
-        // que estar ahi.
-        static int sa_offset = 0;
-        static unsigned sa_rng = 0x9E3779B9u;
-        if (sa_clock >= cycle_secs) {
-            sa_clock -= cycle_secs;
-            cycle_wrapped = true;
-            sa_rng ^= sa_rng << 13; sa_rng ^= sa_rng >> 17; sa_rng ^= sa_rng << 5;
-            sa_offset = (int)(sa_rng % (unsigned)(kBlocks > 0 ? kBlocks : 1));
-        }
-        const int sa_pos_block = (int)(sa_clock / kBlockSecs);
-        static int sa_pos = 0;
-
-        // How many blocks take the high count, corrected by what came out.
-        //
-        // The open-loop split -- frac x kBlocks -- is right only if a block at
-        // the low count delivers exactly its share, and below 2.0x it does not:
-        // the low count there is zero, generation is off for those blocks, and
-        // the app renders faster without it, so the low blocks contribute more
-        // frames than the arithmetic assumed and the average lands high. 1.50x
-        // asked, 1.90 delivered.
-        //
-        // So the split is nudged by the error between the ratio asked for and
-        // the one the last full cycle actually produced. Presented frames per
-        // rendered frame is (1 + generated per rendered frame), and both are
-        // counted here, on this thread, over whole cycles.
-        static double sa_bias = 0.0;
-        static double cyc_gen = 0.0;
-        static int cyc_frames = 0;
-        // El umbral era g_last_dt porque el reloj avanzaba de a un dt por
-        // vuelta. Ahora avanza tiempo real, asi que el paso tipico es mucho
-        // menor: se usa un valor fijo y chico, holgado contra el ciclo de
-        // 0.768 s y suficiente para detectar la vuelta.
-        if (sa_clock < 0.05 && g_lo_time + g_hi_time > 0.5) {
-            // Weighted by time, for the same reason the blocks are: presented
-            // frames per second over rendered frames per second is what the
-            // player experiences.
-            // Frame-weighted, which is what the delivered ratio is. This is
-            // still the figure the audit called circular -- it decrees what each
-            // frame presented -- and it is used ONLY to nudge the split, never
-            // reported as a result. The reported number is the counted one.
-            const double pres = (double)g_lo_frames_seen * (double)(lo + 1)
-                              + (double)g_hi_frames_seen * (double)(lo + 2);
-            const double ren = (double)(g_lo_frames_seen + g_hi_frames_seen);
-            const double produced = ren > 0.0 ? pres / ren : 1.0;
-            const double want = per_frame + 1.0;
-            // Gently: a cycle is a second or two, and a gain that corrects in
-            // one step would hunt between the two counts instead of settling.
-            // Reported once per cycle: the ratio the dll actually delivered,
-            // counted on this thread over whole cycles. Below 2.0x the
-            // saturated `cap / rendered` estimate is invalid -- generation is
-            // off for part of the cycle, so the base rate itself moves -- and
-            // this is the only figure that stays meaningful there.
-            // The delivered ratio, from the clock rather than from our own
-            // choices. Accumulating the api value just picked and calling its
-            // average "delivered" is circular -- it can only report what was
-            // asked for, which is exactly what it did: 150 on every cycle from
-            // the first, while an independent estimate said 1.81. Same mistake
-            // as `ratio produced x100`.
-            //
-            // These counters are measured: how many frames the app rendered
-            // while each count was in force, and how long that took.
-            // Also with only one block type in play -- an integer ratio never
-            // alternates, so without this the controls report nothing and the
-            // instrument goes unchecked on the two cases whose answer is known.
-            if (g_lo_frames_seen + g_hi_frames_seen > 0) {
-                const double tot_ren = (double)(g_lo_frames_seen + g_hi_frames_seen);
-                const double tot_pres = (double)g_lo_frames_seen * (double)(lo + 1)
-                                      + (double)g_hi_frames_seen * (double)(lo + 2);
-                // CIRCULAR -- kept only because the block rates beside it are
-                // real. This figure decrees that each low-block frame presented
-                // (lo+1) and each high-block frame (lo+2), which is the very
-                // thing under test: it reduces to the fraction of samples taken
-                // while the high count was selected, and returned the request
-                // to within 0.3% even at 2.10x and 2.90x, fractions the
-                // scheduler cannot represent. Use "counted multiplier x100",
-                // which counts presents at the swap chain.
-                log_num("slowalt: CIRCULAR ratio x100 ",
-                        (unsigned)(int)(tot_pres / tot_ren * 100.0 + 0.5));
-                log_num("  low block fps x10 ",
-                        (unsigned)(int)(g_lo_time > 0.0 ?
-                            (double)g_lo_frames_seen / g_lo_time * 10.0 : 0.0));
-                // Presented frames per second, and the ratio against rendered,
-                // both from the clock. This does not assume the display is the
-                // limit -- and it is not: in a 2.50x run the low blocks render
-                // 61 fps where saturation against a 165 Hz panel would put them
-                // at 82, so the "cap / rendered" estimate is invalid there and
-                // read 2.76 against a true 2.47.
-                {
-                    const double t = g_lo_time + g_hi_time;
-                    const double pres_n = (double)g_lo_frames_seen * (double)(lo + 1)
-                                        + (double)g_hi_frames_seen * (double)(lo + 2);
-                    if (t > 0.0) {
-                        log_num("  presented fps x10 ", (unsigned)(int)(pres_n / t * 10.0));
-                        log_num("  rendered fps x10 ",
-                                (unsigned)(int)((double)(g_lo_frames_seen + g_hi_frames_seen) / t * 10.0));
-                    }
-                }
-                log_num("  high block fps x10 ",
-                        (unsigned)(int)(g_hi_time > 0.0 ?
-                            (double)g_hi_frames_seen / g_hi_time * 10.0 : 0.0));
-                // Snapshot first: the conversion below runs in this same call
-                // and needs these.
-                g_rate_lo = g_lo_time > 0.05 ? (double)g_lo_frames_seen / g_lo_time : 0.0;
-                g_rate_hi = g_hi_time > 0.05 ? (double)g_hi_frames_seen / g_hi_time : 0.0;
-                g_lo_frames_seen = 0;
-                g_hi_frames_seen = 0;
-                g_lo_time = 0.0;
-                g_hi_time = 0.0;
-            }
-            // Full gain, no dead band. Both were tried on the theory that the
-            // loop was hunting -- 26 count changes at 1.25x where the pattern
-            // calls for 4 -- and both made the whole range worse: 1.50x fell
-            // from 1.48 to 1.36 and every point settled about 9% low. The
-            // changes are the loop tracking a base rate that really does move,
-            // not noise, and damping it just leaves the error uncorrected.
-            // Removed, not retuned. An independent audit reduced this loop to
-            // its setpoint: `produced` is presents per rendered frame under the
-            // assumption that each count-c frame presents c+1 times, which is
-            // the same quantity `presents / 45` reports. So the integrator ran
-            // until its estimate of the reported metric equalled the request,
-            // and the sweep could only ever return the request. It did: the
-            // loop's own `CIRCULAR ratio x100` read 109/113/125/150/174/188/190
-            // against 110/113/125/150/175/187/190 asked.
-            //
-            // What the open-loop split actually delivers is recorded a few
-            // lines up, from before this loop existed: 1.50x asked, 1.90
-            // delivered; 1.10x delivered 1.00. Those are the numbers to beat,
-            // and beating them has to come from the schedule.
-            //
-            // The tuning history above is void for the same reason -- "full
-            // gain beat a dead band" compares two ways of reverse-fitting.
-            (void)produced;
-            sa_bias = 0.0;
-            cyc_gen = 0.0;
-            cyc_frames = 0;
-        }
-        // Blocks split by frames, not by time.
-        //
-        // `frac` is the fraction of *rendered frames* that must take the high
-        // count, because the delivered ratio is the frame-weighted mean of
-        // (count + 1). Handing that straight to a time-based schedule is only
-        // correct when both states render at the same rate, and below 2.0x they
-        // do not: the low count there is zero, generation is off, and the app
-        // renders nearly twice as fast (167 fps against 89.8 measured). So an
-        // equal-time split gives the low state far more frames than intended
-        // and the ratio lands low -- 1.10x delivered 1.00, 1.50x delivered 1.27.
-        //
-        // Converting frame fraction to time fraction:
-        //
-        //   t_hi / (t_hi + t_lo) = (frac / r_hi) / (frac / r_hi + (1-frac) / r_lo)
-        //
-        // where r is each state's measured rendered rate. Above 2.0x both rates
-        // are close and this is nearly a no-op, which is why it was not needed
-        // there; below 2.0x it is the whole correction.
-        // The correction is NOT added here. sa_bias is computed from the error
-        // in frames -- want minus produced, both frame-weighted -- and adding it
-        // to `frac` sends it through the frame-to-time conversion below, so it
-        // gets applied twice. At 1.10x, where the two rates differ most, a bias
-        // of 0.35 turned a requested 10 percent of frames into 59 percent of the
-        // time: 19 blocks of 32 measured, against the 5 the ratio calls for. The
-        // delivered ratio came out 0.98, with windows as low as 0.88 -- fewer
-        // presents than rendered frames, which is loss, not a low multiplier.
-        double t_frac = frac;
-        if (t_frac < 0.0) t_frac = 0.0;
-        if (t_frac > 1.0) t_frac = 1.0;
-        {
-            const double r_lo = g_rate_lo;
-            const double r_hi = g_rate_hi;
-            if (r_lo > 1.0 && r_hi > 1.0) {
-                const double a = t_frac / r_hi;
-                const double b = (1.0 - t_frac) / r_lo;
-                if (a + b > 0.0) t_frac = a / (a + b);
-            }
-        }
-        // Latched once per cycle, not recomputed every frame.
-        //
-        // This runs per frame-token call, so hi_blocks was being recalculated
-        // thousands of times inside a single cycle, and every recalculation
-        // could move the boundary the schedule was already walking past. A
-        // contiguous run of high blocks should change the count twice per
-        // cycle; it was changing 46 to 86 times, and the ratio came out low
-        // because blocks kept being reclassified underneath the cursor.
-        //
-        // It also invalidated every comparison built on top of it: two attempts
-        // to improve this range -- spreading the blocks, damping the loop --
-        // were judged against a schedule that was not holding still, and the
-        // same configuration measured 1.48 once and 1.34 three times running.
-        t_frac += sa_bias;
-        if (t_frac < 0.0) t_frac = 0.0;
-        if (t_frac > 1.0) t_frac = 1.0;
-        // A new request is not churn, so it does not wait for the wrap.
-        //
-        // The latch below exists because this runs per frame and a boundary
-        // that moves under the walking cursor reclassifies blocks the schedule
-        // has already passed. But it was also swallowing the one recalculation
-        // that is not churn: the user picking a different multiplier. A cycle
-        // is 32 blocks of 1.1 s, so a change made in the panel could sit unused
-        // for half a minute -- which is exactly what "the multiplier takes a
-        // while to apply" looks like from inside the game.
-        //
-        // Restarting the cycle as well, rather than only the split: entering a
-        // new schedule two thirds of the way through a cycle would spend the
-        // remainder walking blocks laid out for the previous request.
-        static int hi_blocks = -1;
-        bool request_changed = false;
-        {
-            static double last_req = -1.0;
-            if (frac != last_req) {
-                // Solo un cambio GRANDE reinicia el ciclo.
-                //
-                // El reinicio se puso para que elegir otro multiplicador en el
-                // panel no espere medio minuto -- o sea para un cambio manual,
-                // que siempre es grande. Pero DYNAMIC mueve el ratio ~8 veces
-                // por segundo, y con cualquier cambio reiniciando, el ciclo de
-                // 0.768 s nunca termina: el diseno da 2 cambios de cuenta por
-                // ciclo (~15 frames renderizados entre cambios) y medido salian
-                // cada 6.8.
-                //
-                // Y eso cuesta. Con la base estable, ventanas con >=6 cambios
-                // miden 15.2 % de desvio relativo contra 12.7 % de las que
-                // tienen menos, con la densidad de cambios igual entre bases
-                // estables e inestables (5.8 contra 5.5), asi que no es el
-                // confound de la base.
-                //
-                // Los ajustes chicos de DYNAMIC ahora viajan en el ciclo que ya
-                // esta corriendo: hi_blocks se recalcula igual, pero el reloj no
-                // se reinicia.
-                const double salto = frac > last_req ? frac - last_req : last_req - frac;
-                last_req = frac;
-                request_changed = hi_blocks >= 0 && salto > 0.5;
-                // Latchear el reparto hasta el fin del ciclo: VALIDADO.
-                //
-                // La idea es recuperar los 2 cambios de cuenta por ciclo que el
-                // diseno da y DYNAMIC rompe. Medido con n=3 por brazo: los
-                // cambios bajaron de 347 a 295 -- mucho menos de lo esperado --
-                // y la precision del objetivo dio 83 % contra 77 % de ventanas
-                // dentro de +-5 %.
-                //
-                // Ese 83 contra 77 era RUIDO: por corrida fue [88, 80, 82]
-                // contra [77, 82, 73], rangos solapados, n=3 contra una
-                // dispersion de 8 puntos. No decia nada.
-                //
-                // Se valido apareando VENTANA POR VENTANA entre brazos, que se
-                // puede porque la escena del benchmark es determinista: eso
-                // convierte el ruido entre corridas en diferencias dentro del
-                // par. 152 pares, diferencia mediana del error al objetivo
-                // 0.00 %. El apareo se verifico: la base difiere 2-3 fps de
-                // mediana y menos del 5 % de los pares estan mal alineados.
-                //
-                // Y en el banco, 3 por brazo sin solaparse: cambios de cuenta
-                // 89 -> 49 (-45 %) y desvio relativo 29.4 -> 23.4 (-20 %), con
-                // el multiplicador entregado igual.
-                //
-                // Encendido por defecto. mfg-nolatch.txt lo apaga.
-                if (hi_blocks >= 0 && salto <= 0.5 && !g_latch_reparto) hi_blocks = -2;
-            }
-        }
-        if (request_changed) {
-            sa_clock = 0.0;
-            sa_bias = 0.0;   // the old correction was for the old request
-        }
-        if (cycle_wrapped || request_changed || hi_blocks < 0) {
-            hi_blocks = (int)(t_frac * (double)kBlocks + 0.5);
-            if (hi_blocks < 0) hi_blocks = 0;
-            if (hi_blocks > kBlocks) hi_blocks = kBlocks;
-        }
-        // A null control: with mfg-nullalt.txt the scheduler runs exactly as it
-        // does for a fractional ratio -- same blocks, same clock, same
-        // slDLSSGSetOptions replay every boundary -- but both values are the
-        // same, so nothing about the generated count changes. If the cost
-        // survives that, it is the machinery of alternating; if it vanishes,
-        // it is the count itself changing. Nothing else separates the two.
-        // High blocks contiguous, and the reason is measured rather than
-        // aesthetic.
-        //
-        // Spreading them evenly (Bresenham) is the obvious way to make the
-        // fraction look like a fraction rather than two long stretches, and it
-        // is worse on every count. Measured against the contiguous run, same
-        // block length, same everything:
-        //
-        //   1.25x  contiguous 1.16, 26 changes, 5% off-refresh
-        //          spread     1.05, 321 changes, 36% off-refresh
-        //   1.50x  contiguous 1.48, 5% off-refresh
-        //          spread     1.39, 199 changes, 43% off-refresh
-        //
-        // Each count change costs, so multiplying the changes by ten multiplies
-        // the cost. The evenness is not worth what it takes.
-        //
-        // Both of those numbers were taken against a schedule that was not
-        // holding still -- hi_blocks was being recomputed thousands of times
-        // per cycle -- with a rendered-frame counter 3.7% high and a block
-        // clock running 7x fast, so every block length was mislabelled by that
-        // factor. They are not evidence any more.
-        //
-        // And contiguous blocks cannot satisfy the criterion at all. The
-        // delivered ratio over N frames is 1 + mean(api), so a window only
-        // reads 2.75 if the count varies inside that window. With blocks of
-        // 1.1 s a window of 0.5 s always sits inside one block and can only
-        // ever read a whole integer. Measured in GTA V: 2.75 asked, 3.00 read
-        // flat across every window, because 24 of the 32 blocks are high and
-        // contiguous -- 26 s of 3x before the first 2x block.
-        //
-        // mfg-peralt.txt selects error diffusion on the frame instead. Note
-        // what it removes: mean(api) is a per-frame average, so scheduling per
-        // frame needs no weighting between the two states' render rates. That
-        // weighting is what the whole sub-2.0x failure came down to, and here
-        // the question does not arise.
-        //
-        // This is not the per-frame scheme the note above rejects. That one
-        // held a decision back and let the held value fight the demand; the
-        // accumulator could not settle the difference without going negative,
-        // and 1.5x came out as 2.0x. Nothing is held here: each frame takes
-        // the whole part of the accumulator and leaves the remainder.
-        // Which scheduler, decided by whether the low state generates.
-        //
-        // Above 2.0x the two states are lo and lo+1 with both generating, and
-        // diffusing per frame is free: 2.75x reads 2.76 with an inter-quartile
-        // range of 0.02, and the rendered rate is 55 either way -- the same 55
-        // that whole-second blocks give while delivering 3.00 instead of 2.75.
-        //
-        // Below 2.0x the low state is count 0, generation off, and entering and
-        // leaving it costs a present. Held, it is harmless: whole blocks at
-        // count 0 read a clean 1.00. Toggled every frame it loses half of them
-        // -- 1.50x measured 0.51. Blocks of 16 ms survive it because they are
-        // contiguous: 16 high blocks in a row is 256 ms of settled state, and
-        // the whole cycle still fits in 0.512 s, just inside the window the
-        // ratio has to hold over. That reads 1.49 with an IQR of 0.07.
-        //
-        // It is not free there. The rendered rate falls from 134 to 83, which
-        // whole-second blocks do not cost. The toggling itself is the price and
-        // no arrangement of the same two states avoids it.
-        // mfg-peralt.txt forces diffusion below 2.0x as well, which is how
-        // the destructive case stays reproducible rather than becoming a
-        // number in a comment.
-        // Bloques en todo el rango, no difusion por frame.
-        //
-        // La difusion cambia la cuenta casi cada frame, y cada cambio dispara
-        // una llamada a slDLSSGSetOptions -- 8985 en una sesion de GTA V --
-        // que hace que el plugin libere recursos y arranque 100 ms de
-        // enfriamiento (0x1800497fd escribe 100.0 en [ctx+0x4488]). Con una
-        // llamada por frame el enfriamiento no termina nunca: 290 de 389
-        // ventanas a 2.25x quedaron con la generacion apagada, ratio 1.34
-        // contra 2.25 pedido. La guia de NVIDIA lo dice sin rodeos: llamarla
-        // en interacciones de UI, no por frame.
-        //
-        // Los bloques cambian la cuenta dos veces por ciclo: con 32 bloques de
-        // 16 ms son unas 4 veces por segundo en vez de cien, y la cuenta de la
-        // API sigue siendo la del byte, que es el invariante que rompio el
-        // intento de mandar el techo constante.
-        //
-        // mfg-peralt.txt sigue eligiendo la difusion, para poder comparar.
-        const bool diffuse = g_peralt && !g_nullalt && !g_blockalt;
-        LONG want;
-        if (diffuse) {
-            static double acc = 0.0;
-            static double last_pf = -1.0;
-            if (per_frame != last_pf) { last_pf = per_frame; acc = 0.0; }
-            acc += per_frame;
-            want = (LONG)acc;               // whole part
-            acc -= (double)want;            // remainder carries to the next
-            if (want < 0) want = 0;
-            if (want > lo + 1) want = lo + 1;
-        } else {
-            const int rel = (sa_pos_block - sa_offset + kBlocks) % kBlocks;
-            want = g_nullalt ? lo + 1
-                 : ((rel < hi_blocks) ? lo + 1 : lo);
-        }
-        sa_pos = (sa_pos + 1) % (kBlocks * g_slowalt_len);
-        // Zero is kept as zero here, not clamped to one. Below 2.0x the API
-        // cannot express the ratio at all -- its smallest generating value is
-        // one, which is 2.0x -- so the only way down is whole blocks with
-        // generation off alternating with blocks at 2.0x. force_into already
-        // writes eOff when the count is zero, so nothing else is needed; what
-        // this cannot do is make the transition free, and at a couple of
-        // seconds per block the question is whether it reads as pulsing.
-        const LONG api = want < 0 ? 0 : (want > 5 ? 5 : want);
+        const rep::Config rc{ g_block_ms, g_blocks, g_latch_reparto,
+                              g_peralt, g_nullalt, g_blockalt };
+        const rep::Entrada re{ per_frame, lo, frac, dt, g_last_dt };
+        CtlLog rlog;
+        const rep::Salida rs = rep::tick(g_rep, rc, re, rlog);
+        const LONG api = (LONG)rs.api;
         if (api != g_force_generated) {
             g_force_generated = api;
             g_opt_pending = 1;
@@ -4705,30 +4123,9 @@ static void fractional_tick(void) {
             if (g_dyn_diag) log_num("slowalt: API count now ", (unsigned)api);
             g_last_change_pres = g_present_count;
         }
-        // Rendered frames and elapsed time, split by which count was in force.
-        // Their ratio is a fact about the pipeline; the average of the counts we
-        // chose is not.
-        {
-            // Once per rendered frame, on the same edge the schedule clock uses.
-            // These ran once per token call -- about seven times a frame -- so
-            // the ratio they feed the correction loop was right only if the
-            // burst length is identical with generation on and off, which is
-            // exactly what turning generation on changes.
-            if (api > lo) { ++g_hi_frames_seen; g_hi_time += g_last_dt; }
-            else          { ++g_lo_frames_seen; g_lo_time += g_last_dt; }
-        }
-        cyc_gen += (double)api;
-        ++cyc_frames;
         // Con la semantica nueva el byte NO lleva la cadencia: la lleva la
         // cuenta de la API, y el byte solo tiene que ir en el mismo escalon.
-        //
-        // Escribirlo aca lo adelantaba: la cadencia decide el bloque en el
-        // frame N y la llamada a la API recien sale en el Present siguiente, asi
-        // que entre medio quedaba un frame con el byte en el valor nuevo y la
-        // reserva en el viejo -- justo el desajuste que la tabla dice que no
-        // tiene transitorio seguro. Lo escribe set_count_now con g_api_aplicada,
-        // pegado a la llamada, que es el unico momento en que los dos numeros
-        // son el mismo.
+        // Lo escribe set_count_now con g_api_aplicada, pegado a la llamada.
         if (!cuenta_es_multiplicador()) set_count_now(api);
         return;
     }
