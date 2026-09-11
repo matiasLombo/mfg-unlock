@@ -130,8 +130,8 @@ static void dump_window(const ClosedWindow &w) {
     if (!g_quiet)
     log_num("measured: rendered fps ", (unsigned)(int)(w.rendered_fps + 0.5));
     {
-        sonda_vtable();
-        const LONG p4168 = sonda_4168();
+        probe_vtable();
+        const LONG p4168 = probe_4168();
         log_num("  [global+0x4168] ", (unsigned)p4168);
         log_num("  techo declarado a la API ", (unsigned)w.api_applied);
         log_num("  g_force_sel ", (unsigned)w.force_sel);
@@ -193,10 +193,10 @@ static void dump_window(const ClosedWindow &w) {
     }
     if (w.cv_n > 2) {
         const double mean = w.cv_sum / (double)w.cv_n;
-        const double var = w.cv_sq / (double)w.cv_n - mean * mean;
-        if (mean > 0.0 && var > 0.0) {
-            double sd = var;
-            for (int it = 0; it < 20; ++it) sd = 0.5 * (sd + var / sd);
+        const double variance = w.cv_sq / (double)w.cv_n - mean * mean;
+        if (mean > 0.0 && variance > 0.0) {
+            double sd = variance;
+            for (int it = 0; it < 20; ++it) sd = 0.5 * (sd + variance / sd);
             log_num("  cadencia: desvio relativo x1000 ", (unsigned)(sd / mean * 1000.0));
         }
     }

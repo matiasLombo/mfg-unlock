@@ -91,7 +91,7 @@ static int g_clamp_latency = 0;        // mfg-clamplatency.txt, 0 = off
 // M4. Sustituir el Streamline de un juego es una decision del usuario, no
 // nuestra: cambia que binarios corre su juego. Con ROJO solo NO alcanza; hace
 // falta un si explicito, y hasta que lo haya el dll no toca nada y lo dice.
-static int g_consentimiento = -1;
+static int g_consent = -1;
 
 // escribe: writer.h; lee: exceptions.h, measurement.h, present.h
 // N generated frames on the next batch. Zero is not expressible here -- the
@@ -699,7 +699,7 @@ static bool g_peralt = false;         // mfg-peralt.txt: diffuse per frame
 //
 // mfg-x6.txt lo vuelve a habilitar para investigarlo. El arreglo de fondo es
 // encontrar por que el bound necesita el +1 y sacarlo.
-static bool g_permitir_x6 = false;
+static bool g_allow_x6 = false;
 
 // escribe: loader.h, proxy.cpp; lee: -
 // La fase de la sesion. Monotona: nunca vuelve para atras.
@@ -1033,7 +1033,7 @@ static double g_token_fps = 0.0;      // and the rate that follows from it
 // mfg-topefijo.txt: vuelve al tope de 5 de antes, para poder MEDIR la linea
 // base sin recompilar. Diagnostico local, nunca el arreglo: sin el archivo el
 // dll se comporta como se envia.
-static bool g_tope_fijo = false;
+static bool g_fixed_cap = false;
 
 // escribe: config_apply.h; lee: loader.h
 // mfg-twocopies.txt: SOLO para el banco. Contiene la ruta de una segunda copia
@@ -1059,7 +1059,7 @@ static bool g_use_debt = true;
 // escribe: loader.h; lee: recorder.h
 // Estado del set, compartido entre el hook de carga, el observador y el panel.
 // -1 sin dato, 0 verde, 1 amarillo, 2 rojo.
-static int g_veredicto_previo = -1;
+static int g_previous_verdict = -1;
 
 // escribe: -; lee: proxy.cpp, writer.h
 static unsigned char g_vp_copy[64];

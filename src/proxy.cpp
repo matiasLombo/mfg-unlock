@@ -120,17 +120,17 @@ static bool flag_file(const wchar_t *name) {
 static char  g_burst[16384];
 static int   g_burst_n = 0;
 static bool  g_burst_on = false;
-static LONG  g_burst_hilo = 0;
+static LONG  g_burst_thread = 0;
 static void  log_flush(void);
 
 static void log_burst_begin(void) {
-    g_burst_hilo = (LONG)GetCurrentThreadId();
+    g_burst_thread = (LONG)GetCurrentThreadId();
     g_burst_on = true;
 }
 static void log_burst_end(void) {
     log_flush();
     g_burst_on = false;
-    g_burst_hilo = 0;
+    g_burst_thread = 0;
 }
 
 static void log_escribir(const char *bytes, int len) {
@@ -153,7 +153,7 @@ static void log_flush(void) {
 static void log_line(const char *text) {
     if (g_log[0] == 0) return;
     // El camino de rafaga arma la linea en el buffer y no toca el disco.
-    if (g_burst_on && (LONG)GetCurrentThreadId() == g_burst_hilo) {
+    if (g_burst_on && (LONG)GetCurrentThreadId() == g_burst_thread) {
         static ULONGLONG tb = 0;
         if (tb == 0) tb = GetTickCount64();
         const unsigned long long ms = GetTickCount64() - tb;
@@ -312,10 +312,10 @@ static volatile LONG g_asked_state = 0;
 // llega antes de que g_log tenga la ruta del dll, flag_file mira una ruta
 // relativa y contesta que no. Un hecho observado -- la carga redirigida -- no
 // tiene ese problema.
-static volatile LONG g_snippet_cargado = 0;
+static volatile LONG g_snippet_loaded = 0;
 
 static bool count_is_multiplier(void) {
-    return g_snippet_cargado != 0;
+    return g_snippet_loaded != 0;
 }
 
 // Que build de snippet quedo cargado, decidido por su CONTENIDO.
@@ -333,7 +333,7 @@ static bool count_is_multiplier(void) {
 // En esa, numFramesToGenerate cuenta los GENERADOS. En las que no lo tienen,
 // cuenta el MULTIPLICADOR. Se mira el modulo real mapeado, asi que da igual si
 // llego por nuestra base, por la cache o por la carpeta del juego.
-static void detectar_semantica(unsigned char *base) {
+static void detect_semantics(unsigned char *base) {
     auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
     auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
@@ -356,17 +356,17 @@ static void detectar_semantica(unsigned char *base) {
             text[i+14] != 0x4C || text[i+15] != 0xC3) continue;
         julio = true;
     }
-    const LONG before = g_snippet_cargado;
-    g_snippet_cargado = julio ? 0 : 1;
-    if (before != g_snippet_cargado)
+    const LONG before = g_snippet_loaded;
+    g_snippet_loaded = julio ? 0 : 1;
+    if (before != g_snippet_loaded)
         log_line(julio ? "semantica: la cuenta son los GENERADOS (snippet con tope 3)"
                        : "semantica: la cuenta es el MULTIPLICADOR");
 }
 
 
 static LONG count_cap(void) {
-    (void)g_permitir_x6;
-    if (g_tope_fijo) return 5;
+    (void)g_allow_x6;
+    if (g_fixed_cap) return 5;
     // Lo que el plugin declara, si se pudo leer; 5 mientras tanto, que es como
     // venia. Ver leer_max_generados: pedir por encima de esto no entrega mas
     // frames, entrega CERO -- NGX rechaza la evaluacion entera.
@@ -377,8 +377,8 @@ static LONG count_cap(void) {
     // Sin mfg-seis.txt esto se comporta como siempre. El 6 es experimental y
     // dejarlo incondicional fue un error: rompio 2X sin que sacar el flag lo
     // devolviera.
-    const LONG techo = (g_six || count_is_multiplier()) ? 6 : 5;
-    return (d >= 1 && d <= techo) ? d : 5;
+    const LONG ceiling = (g_six || count_is_multiplier()) ? 6 : 5;
+    return (d >= 1 && d <= ceiling) ? d : 5;
 }
 static void set_count_now(LONG n);   // definida mas abajo
 
@@ -399,7 +399,7 @@ static void set_count_now(LONG n);   // definida mas abajo
 //
 // Se lee, no se escribe. El RVA es de sl_dlss_g 134273; en otra build el numero
 // que salga no significa nada y por eso se imprime crudo.
-static bool leer_ok(const void *src, void *dst, unsigned n) {
+static bool read_ok(const void *src, void *dst, unsigned n) {
     if (src == nullptr) return false;
     MEMORY_BASIC_INFORMATION mbi{};
     if (VirtualQuery(src, &mbi, sizeof(mbi)) == 0) return false;
@@ -436,13 +436,13 @@ static bool leer_ok(const void *src, void *dst, unsigned n) {
 // Bajarla es la direccion segura: recorrer menos ranuras de las que hay no
 // rompe nada, recorrer una de mas es el crash. Nunca se sube -- si el plugin la
 // quiere mas alta, alla el.
-static void bajar_4168(LONG v) {
+static void lower_4168(LONG v) {
     if (g_dlssg_base == nullptr || v < 1) return;
     unsigned char *pp = nullptr;
-    if (!leer_ok(g_dlssg_base + 0x8f1e8, &pp, sizeof(pp)) || pp == nullptr) return;
+    if (!read_ok(g_dlssg_base + 0x8f1e8, &pp, sizeof(pp)) || pp == nullptr) return;
     LONG *field = (LONG *)(pp + 0x4168);
     LONG actual = 0;
-    if (!leer_ok(field, &actual, 4)) return;
+    if (!read_ok(field, &actual, 4)) return;
     if (actual <= v) return;              // solo baja
     static LONG said = -1;
     if (said != v) {
@@ -472,7 +472,7 @@ static void bajar_4168(LONG v) {
 // desensambla y se ve que recurso niega. Todo lectura: no se engancha nada en
 // la ruta de render, que es lo que rompe el renderizado.
 // Nombre y offset del modulo dueño de una direccion.
-static void decir_modulo(const char *tag, const void *fn) {
+static void say_module(const char *tag, const void *fn) {
     HMODULE m = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
@@ -515,17 +515,17 @@ static void decir_modulo(const char *tag, const void *fn) {
 //
 // Se imprimen los tres candidatos con su modulo. Adivinar cual es ya fallo una
 // vez.
-static void sonda_vtable(void) {
+static void probe_vtable(void) {
     if (g_dlssg_base == nullptr) return;
     static bool said = false;
     if (said) return;
     unsigned char *ctx = nullptr;
-    if (!leer_ok(g_dlssg_base + 0x8f1e8, &ctx, sizeof(ctx)) || ctx == nullptr) return;
+    if (!read_ok(g_dlssg_base + 0x8f1e8, &ctx, sizeof(ctx)) || ctx == nullptr) return;
     said = true;
     log_line("vtable: resolviendo el corte del bucle de generacion");
     LONG sel1 = -1; unsigned char sel2 = 0xFF;
-    leer_ok(ctx + 0x45a8, &sel1, 4);
-    leer_ok(ctx + 0x45e1, &sel2, 1);
+    read_ok(ctx + 0x45a8, &sel1, 4);
+    read_ok(ctx + 0x45e1, &sel2, 1);
     log_num("  [ctx+0x45a8] ", (unsigned)sel1);
     log_num("  [ctx+0x45e1] ", (unsigned)sel2);
 
@@ -537,24 +537,24 @@ static void sonda_vtable(void) {
     };
     for (int c = 0; c < 3; ++c) {
         unsigned char *obj = nullptr;
-        if (!leer_ok(ctx + cands[c].off, &obj, sizeof(obj)) || obj == nullptr) {
+        if (!read_ok(ctx + cands[c].off, &obj, sizeof(obj)) || obj == nullptr) {
             log_line(cands[c].name_w); log_line("    nulo"); continue;
         }
         if (cands[c].doble) {
             unsigned char *o2 = nullptr;
-            if (!leer_ok(obj, &o2, sizeof(o2)) || o2 == nullptr) {
+            if (!read_ok(obj, &o2, sizeof(o2)) || o2 == nullptr) {
                 log_line(cands[c].name_w); log_line("    segundo deref nulo"); continue;
             }
             obj = o2;
         }
         unsigned char *vt = nullptr, *fn = nullptr;
-        if (!leer_ok(obj, &vt, sizeof(vt)) || vt == nullptr) {
+        if (!read_ok(obj, &vt, sizeof(vt)) || vt == nullptr) {
             log_line(cands[c].name_w); log_line("    vtable ilegible"); continue;
         }
-        if (!leer_ok(vt + 0x40, &fn, sizeof(fn)) || fn == nullptr) {
+        if (!read_ok(vt + 0x40, &fn, sizeof(fn)) || fn == nullptr) {
             log_line(cands[c].name_w); log_line("    slot +0x40 ilegible"); continue;
         }
-        decir_modulo(cands[c].name_w, fn);
+        say_module(cands[c].name_w, fn);
     }
 }
 // El techo que el plugin declara para si mismo, leido (no escrito).
@@ -589,9 +589,9 @@ static void sonda_vtable(void) {
 static void read_max_generated(void) {
     if (g_dlssg_base == nullptr) return;
     unsigned char *ctx = nullptr;
-    if (!leer_ok(g_dlssg_base + 0x8f1e8, &ctx, sizeof(ctx)) || ctx == nullptr) return;
+    if (!read_ok(g_dlssg_base + 0x8f1e8, &ctx, sizeof(ctx)) || ctx == nullptr) return;
     LONG v = 0;
-    if (!leer_ok(ctx + 0x45e4, &v, 4)) return;
+    if (!read_ok(ctx + 0x45e4, &v, 4)) return;
     // Rango de cordura: si ahi no hay un numero chico, el offset no es el que
     // creemos y hacerle caso seria peor que ignorarlo.
     if (v < 1 || v > 8) return;
@@ -620,13 +620,13 @@ static void read_max_generated(void) {
     }
 }
 
-static LONG sonda_4168(void) {
+static LONG probe_4168(void) {
     if (g_dlssg_base == nullptr) return -1;
     const unsigned char *pp = nullptr;
-    if (!leer_ok(g_dlssg_base + 0x8f1e8, &pp, sizeof(pp)) || pp == nullptr)
+    if (!read_ok(g_dlssg_base + 0x8f1e8, &pp, sizeof(pp)) || pp == nullptr)
         return -1;
     LONG v = -1;
-    if (!leer_ok(pp + 0x4168, &v, 4)) return -1;
+    if (!read_ok(pp + 0x4168, &v, 4)) return -1;
     return v;
 }
 
@@ -857,8 +857,8 @@ static void settings_load(void) {
         // sube al piso en vez de aceptarlo: el panel ya no ofrece ese valor.
         // Con mfg-sub2.txt el piso baja a 110, que es lo mas chico que el
         // scheduler puede expresar; es para medir con el banco.
-        const int piso = g_sub2 ? 110 : kMinCustom;
-        g_dyn_target = s.target < piso ? piso : s.target;
+        const int floor_v = g_sub2 ? 110 : kMinCustom;
+        g_dyn_target = s.target < floor_v ? floor_v : s.target;
     }
     // Only when something moved, so re-reading twice a second under
     // mfg-watch.txt leaves one marked line per change instead of two per
@@ -922,7 +922,7 @@ static void query_state(void) {
 }
 
 
-static void arm_slinit_temprano(void) {
+static void arm_slinit_early(void) {
     if (g_orig_slinit != nullptr) return;
     HMODULE si = GetModuleHandleW(L"sl.interposer.dll");
     if (si == nullptr) return;

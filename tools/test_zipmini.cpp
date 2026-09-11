@@ -61,9 +61,9 @@ int main(int argc, char **argv) {
     if (fread(zip.data(), 1, (size_t)n, f) != (size_t)n) { printf("lectura corta\n"); return 2; }
     fclose(f);
 
-    std::vector<zipmini::Entrada> objetivo;
-    zipmini::recorrer(zip.data(), zip.size(), [&](const zipmini::Entrada &e) {
-        std::string nom(e.nombre, e.nombre_len);
+    std::vector<zipmini::Entry> objetivo;
+    zipmini::walk(zip.data(), zip.size(), [&](const zipmini::Entry &e) {
+        std::string nom(e.name, e.name_len);
         if (nom.rfind("bin/x64/", 0) == 0 && nom.find('/', 8) == std::string::npos &&
             nom.size() > 4 && nom.compare(nom.size() - 4, 4, ".dll") == 0)
             objetivo.push_back(e);
@@ -72,9 +72,9 @@ int main(int argc, char **argv) {
 
     int fallos = 0;
     for (const auto &e : objetivo) {
-        std::string nom(e.nombre, e.nombre_len);
+        std::string nom(e.name, e.name_len);
         std::vector<unsigned char> out(e.crudo ? e.crudo : 1);
-        const long got = zipmini::extraer(zip.data(), zip.size(), e, out.data(), out.size());
+        const long got = zipmini::extract(zip.data(), zip.size(), e, out.data(), out.size());
         if (got < 0) { printf("  FALLO   %-30s no se pudo extraer\n", nom.c_str() + 8); ++fallos; continue; }
         unsigned char h[32];
         sha::hash(out.data(), (size_t)got, h);

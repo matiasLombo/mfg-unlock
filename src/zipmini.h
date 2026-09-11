@@ -40,33 +40,33 @@ struct BitReader {
         bitcnt -= n;
         return v;
     }
-    void alinear() { bitbuf = 0; bitcnt = 0; }
+    void align() { bitbuf = 0; bitcnt = 0; }
 };
 
 // Arbol de Huffman canonico, en la forma "conteos + simbolos" del RFC.
 struct Huff {
-    uint16_t cuenta[16];
+    uint16_t count[16];
     uint16_t simbolo[288];
 
-    void construir(const uint8_t *largos, int n) {
-        for (int i = 0; i < 16; ++i) cuenta[i] = 0;
-        for (int i = 0; i < n; ++i) ++cuenta[largos[i]];
-        cuenta[0] = 0;
+    void build(const uint8_t *lengths, int n) {
+        for (int i = 0; i < 16; ++i) count[i] = 0;
+        for (int i = 0; i < n; ++i) ++count[lengths[i]];
+        count[0] = 0;
         uint16_t offs[16];
         offs[0] = 0; offs[1] = 0;
-        for (int i = 1; i < 15; ++i) offs[i + 1] = (uint16_t)(offs[i] + cuenta[i]);
+        for (int i = 1; i < 15; ++i) offs[i + 1] = (uint16_t)(offs[i] + count[i]);
         for (int i = 0; i < n; ++i)
-            if (largos[i]) simbolo[offs[largos[i]]++] = (uint16_t)i;
+            if (lengths[i]) simbolo[offs[lengths[i]]++] = (uint16_t)i;
     }
 
-    int decodificar(BitReader &br) const {
-        int codigo = 0, primero = 0, indice = 0;
+    int decode(BitReader &br) const {
+        int codigo = 0, first = 0, indice = 0;
         for (int len = 1; len <= 15; ++len) {
             codigo |= br.bits(1);
-            const int c = cuenta[len];
-            if (codigo - c < primero) return simbolo[indice + (codigo - primero)];
+            const int c = count[len];
+            if (codigo - c < first) return simbolo[indice + (codigo - first)];
             indice += c;
-            primero = (primero + c) << 1;
+            first = (first + c) << 1;
             codigo <<= 1;
         }
         return -1;
@@ -74,7 +74,7 @@ struct Huff {
 };
 
 // Escribe en `salida` hasta `cap` bytes. Devuelve cuantos escribio, o -1.
-inline long inflate(const uint8_t *src, size_t nsrc, uint8_t *salida, size_t cap) {
+inline long inflate(const uint8_t *src, size_t nsrc, uint8_t *output, size_t cap) {
     static const uint16_t klen[29] = {
         3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258 };
     static const uint8_t kelen[29] = {
@@ -88,17 +88,17 @@ inline long inflate(const uint8_t *src, size_t nsrc, uint8_t *salida, size_t cap
     BitReader br(src, nsrc);
     size_t out = 0;
     for (;;) {
-        const int ultimo = br.bits(1);
+        const int last = br.bits(1);
         const int tipo = br.bits(2);
         if (br.malo) return -1;
 
         if (tipo == 0) {                       // sin comprimir
-            br.alinear();
+            br.align();
             if (br.p + 4 > br.fin) return -1;
             const unsigned n = (unsigned)br.p[0] | ((unsigned)br.p[1] << 8);
             br.p += 4;                          // LEN + NLEN
             if (br.p + n > br.fin || out + n > cap) return -1;
-            memcpy(salida + out, br.p, n);
+            memcpy(output + out, br.p, n);
             br.p += n; out += n;
         } else if (tipo == 1 || tipo == 2) {
             Huff hl, hd;
@@ -109,10 +109,10 @@ inline long inflate(const uint8_t *src, size_t nsrc, uint8_t *salida, size_t cap
                 for (; i < 256; ++i) l[i] = 9;
                 for (; i < 280; ++i) l[i] = 7;
                 for (; i < 288; ++i) l[i] = 8;
-                hl.construir(l, 288);
+                hl.build(l, 288);
                 uint8_t d[30];
                 for (i = 0; i < 30; ++i) d[i] = 5;
-                hd.construir(d, 30);
+                hd.build(d, 30);
             } else {                            // arboles dinamicos
                 static const uint8_t orden[19] = {
                     16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15 };
@@ -123,11 +123,11 @@ inline long inflate(const uint8_t *src, size_t nsrc, uint8_t *salida, size_t cap
                 uint8_t lc[19];
                 for (int i = 0; i < 19; ++i) lc[i] = 0;
                 for (int i = 0; i < hclen; ++i) lc[orden[i]] = (uint8_t)br.bits(3);
-                Huff hc; hc.construir(lc, 19);
+                Huff hc; hc.build(lc, 19);
                 uint8_t l[288 + 30];
                 int n = 0;
                 while (n < hlit + hdist) {
-                    const int s = hc.decodificar(br);
+                    const int s = hc.decode(br);
                     if (s < 0 || br.malo) return -1;
                     if (s < 16) { l[n++] = (uint8_t)s; continue; }
                     int rep = 0; uint8_t v = 0;
@@ -142,47 +142,47 @@ inline long inflate(const uint8_t *src, size_t nsrc, uint8_t *salida, size_t cap
                     if (n + rep > hlit + hdist) return -1;
                     while (rep-- > 0) l[n++] = v;
                 }
-                hl.construir(l, hlit);
-                hd.construir(l + hlit, hdist);
+                hl.build(l, hlit);
+                hd.build(l + hlit, hdist);
             }
 
             for (;;) {
-                const int s = hl.decodificar(br);
+                const int s = hl.decode(br);
                 if (s < 0 || br.malo) return -1;
                 if (s < 256) {
                     if (out >= cap) return -1;
-                    salida[out++] = (uint8_t)s;
+                    output[out++] = (uint8_t)s;
                 } else if (s == 256) {
                     break;
                 } else {
                     const int i = s - 257;
                     if (i >= 29) return -1;
-                    const int largo = klen[i] + br.bits(kelen[i]);
-                    const int ds = hd.decodificar(br);
+                    const int length = klen[i] + br.bits(kelen[i]);
+                    const int ds = hd.decode(br);
                     if (ds < 0 || ds >= 30 || br.malo) return -1;
                     const size_t dist = (size_t)kdist[ds] + (size_t)br.bits(kedist[ds]);
-                    if (dist > out || out + (size_t)largo > cap) return -1;
+                    if (dist > out || out + (size_t)length > cap) return -1;
                     // Se copia byte a byte a proposito: los tramos solapados
                     // (dist < largo) son legales en deflate y memcpy los rompe.
                     size_t desde = out - dist;
-                    for (int k = 0; k < largo; ++k) salida[out++] = salida[desde++];
+                    for (int k = 0; k < length; ++k) output[out++] = output[desde++];
                 }
             }
         } else {
             return -1;                          // tipo 3 = reservado
         }
-        if (ultimo) break;
+        if (last) break;
     }
     return (long)out;
 }
 
 // ---------------------------------------------------------------- zip
 
-struct Entrada {
-    const char *nombre;     // apunta adentro del buffer del zip
-    uint16_t nombre_len;
+struct Entry {
+    const char *name;     // apunta adentro del buffer del zip
+    uint16_t name_len;
     uint16_t metodo;
-    uint32_t comprimido;
+    uint32_t compressed;
     uint32_t crudo;
     uint32_t offset_local;  // al encabezado local, no a los datos
 };
@@ -193,10 +193,10 @@ inline uint32_t le32(const uint8_t *p) {
 }
 
 // Busca el End Of Central Directory, que esta al final salvo comentario.
-inline const uint8_t *buscar_eocd(const uint8_t *d, size_t n) {
+inline const uint8_t *find_eocd(const uint8_t *d, size_t n) {
     if (n < 22) return nullptr;
-    const size_t tope = n > 66000 ? 66000 : n;
-    for (size_t i = 22; i <= tope; ++i) {
+    const size_t cap = n > 66000 ? 66000 : n;
+    for (size_t i = 22; i <= cap; ++i) {
         const uint8_t *p = d + n - i;
         if (le32(p) == 0x06054b50) return p;
     }
@@ -205,36 +205,36 @@ inline const uint8_t *buscar_eocd(const uint8_t *d, size_t n) {
 
 // Recorre el directorio central llamando a `fn(entrada)`. Devuelve cuantas vio.
 template <typename F>
-inline int recorrer(const uint8_t *d, size_t n, F fn) {
-    const uint8_t *eocd = buscar_eocd(d, n);
+inline int walk(const uint8_t *d, size_t n, F fn) {
+    const uint8_t *eocd = find_eocd(d, n);
     if (eocd == nullptr) return -1;
     const uint32_t total = le16(eocd + 10);
     const uint32_t off = le32(eocd + 16);
     if (off >= n) return -1;
     const uint8_t *p = d + off;
-    int vistas = 0;
+    int seen = 0;
     for (uint32_t i = 0; i < total; ++i) {
         if (p + 46 > d + n || le32(p) != 0x02014b50) break;
-        Entrada e;
+        Entry e;
         e.metodo = le16(p + 10);
-        e.comprimido = le32(p + 20);
+        e.compressed = le32(p + 20);
         e.crudo = le32(p + 24);
-        e.nombre_len = le16(p + 28);
+        e.name_len = le16(p + 28);
         const uint16_t extra = le16(p + 30);
         const uint16_t coment = le16(p + 32);
         e.offset_local = le32(p + 42);
-        e.nombre = (const char *)(p + 46);
-        if ((const uint8_t *)e.nombre + e.nombre_len > d + n) break;
+        e.name = (const char *)(p + 46);
+        if ((const uint8_t *)e.name + e.name_len > d + n) break;
         fn(e);
-        ++vistas;
-        p += 46 + e.nombre_len + extra + coment;
+        ++seen;
+        p += 46 + e.name_len + extra + coment;
     }
-    return vistas;
+    return seen;
 }
 
 // Extrae una entrada al buffer dado. Devuelve bytes escritos, o -1.
-inline long extraer(const uint8_t *d, size_t n, const Entrada &e,
-                    uint8_t *salida, size_t cap) {
+inline long extract(const uint8_t *d, size_t n, const Entry &e,
+                    uint8_t *output, size_t cap) {
     if (e.offset_local + 30 > n) return -1;
     const uint8_t *lh = d + e.offset_local;
     if (le32(lh) != 0x04034b50) return -1;
@@ -242,15 +242,15 @@ inline long extraer(const uint8_t *d, size_t n, const Entrada &e,
     const uint16_t nlen = le16(lh + 26);
     const uint16_t elen = le16(lh + 28);
     const uint8_t *datos = lh + 30 + nlen + elen;
-    if (datos + e.comprimido > d + n) return -1;
+    if (datos + e.compressed > d + n) return -1;
     if (e.crudo > cap) return -1;
     if (e.metodo == 0) {
-        if (e.comprimido != e.crudo) return -1;
-        memcpy(salida, datos, e.crudo);
+        if (e.compressed != e.crudo) return -1;
+        memcpy(output, datos, e.crudo);
         return (long)e.crudo;
     }
     if (e.metodo != 8) return -1;
-    const long got = inflate(datos, e.comprimido, salida, cap);
+    const long got = inflate(datos, e.compressed, output, cap);
     if (got < 0 || (uint32_t)got != e.crudo) return -1;
     return got;
 }

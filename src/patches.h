@@ -877,7 +877,7 @@ static void arm_multiplier_override(unsigned char *base) {
     }
     log_line("  slGetFeatureFunction hooked");
 
-    arm_slinit_temprano();
+    arm_slinit_early();
     if (false) {
         void *fi = (void *)GetProcAddress((HMODULE)base, "slInit");
         if (fi == nullptr) {

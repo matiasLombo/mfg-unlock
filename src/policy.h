@@ -90,15 +90,15 @@ inline ForceOutput decide_force(const ForceInput &e) {
         // declara el techo del ciclo; con la de multiplicador la cuenta ES lo
         // que se entrega y no se sube.
         if (!e.multiplier) {
-            const long techo = e.cycle_ceiling;
-            if (techo > to_write && techo <= (e.six ? 6 : 5)) to_write = techo;
+            const long ceiling = e.cycle_ceiling;
+            if (ceiling > to_write && ceiling <= (e.six ? 6 : 5)) to_write = ceiling;
         }
         if (e.ceilfirst) {
-            const long techo = e.cycle_ceiling;
-            if (!e.interp_on && techo > to_write &&
-                techo <= ((e.six || e.multiplier) ? 6 : 5)) {
-                to_write = techo;
-                s.a1_declared = true; s.a1_ceiling = techo;
+            const long ceiling = e.cycle_ceiling;
+            if (!e.interp_on && ceiling > to_write &&
+                ceiling <= ((e.six || e.multiplier) ? 6 : 5)) {
+                to_write = ceiling;
+                s.a1_declared = true; s.a1_ceiling = ceiling;
             }
         }
         // Freno: sin el parche de la cuenta se espeja lo que pide el juego,

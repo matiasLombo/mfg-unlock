@@ -28,7 +28,7 @@ static const int kPrefFlags = 88;
 // bloqueo del cargador es un riesgo conocido, asi que se paga unicamente
 // cuando alguien pidio el forzado; sin la bandera, nada de esto pasa y los
 // juegos que ya andan no cambian.
-static void arm_slinit_temprano(void);
+static void arm_slinit_early(void);
 
 
 static unsigned hk_slInit(void *pref, unsigned long long sdk) {
@@ -64,8 +64,8 @@ static unsigned hk_slInit(void *pref, unsigned long long sdk) {
         if (g_pathsplugins) {
             static wchar_t buf[MAX_PATH];
             static const wchar_t *list[1];
-            static bool armado = false;
-            if (!armado) {
+            static bool built = false;
+            if (!built) {
                 const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH - 40);
                 if (n > 0 && n < MAX_PATH - 40) {
                     int k = (int)n;
@@ -73,10 +73,10 @@ static unsigned hk_slInit(void *pref, unsigned long long sdk) {
                     for (int i = 0; tail[i] != 0; ++i) buf[k++] = tail[i];
                     buf[k] = 0;
                     list[0] = buf;
-                    armado = true;
+                    built = true;
                 }
             }
-            if (armado) {
+            if (built) {
                 *(const wchar_t ***)(p + 40) = list;
                 *(unsigned *)(p + 48) = 1;
                 *(unsigned long long *)(p + kPrefFlags) =
@@ -114,10 +114,10 @@ static unsigned hk_slInit(void *pref, unsigned long long sdk) {
             const LONG before = *nivel;
             log_num("  logLevel en +36 ", (unsigned)before);
             if (before >= 0 && before <= 3 && g_sllog_on) {
-                DWORD viejo = 0;
-                if (VirtualProtect(nivel, 4, PAGE_READWRITE, &viejo)) {
+                DWORD old = 0;
+                if (VirtualProtect(nivel, 4, PAGE_READWRITE, &old)) {
                     *nivel = 2;                 // eVerbose
-                    VirtualProtect(nivel, 4, viejo, &viejo);
+                    VirtualProtect(nivel, 4, old, &old);
                     log_line("  logLevel forzado a verbose (mfg-sllog.txt)");
                 }
             }
@@ -133,10 +133,10 @@ static unsigned hk_slInit(void *pref, unsigned long long sdk) {
             log_line(buf);
         }
         if (g_ota) {
-            DWORD viejo = 0;
-            if (VirtualProtect(p + kPrefFlags, 8, PAGE_READWRITE, &viejo)) {
+            DWORD old = 0;
+            if (VirtualProtect(p + kPrefFlags, 8, PAGE_READWRITE, &old)) {
                 *(unsigned long long *)(p + kPrefFlags) = f | (1ull << 3) | (1ull << 6);
-                VirtualProtect(p + kPrefFlags, 8, viejo, &viejo);
+                VirtualProtect(p + kPrefFlags, 8, old, &old);
                 log_num("  OTA forzado, banderas ahora ",
                         (unsigned)*(unsigned long long *)(p + kPrefFlags));
             } else {

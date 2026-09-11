@@ -29,8 +29,8 @@ static bool g_native_pacer_found = false;  // sticky: one plugin with sites is e
 // that makes another copy provably redundant.
 static bool g_ota_mapped = false;
 static int g_outputs_patched = 0;
-static bool g_veredicto_leido = false;
-static bool g_ya_sustituimos = false;                         // M3
+static bool g_verdict_read = false;
+static bool g_already_substituted = false;                         // M3
 
 // The snippet does not always arrive under the name nvngx_dlssg.dll. NGX keeps
 // OTA-updated snippets under ProgramData as <arch>_<appid>.bin, and that copy is
@@ -98,7 +98,7 @@ static int g_copies_n = 0;
 static unsigned long long g_first_copy_ms = 0;
 static bool g_verdict_written = false;
 
-static void copy_register(const unsigned char *base, size_t size, unsigned minor,
+static void register_copy(const unsigned char *base, size_t size, unsigned minor,
                             int count_sites, int pacer_sites) {
     if (g_copies_n >= 8) return;
     PluginCopy &c = g_copies[g_copies_n++];
@@ -406,7 +406,7 @@ static void emit_verdict_if_due(void) {
     //
     // Guardando solo el diagnostico sin sustituir, el ROJO queda pegado y la
     // sustitucion se sigue aplicando en cada arranque.
-    if (g_ya_sustituimos) {
+    if (g_already_substituted) {
         log_line("  (hubo sustitucion: no se pisa el diagnostico guardado)");
         return;
     }
@@ -446,16 +446,16 @@ static void emit_verdict_if_due(void) {
     for (const char *q = l3; *q != 0; ++q) txt[t++] = *q;
     txt[t++] = (char)('0' + (with_site > 9 ? 9 : with_site));
     txt[t++] = '\n';
-    if (g_consentimiento >= 0) {
-        const char *l4 = g_consentimiento == 1 ? "consentimiento=si\n"
+    if (g_consent >= 0) {
+        const char *l4 = g_consent == 1 ? "consentimiento=si\n"
                                                : "consentimiento=no\n";
         for (const char *q = l4; *q != 0; ++q) txt[t++] = *q;
     }
     DWORD esc = 0;
     WriteFile(h, txt, (DWORD)t, &esc, nullptr);
     CloseHandle(h);
-    if (g_consentimiento >= 0)
-        log_num("  consentimiento conservado (1 = si) ", (unsigned)g_consentimiento);
+    if (g_consent >= 0)
+        log_num("  consentimiento conservado (1 = si) ", (unsigned)g_consent);
     log_line("  estado guardado en LOCALAPPDATA\\mfg-unlock");
 }
 // ---------------------------------------------------------------------------
@@ -590,7 +590,7 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
                     version_supported(rr, &major_c, &minor_c);
                 }
             }
-            copy_register(reinterpret_cast<const unsigned char *>(d->DllBase),
+            register_copy(reinterpret_cast<const unsigned char *>(d->DllBase),
                             (size_t)d->SizeOfImage, minor_c, g_wic_sites_last, n);
             g_wic_sites_last = -1;
         }
@@ -658,7 +658,7 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
     if (is_ota) g_ota_mapped = true;
     const bool shadow = !is_ota && g_ota_mapped;
     const bool live = !shadow;
-    detectar_semantica(reinterpret_cast<unsigned char *>(d->DllBase));
+    detect_semantics(reinterpret_cast<unsigned char *>(d->DllBase));
     const int n = patch_gates(reinterpret_cast<unsigned char *>(d->DllBase));
     if (n > 0) ++g_gates;
     log_num("  gates rewritten: ", (unsigned)n);
@@ -1265,8 +1265,8 @@ static void save_consent(int si) {
 }
 
 static void read_previous_verdict(void) {
-    if (g_veredicto_leido) return;
-    g_veredicto_leido = true;
+    if (g_verdict_read) return;
+    g_verdict_read = true;
     wchar_t path[MAX_PATH];
     if (!state_path(path, MAX_PATH)) return;
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -1279,15 +1279,15 @@ static void read_previous_verdict(void) {
     if (!ok || read_n == 0) return;
     b[read_n] = 0;
     for (DWORD i = 0; i + 4 < read_n; ++i) {
-        if (b[i] == 'R' && b[i+1] == 'O' && b[i+2] == 'J' && b[i+3] == 'O') { g_veredicto_previo = 2; break; }
-        if (b[i] == 'V' && b[i+1] == 'E' && b[i+2] == 'R' && b[i+3] == 'D') { g_veredicto_previo = 0; break; }
-        if (b[i] == 'A' && b[i+1] == 'M' && b[i+2] == 'A' && b[i+3] == 'R') { g_veredicto_previo = 1; break; }
+        if (b[i] == 'R' && b[i+1] == 'O' && b[i+2] == 'J' && b[i+3] == 'O') { g_previous_verdict = 2; break; }
+        if (b[i] == 'V' && b[i+1] == 'E' && b[i+2] == 'R' && b[i+3] == 'D') { g_previous_verdict = 0; break; }
+        if (b[i] == 'A' && b[i+1] == 'M' && b[i+2] == 'A' && b[i+3] == 'R') { g_previous_verdict = 1; break; }
     }
     for (DWORD i = 0; i + 16 < read_n; ++i) {
         if (b[i]=='c' && b[i+1]=='o' && b[i+2]=='n' && b[i+3]=='s' && b[i+4]=='e') {
             for (DWORD j = i; j + 2 < read_n; ++j) {
                 if (b[j] == '=') {
-                    g_consentimiento = (b[j+1] == 's') ? 1 : 0;
+                    g_consent = (b[j+1] == 's') ? 1 : 0;
                     break;
                 }
             }
@@ -1569,7 +1569,7 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR path, PULONG chars, PUNICODE_STRING name,
         if (path_in_our_sdk(name_w, 12, own)) {
             log_path("base: pedido  ", g_requested_path);
             log_path("  se carga el nuestro: ", own);
-            g_ya_sustituimos = true;
+            g_already_substituted = true;
             const NTSTATUS stb = load_own(own, base);
             if (stb >= 0) return stb;
             log_num("  no cargo, status ", (unsigned)stb);
@@ -1579,7 +1579,7 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR path, PULONG chars, PUNICODE_STRING name,
     }
 
     read_previous_verdict();
-    if (g_veredicto_previo == 2 && g_consentimiento != 1) {
+    if (g_previous_verdict == 2 && g_consent != 1) {
         // ROJO pero sin un si explicito: no se toca nada. Cambiar que binarios
         // corre el juego de alguien no es una decision que tome el dll solo.
         static bool warned = false;
@@ -1591,14 +1591,14 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR path, PULONG chars, PUNICODE_STRING name,
         }
         return g_orig_ldrload(path, chars, name, base);
     }
-    if (g_veredicto_previo != 2) {
+    if (g_previous_verdict != 2) {
         // Sin un ROJO de la corrida anterior no se sustituye NADA. Un juego que
         // funciona nunca llega a esta rama, que es la salvaguarda que faltaba.
         static bool said = false;
         if (!said) {
             said = true;
             log_num("set: sin veredicto ROJO previo, no se sustituye. veredicto=",
-                    (unsigned long long)(unsigned)(g_veredicto_previo + 1));
+                    (unsigned long long)(unsigned)(g_previous_verdict + 1));
         }
         return g_orig_ldrload(path, chars, name, base);
     }
@@ -1620,7 +1620,7 @@ static NTSTATUS NTAPI hk_ldrload(PWSTR path, PULONG chars, PUNICODE_STRING name,
     else           log_num("set: se sustituye un modulo, pedido 2.", (unsigned long long)minor_v);
     log_path("  pedido:  ", g_requested_path);
     log_path("  cargado: ", alt);
-    g_ya_sustituimos = true;
+    g_already_substituted = true;
     const NTSTATUS st = load_own(alt, base);
     if (st < 0) {
         log_num("  no cargo, status ", (unsigned)st);

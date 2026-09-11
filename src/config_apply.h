@@ -49,8 +49,8 @@ static void apply_config(void) {
                     CloseHandle(ch);
                     if (ok && got > 0) {
                         cbuf[got] = 0;
-                        const int vistas = config::parse_config(cbuf, (unsigned)got, g_cfg);
-                        log_num("config: claves leidas de mfg-config.txt ", (unsigned)vistas);
+                        const int seen = config::parse_config(cbuf, (unsigned)got, g_cfg);
+                        log_num("config: claves leidas de mfg-config.txt ", (unsigned)seen);
                     }
                 }
             }
@@ -68,7 +68,7 @@ static void apply_config(void) {
             // Con la bandera puesta hay que llegar antes que la llamada del
             // juego, y el armado del hilo del panel llega tarde en los juegos
             // que importan el interposer estaticamente.
-            if (g_ota) arm_slinit_temprano();
+            if (g_ota) arm_slinit_early();
             g_slowalt = a.slowalt;
             g_quiet = a.quiet;
             g_nullalt = a.nullalt;
@@ -114,10 +114,10 @@ static void apply_config(void) {
                 g_mfcmax = 5;
                 log_line("MultiFrameCountMax: se intentara subir a 5 (mfg-mfcmax.txt)");
             }
-            g_tope_fijo = a.topefijo;
-            if (g_tope_fijo) log_line("tope fijo en 5 (mfg-topefijo.txt): es la LINEA BASE, crashea");
-            g_permitir_x6 = a.x6;
-            if (g_permitir_x6) log_line("6X habilitado a mano (mfg-x6.txt): crashea en Halo");
+            g_fixed_cap = a.topefijo;
+            if (g_fixed_cap) log_line("tope fijo en 5 (mfg-topefijo.txt): es la LINEA BASE, crashea");
+            g_allow_x6 = a.x6;
+            if (g_allow_x6) log_line("6X habilitado a mano (mfg-x6.txt): crashea en Halo");
             g_dyn_diag = a.dyndiag;
             if (g_dyn_diag) log_line("dynamic: diagnostico por cambio de ratio ENCENDIDO (mfg-dyndiag.txt)");
             if (!a.latch) { g_latch_schedule = false; log_line("fractional: reparto NO latcheado (mfg-nolatch.txt)"); }

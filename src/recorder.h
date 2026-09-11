@@ -427,14 +427,14 @@ static DWORD WINAPI recorder(LPVOID) {
         // Solo se pregunta si el diagnostico guardado es ROJO y no hay respuesta
         // todavia. Un juego VERDE o AMARILLO no ve nada de esto.
         read_previous_verdict();
-        g_pide_permiso = (g_veredicto_previo == 2 && g_consentimiento == -1) ? 1 : 0;
+        g_pide_permiso = (g_previous_verdict == 2 && g_consent == -1) ? 1 : 0;
         if (g_pide_permiso) {
             const bool si = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
             const bool no = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
             if (si || no) {
-                g_consentimiento = si ? 1 : 0;
+                g_consent = si ? 1 : 0;
                 g_pide_permiso = 0;
-                save_consent(g_consentimiento);
+                save_consent(g_consent);
                 log_line(si ? "permiso: el usuario acepto el reemplazo del Streamline"
                             : "permiso: el usuario dijo que no; no se sustituye nada");
                 log_line("  (toma efecto en el proximo arranque del juego)");

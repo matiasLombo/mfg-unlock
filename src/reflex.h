@@ -64,8 +64,8 @@ static void ctrl_feed_dt(double dt) {
     if (prev2 > 0.0 && rn > 1) {
         const double mean = rsum / (double)rn;
         const bool lejos2 = dt < mean * 0.75 || dt > mean * 1.33;
-        const bool igual2 = dt > prev2 * 0.88 && dt < prev2 * 1.12;
-        if (lejos2 && igual2) {
+        const bool similar2 = dt > prev2 * 0.88 && dt < prev2 * 1.12;
+        if (lejos2 && similar2) {
             ring[0] = dt; ri = 1; rn = 1; rsum = dt;
             g_ctrl_fps = 1.0 / dt;
             g_ctrl_n = 1;         // y con una muestra no se decide nada

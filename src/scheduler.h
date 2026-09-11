@@ -120,10 +120,10 @@ inline Output tick(State &e, const Config &c, const Input &in, Log &log) {
     }
     bool request_changed = false;
     if (in.frac != e.last_req) {
-        const double salto = in.frac > e.last_req ? in.frac - e.last_req : e.last_req - in.frac;
+        const double jump = in.frac > e.last_req ? in.frac - e.last_req : e.last_req - in.frac;
         e.last_req = in.frac;
-        request_changed = e.hi_blocks >= 0 && salto > 0.5;
-        if (e.hi_blocks >= 0 && salto <= 0.5 && !c.latch) e.hi_blocks = -2;
+        request_changed = e.hi_blocks >= 0 && jump > 0.5;
+        if (e.hi_blocks >= 0 && jump <= 0.5 && !c.latch) e.hi_blocks = -2;
     }
     if (request_changed) e.sa_clock = 0.0;
     if (cycle_wrapped || request_changed || e.hi_blocks < 0) {

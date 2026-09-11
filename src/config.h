@@ -128,8 +128,8 @@ inline const int kFlagsN = (int)(sizeof(kFlags) / sizeof(kFlags[0]));
 
 // `existe(archivo)` dice si el archivo esta al lado de la dll. En el dll es
 // GetFileAttributesW; en el test, lo que el caso diga.
-template <class Existe>
-inline void read_flags(Settings &a, Existe exists) {
+template <class Exists>
+inline void read_flags(Settings &a, Exists exists) {
     for (int i = 0; i < kFlagsN; ++i)
         if (exists(kFlags[i].file)) a.*(kFlags[i].field) = !(a.*(kFlags[i].field));
 }
@@ -168,8 +168,8 @@ inline int first_digit(const char *b, unsigned n, char lo, char hi) {
 
 // Cada numerico con el rango que DllMain le aplicaba. `leer(archivo, buf,
 // cap)` devuelve cuantos bytes trajo, 0 si no existe.
-template <class Leer>
-inline void read_numerics(Settings &a, Leer read) {
+template <class Reader>
+inline void read_numerics(Settings &a, Reader read) {
     char b[48]; unsigned n;
     if ((n = read(L"mfg-blockms.txt", b, 15)) > 0) {
         const int v = leading_int(b, n);
