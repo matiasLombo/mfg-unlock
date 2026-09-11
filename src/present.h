@@ -676,11 +676,20 @@ static void hook_swapchain_present(void *sc) {
     // Perder el hook cuesta instrumentacion, no funcionalidad: las
     // presentaciones se cuentan con PresentCount del runtime, que es el
     // instrumento honesto de todas formas ([[measure-with-the-runtime-counter]]).
+    //
+    // Y "no apilarse" es NO escribir el slot, igual que con el overlay: la
+    // instancia se adopta igual (g_swapchain, frame latency), porque de eso
+    // cuelga PresentCount y el HUD. La primera version hacia return aca y
+    // en GTA V con ReShade.asi en el slot el contador del HUD quedaba vacio
+    // (2026-09-11: ventanas sin "runtime PresentCount", el usuario lo vio
+    // como "el contador no andaba"). El mismo defecto que ya se habia
+    // arreglado en la rama del overlay, en la otra rama.
     {
         HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
         HMODULE owner = slot_owner;
         if (owner != nullptr && dxgi != nullptr && owner != dxgi && !host_proxy &&
             vt[8] != (void *)&hk_dxgi_present) {
+            no_hook = true;
             static bool said = false;
             if (!said) {
                 said = true;
@@ -699,8 +708,8 @@ static void hook_swapchain_present(void *sc) {
                 log_line(short_name);
                 log_line("  (apilarse forma un lazo entre los dos hooks:");
                 log_line("   medido en Cyberpunk desde Steam, profundidad 4244)");
+                log_line("  la instancia se adopta igual: PresentCount del runtime y HUD");
             }
-            return;
         }
     }
     DWORD prot = 0;
