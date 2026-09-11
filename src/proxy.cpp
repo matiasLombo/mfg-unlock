@@ -2093,9 +2093,19 @@ static unsigned hk_slGetFeatureFunction(unsigned feature, const char *name, void
     // GTA V se engancho a slDLSSGetOptimalSettings, cuyo puntero no cae en
     // ninguna copia de sl.dlss_g porque es de otro modulo. El log lo dijo solo:
     // "el puntero NO cae en ninguna de las copias registradas".
+    // Nombres EXACTOS, no un prefijo.
+    //
+    // "slDLSSG" tampoco alcanza: slDLSSGetOptimalSettings es slDLSS +
+    // GetOptimalSettings, asi que comparte los primeros siete caracteres con
+    // slDLSSG*. Esa funcion es de la super resolucion y vive en sl.dlss.dll, asi
+    // que su puntero jamas cae en una copia de sl.dlss_g -- y con el filtro por
+    // prefijo la Capa 0 se enganchaba a ella y concluia que no sabia cual copia
+    // ejecuta. Peor: la fase creia el dato y ponia el mod en PASIVO en GTA V,
+    // que andaba. Un PASIVO basado en un instrumento roto es peor que no tener
+    // PASIVO.
     if (r == 0 && name != nullptr && fn != nullptr &&
-        name[0] == 's' && name[1] == 'l' && name[2] == 'D' && name[3] == 'L' &&
-        name[4] == 'S' && name[5] == 'S' && name[6] == 'G')
+        (strcmp(name, "slDLSSGSetOptions") == 0 ||
+         strcmp(name, "slDLSSGGetState") == 0))
         copia_que_ejecuta(fn, name);
     if (r == 0 && name != nullptr && fn != nullptr &&
         strcmp(name, "slDLSSGGetState") == 0 && g_orig_getstate == nullptr) {
@@ -8327,22 +8337,32 @@ static void copia_que_ejecuta(const void *fn, const char *nombre) {
             }
         }
     }
-    dicho = true;
-    g_copia_ejecuta = cual;
-    g_ejecuta_resuelto = true;
+    // Solo se cierra el diagnostico si el puntero CAYO. Si no cayo se deja
+    // constancia y se vuelve a intentar con la funcion siguiente: latchear un
+    // fallo es quedarse con el peor dato de la corrida.
+    if (cual >= 0) {
+        dicho = true;
+        g_copia_ejecuta = cual;
+        g_ejecuta_resuelto = true;
+    }
     // La fase se decide con este dato, y no siempre llega antes del primer
     // frame token: en GTA V el token fue a los 34 s y esto a los 38. Asumir un
     // orden que el juego no garantiza es la misma clase de error que decidir la
     // copia viva por orden de mapeo. Se re-evalua ahora que el dato existe.
-    g_fase = (LONG)Fase::ARMADO;
-    evaluar_invariantes();
+    if (g_ejecuta_resuelto) {
+        g_fase = (LONG)Fase::ARMADO;
+        evaluar_invariantes();
+    }
     log_line("--- CAPA 0: que copia de sl.dlss_g ejecuta ---");
     log_line(nombre);
     if (cual < 0) {
-        log_num("  el puntero NO cae en ninguna de las copias registradas; van ",
-                (unsigned)g_copias_n);
-        log_line("  (o el interposer resolvio a otro modulo, o la copia mapeo");
-        log_line("   despues de registrarse: las dos son un invariante roto)");
+        static int avisos = 0;
+        if (avisos < 4) {
+            ++avisos;
+            log_num("  el puntero NO cae en ninguna de las copias registradas; van ",
+                    (unsigned)g_copias_n);
+            log_line("  (se reintenta con la proxima funcion de DLSS-G)");
+        }
         return;
     }
     for (int i = 0; i < g_copias_n; ++i) {
