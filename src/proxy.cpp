@@ -78,6 +78,27 @@ bool g_dynamic_known = false;
 bool g_ov_enabled = true;
 static void log_line(const char *text);
 static void log_num(const char *label, unsigned long long v);
+// Capa 0: cual copia EJECUTA, atada por el puntero que devuelve el interposer.
+static void copia_que_ejecuta(const void *fn, const char *nombre);
+
+// La fase de la sesion. Monotona: nunca vuelve para atras.
+//
+//   ARMADO      todavia no se pudieron evaluar los invariantes
+//   VERIFICADO  se evaluaron y dieron bien (paso inmediato a ACTIVO)
+//   ACTIVO      se permite parchear y reescribir opciones
+//   PASIVO      la topologia no cumple: NO se toca nada y el log dice por que
+//
+// Existe para invertir el modo de falla. Hasta ahora un juego con una topologia
+// que no habiamos visto producia un crash y una regla reactiva nueva; con esto
+// produce un bloque de diagnostico y nada mas. Es la pieza que hace que "romperse
+// por juego" deje de ser una opcion del codigo.
+enum class Fase { ARMADO, VERIFICADO, ACTIVO, PASIVO };
+static volatile LONG g_fase = (LONG)Fase::ARMADO;
+static inline bool fase_activa(void) { return g_fase == (LONG)Fase::ACTIVO; }
+static inline bool fase_pasiva(void) { return g_fase == (LONG)Fase::PASIVO; }
+static void evaluar_invariantes(void);
+extern int g_copia_ejecuta;
+extern bool g_ejecuta_resuelto;
 
 // ------------------------------------------------------------------- log ---
 //
@@ -1028,6 +1049,19 @@ static bool juego_apago_la_generacion(void) {
 static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     *savedMode = *(LONG *)(p + 32);
     *savedCount = *(LONG *)(p + 36);
+    // En PASIVO no se reescribe nada: el juego se queda con lo que pidio.
+    //
+    // Es el unico punto por el que pasa toda escritura de opciones, asi que
+    // gatearlo aca alcanza para que un juego con topologia rota corra como si
+    // el mod no estuviera, en vez de crashear. Ver evaluar_invariantes.
+    if (fase_pasiva()) {
+        static bool dicho = false;
+        if (!dicho) {
+            dicho = true;
+            log_line("PASIVO: no se reescriben las opciones del juego");
+        }
+        return;
+    }
     if (juego_apago_la_generacion()) {
         static LONG dicho = -1;
         if (dicho != g_force_sel) {
@@ -1576,6 +1610,43 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
 // hook and only on the thread the game itself used.
 static void apply_override_now(void) {
     if (g_opt_pending == 0) return;
+    // Nunca dos cambios de cuenta mas juntos que el enfriamiento del plugin.
+    //
+    // Cada slDLSSGSetOptions que cambia la cuenta hace que el plugin libere sus
+    // recursos y rearme, con 100 ms en los que no interpola (0x1800497fd escribe
+    // 100.0 en [ctx+0x4488]). Ese numero estaba documentado en este archivo hace
+    // rato y NO se hacia cumplir en ningun lado.
+    //
+    // Medido en Cyberpunk, DYNAMIC, los 94 ms antes de un 0xC0000005:
+    //
+    //   [78735ms] queda 4   override applied now
+    //   [78750ms] queda 2   override applied now     <- 15 ms despues
+    //   [78829ms] queda 4   override applied now     <- 79 ms despues
+    //   [78860ms] EXCEPCION  sl.dlss_g, lectura en 0x64
+    //
+    // Tres cambios en 94 ms: el plugin estaba reconstruyendo su reserva con
+    // frames en vuelo y leyo un puntero que el desarme anterior habia dejado en
+    // cero. El crash es nuestro, no del set mezclado ni del overlay.
+    //
+    // 150 ms y no 100: el enfriamiento arranca cuando el plugin libera, no
+    // cuando nosotros llamamos, asi que mandar justo en el borde es una carrera.
+    // Y no cuesta nada -- los bloques de la cadencia son de ~800 ms.
+    //
+    // No se pierde el cambio: g_opt_pending queda puesto y sale en el Present
+    // siguiente que pase el filtro.
+    {
+        static LARGE_INTEGER frec = { };
+        static LONGLONG ultimo = 0;
+        if (frec.QuadPart == 0) QueryPerformanceFrequency(&frec);
+        LARGE_INTEGER ahora;
+        QueryPerformanceCounter(&ahora);
+        if (ultimo != 0 && frec.QuadPart > 0) {
+            const double ms = (double)(ahora.QuadPart - ultimo) * 1000.0 /
+                              (double)frec.QuadPart;
+            if (ms < 150.0) return;
+        }
+        ultimo = ahora.QuadPart;
+    }
     // Lo mismo que en force_into: si el juego la apago, el reenvio la volveria a
     // encender por la puerta de atras.
     if (juego_apago_la_generacion()) return;
@@ -1901,6 +1972,13 @@ static unsigned hk_slReflexGetState(void *state) {
 
 static unsigned hk_slGetFeatureFunction(unsigned feature, const char *name, void *&fn) {
     const unsigned r = g_orig_getfeaturefn(feature, name, fn);
+    // El interposer acaba de resolver una funcion de DLSS-G: ese puntero cae
+    // dentro de UNA de las copias mapeadas, y esa es la que corre. Es un hecho
+    // observado, no una deduccion por orden de carga -- que es justo lo que
+    // fallaba: g_dlssg_base se asigna a la ULTIMA copia mapeada, no a la viva.
+    if (r == 0 && name != nullptr && fn != nullptr &&
+        name[0] == 's' && name[1] == 'l' && name[2] == 'D' && name[3] == 'L')
+        copia_que_ejecuta(fn, name);
     if (r == 0 && name != nullptr && fn != nullptr &&
         strcmp(name, "slDLSSGGetState") == 0 && g_orig_getstate == nullptr) {
         g_orig_getstate = (PFN_slDLSSGGetState)fn;
@@ -5225,6 +5303,8 @@ static unsigned hk_slGetNewFrameToken(void *&tok, const unsigned *idx) {
         if (g_qpc_freq > 0)
             g_token_block_us += (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)g_qpc_freq;
     }
+    // El grafo ya cargo entero: aca se deciden los invariantes, una sola vez.
+    evaluar_invariantes();
     // One rendered frame, exactly once.
     //
     // The game asks for the frame token about seven times per frame -- 305.7
@@ -6323,7 +6403,48 @@ static int __stdcall hk_present(void *queue, const void *info) {
 // Vulkan present info, and there is no equivalent to read here.
 
 typedef HRESULT(STDMETHODCALLTYPE *PFN_DXGIPresent)(IDXGISwapChain *, UINT, UINT);
+// El PRIMER original enganchado. Se conserva solo como bandera de "ya hay
+// enganche" para el codigo que pregunta != nullptr; para llamar al original
+// se usa present_original_de(self), nunca este puntero.
 static PFN_DXGIPresent g_orig_dxgi_present = nullptr;
+
+// Un original POR VTABLE, no uno por proceso.
+//
+// Halo, 2026-09-10, 0xC00000FD a los 53 s: tres swapchains y dos vtables
+// distintas en la misma sesion. El interposer de Streamline envuelve el
+// swapchain del juego con un proxy que tiene su propia vtable, y el Present
+// del proxy llama al Present del chain real por la vtable de este. Con las dos
+// vtables apuntando a hk_dxgi_present y UN solo original guardado (el de la
+// primera), el hook llamaba al Present del proxy con el chain real como self,
+// el proxy volvia a entrar por el slot del chain real -- que es el hook --
+// y asi hasta agotar la pila. Cyberpunk no lo mostraba porque ahi las dos
+// comparten vtable, y de ese negativo se habia concluido que la teoria estaba
+// muerta.
+//
+// La regla: el original que se llama es el de la vtable del objeto que llega,
+// buscado en esta tabla. Ocho entradas es holgado: son CLASES de swapchain
+// (DXGI real, proxy de SL, el descartable de la adopcion), no instancias.
+struct VtPresent { void **vt; PFN_DXGIPresent orig; };
+static VtPresent g_vt_present[8];
+static volatile LONG g_vt_present_n = 0;
+// Cuantas veces el hook corrio anidado dentro de si mismo (ver hk_dxgi_present).
+static volatile LONG g_present_anidados = 0;
+// Profundidad de hk_dxgi_present en ESTE hilo. Sube al entrar y baja al salir
+// por RAII, asi que una excepcion adentro del original tampoco la deja torcida.
+static thread_local int g_present_nivel = 0;
+struct PresentAnidado {
+    PresentAnidado() { ++g_present_nivel; }
+    ~PresentAnidado() { --g_present_nivel; }
+};
+
+static PFN_DXGIPresent present_original_de(IDXGISwapChain *self) {
+    if (self == nullptr) return nullptr;
+    void **vt = *reinterpret_cast<void ***>(self);
+    const LONG n = g_vt_present_n;
+    for (LONG i = 0; i < n; ++i)
+        if (g_vt_present[i].vt == vt) return g_vt_present[i].orig;
+    return nullptr;
+}
 
 // ---- pacing the frames ourselves, where nothing else will --------------
 //
@@ -6403,6 +6524,32 @@ static void note_display(IDXGISwapChain *sc) {
 }
 
 static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT interval, UINT flags) {
+    // Primero que nada: a quien se le devuelve la llamada. Si este objeto tiene
+    // una vtable que no enganchamos -- no deberia pasar, porque solo se llega
+    // aca por un slot que nosotros escribimos -- se avisa una vez y se usa el
+    // primer original, que es lo que hacia el codigo anterior siempre.
+    PFN_DXGIPresent orig = present_original_de(self);
+    if (orig == nullptr) {
+        static LONG dicho = 0;
+        if (InterlockedCompareExchange(&dicho, 1, 0) == 0)
+            log_line("present: objeto con vtable desconocida; se usa el primer original");
+        orig = g_orig_dxgi_present;
+        if (orig == nullptr) return (HRESULT)0x887A0001L;   // DXGI_ERROR_INVALID_CALL
+    }
+    // Anidamiento: el Present del proxy de Streamline llama al Present del
+    // chain real, y con las dos vtables enganchadas este hook corre dos veces
+    // por presentacion del juego (mas las presentaciones generadas, que van
+    // solo por el chain real). Se deja constancia una vez para que quien lea
+    // los contadores por hook sepa que cuentan los dos niveles; el contador
+    // que no depende de esto es PresentCount de GetFrameStatistics.
+    PresentAnidado anidado;
+    if (g_present_nivel > 1) {
+        InterlockedIncrement(&g_present_anidados);
+        static LONG dicho_anidado = 0;
+        if (InterlockedCompareExchange(&dicho_anidado, 1, 0) == 0)
+            log_line("present: llamada anidada (proxy de SL -> chain real); "
+                     "los contadores por hook cuentan los dos niveles");
+    }
     // Presented frames, counted. Nothing else in this file has ever counted
     // one, and that is why three separate multiplier instruments in one
     // session were all circular -- the last of them reduced to "what fraction
@@ -6595,7 +6742,7 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     if (g_novsync) {
         static int tearing = 1;          // 1 = try, 0 = chain refused it
         if (tearing) {
-            const HRESULT hr = g_orig_dxgi_present(self, 0, flags | 0x00000200 /*ALLOW_TEARING*/);
+            const HRESULT hr = orig(self, 0, flags | 0x00000200 /*ALLOW_TEARING*/);
             if (SUCCEEDED(hr)) return hr;
             tearing = 0;
             log_line("novsync: the swap chain refuses tearing; the refresh cap stays");
@@ -6611,7 +6758,7 @@ static HRESULT STDMETHODCALLTYPE hk_dxgi_present(IDXGISwapChain *self, UINT inte
     {
         LARGE_INTEGER a, b;
         QueryPerformanceCounter(&a);
-        const HRESULT hr = g_orig_dxgi_present(self, interval, flags);
+        const HRESULT hr = orig(self, interval, flags);
         QueryPerformanceCounter(&b);
         if (g_qpc_freq > 0)
             g_present_block_us += (double)(b.QuadPart - a.QuadPart) * 1e6 / (double)g_qpc_freq;
@@ -6669,26 +6816,30 @@ static void hook_frame_latency(void *sc) {
     sc2->Release();
 }
 
-// Recuerda de que vtable salio el enganche, para poder cambiarse al swapchain
-// REAL del juego si aparece despues.
-static void **g_vt_enganchada = nullptr;
-
 static void hook_swapchain_present(void *sc) {
     if (sc == nullptr) return;
-    void **vt_nueva = *reinterpret_cast<void ***>(sc);
-    if (g_orig_dxgi_present != nullptr) {
-        // Ya hay un enganche. Solo vale rehacerlo si esta vtable es OTRA: es el
-        // caso de la adopcion ganandole la carrera al juego.
-        //
-        // Medido en Cyberpunk: la adopcion creo su descartable a los 6,5 s y el
-        // juego creo el suyo a los 10,6 s. Con el enganche ya puesto, el
-        // swapchain real nunca se capturaba, y los dos contadores leian 45 por
-        // ventana -- la tasa RENDERIZADA -- mientras DLSS-G presentaba 232 fps.
-        // El multiplicador contado daba 1.02 con la generacion andando a 4x.
-        if (vt_nueva == g_vt_enganchada) return;
-        log_line("recorder: aparecio otro swapchain con vtable distinta; se engancha tambien");
-    }
     void **vt = *reinterpret_cast<void ***>(sc);
+    // Una vtable ya enganchada no se toca: su original ya esta en la tabla y
+    // volver a leer vt[8] guardaria nuestro propio hook como "original", que
+    // es una recursion garantizada. Esto cubre tambien el caso de la adopcion
+    // ganandole la carrera al juego (medido en Cyberpunk: el descartable a los
+    // 6,5 s, el del juego a los 10,6 s, misma vtable): la segunda llegada
+    // simplemente no hace nada, y el contador ya cuenta por esa vtable.
+    for (LONG i = 0; i < g_vt_present_n; ++i)
+        if (g_vt_present[i].vt == vt) return;
+    if (vt[8] == reinterpret_cast<void *>(&hk_dxgi_present)) {
+        // Slot nuestro en una vtable que no registramos: no puede pasar salvo
+        // que la tabla se haya llenado o que alguien haya copiado la vtable.
+        // En cualquier caso no hay original que guardar y no se toca.
+        log_line("recorder: vtable con nuestro hook puesto y sin original registrado; no se toca");
+        return;
+    }
+    if (g_vt_present_n >= (LONG)(sizeof(g_vt_present) / sizeof(g_vt_present[0]))) {
+        log_line("recorder: tabla de vtables llena; este swapchain no se engancha");
+        return;
+    }
+    if (g_orig_dxgi_present != nullptr)
+        log_line("recorder: aparecio otro swapchain con vtable distinta; se engancha tambien");
     // The slot, not the bytes. This used to call MH_CreateHook on vt[8], which
     // detours the Present implementation itself -- the one thing this project
     // has a standing rule against, because Steam's overlay detours the same
@@ -6701,9 +6852,13 @@ static void hook_swapchain_present(void *sc) {
     // 1.10x would be indistinguishable from a correct answer.
     DWORD prot = 0;
     if (!VirtualProtect(&vt[8], sizeof(void *), PAGE_READWRITE, &prot)) return;
-    if (g_orig_dxgi_present == nullptr)
-        g_orig_dxgi_present = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
-    g_vt_enganchada = vt;
+    // El original de ESTA vtable, registrado antes de escribir el slot. El
+    // hook lo busca por la vtable del objeto que recibe (present_original_de).
+    const PFN_DXGIPresent orig_de_esta = reinterpret_cast<PFN_DXGIPresent>(vt[8]);
+    g_vt_present[g_vt_present_n].vt = vt;
+    g_vt_present[g_vt_present_n].orig = orig_de_esta;
+    InterlockedIncrement(&g_vt_present_n);
+    if (g_orig_dxgi_present == nullptr) g_orig_dxgi_present = orig_de_esta;
     g_swapchain = reinterpret_cast<IDXGISwapChain *>(sc);
     hook_frame_latency(sc);
     // What the swap chain was created with, and whether the app takes the
@@ -6728,6 +6883,7 @@ static void hook_swapchain_present(void *sc) {
     vt[8] = reinterpret_cast<void *>(&hk_dxgi_present);
     VirtualProtect(&vt[8], sizeof(void *), prot, &prot);
     log_line("recorder: present slot swapped (vt[8], not detoured)");
+    log_num("  vtables enganchadas ", (unsigned)g_vt_present_n);
 }
 
 // Adoptar el swapchain que el juego YA tiene.
@@ -7989,6 +8145,119 @@ static void copia_registrar(const unsigned char *base, size_t largo, unsigned me
     c.base = base; c.largo = largo; c.menor = menor;
     c.sitios_cuenta = sitios_cuenta; c.sitios_pacer = sitios_pacer; c.viva = true;
     if (g_primera_copia_ms == 0) g_primera_copia_ms = GetTickCount64();
+}
+
+// Cual de las copias registradas contiene este puntero.
+//
+// Se dice UNA vez por corrida, con el cuadro completo: la que ejecuta y las que
+// no, cada una con los sitios que recibio. Si la que ejecuta tiene cero sitios y
+// otra los tiene, ahi esta el defecto de fondo que este proyecto viene pagando
+// juego por juego -- parchear todas las copias y confiar, en vez de verificar el
+// efecto en la que corre.
+int g_copia_ejecuta = -1;   // indice en g_copias, -1 = todavia no se sabe
+// Distinto de lo anterior: si el interposer llego a resolvernos una funcion de
+// DLSS-G. Sin esto, "no se sabe cual ejecuta" y "el gancho nunca disparo" serian
+// el mismo estado, y el segundo NO es una topologia rota -- es falta de dato.
+// Apagar el mod por falta de dato seria la misma clase de regla no verificada
+// que este trabajo viene a sacar.
+bool g_ejecuta_resuelto = false;
+
+static void copia_que_ejecuta(const void *fn, const char *nombre) {
+    static bool dicho = false;
+    if (dicho || fn == nullptr) return;
+    const unsigned char *p = (const unsigned char *)fn;
+    int cual = -1;
+    for (int i = 0; i < g_copias_n; ++i) {
+        if (g_copias[i].base == nullptr) continue;
+        if (p >= g_copias[i].base && p < g_copias[i].base + g_copias[i].largo) {
+            cual = i;
+            break;
+        }
+    }
+    dicho = true;
+    g_copia_ejecuta = cual;
+    g_ejecuta_resuelto = true;
+    log_line("--- CAPA 0: que copia de sl.dlss_g ejecuta ---");
+    log_line(nombre);
+    if (cual < 0) {
+        log_num("  el puntero NO cae en ninguna de las copias registradas; van ",
+                (unsigned)g_copias_n);
+        log_line("  (o el interposer resolvio a otro modulo, o la copia mapeo");
+        log_line("   despues de registrarse: las dos son un invariante roto)");
+        return;
+    }
+    for (int i = 0; i < g_copias_n; ++i) {
+        log_num(i == cual ? "  copia EJECUTA, indice " : "  copia inactiva, indice ",
+                (unsigned)i);
+        log_num("    version 2.", (unsigned)g_copias[i].menor);
+        log_num("    sitios de cuenta ", (unsigned)g_copias[i].sitios_cuenta);
+        log_num("    sitios de pacer ", (unsigned)g_copias[i].sitios_pacer);
+        log_num("    sigue mapeada (1 = si) ", (unsigned)(g_copias[i].viva ? 1 : 0));
+    }
+    // Y lo que importa de verdad: si la que ejecuta no recibio los parches, todo
+    // lo que midamos despues es sobre un binario que no tocamos.
+    if (g_copias[cual].sitios_cuenta <= 0 || g_copias[cual].sitios_pacer <= 0)
+        log_line("  ! LA COPIA QUE EJECUTA NO TIENE TODOS LOS PARCHES");
+    else
+        log_line("  la copia que ejecuta tiene cuenta y pacer parcheados");
+    // Comparacion contra el puntero que el resto del archivo viene usando.
+    {
+        const unsigned char *b = (const unsigned char *)g_dlssg_base;
+        log_num("  g_dlssg_base apunta a la copia que ejecuta (1 = si) ",
+                (unsigned)(b == g_copias[cual].base ? 1 : 0));
+    }
+}
+
+// Los invariantes de la topologia, evaluados UNA vez y tarde.
+//
+// Tarde a proposito: en el primer frame token ya cargo todo el grafo -- el
+// interposer, sus plugins y el snippet -- asi que lo que se ve aca es lo que va
+// a correr. Decidir al principio es lo que fallaba: g_dlssg_base se asignaba a
+// la ultima copia mapeada y deteccion-del-set.md ya decia que "cual copia queda
+// viva es un hecho observado al final, no deducible al principio".
+//
+// Esta version es DELIBERADAMENTE permisiva: solo cae en PASIVO si no hay
+// ninguna copia viva identificada por ejecucion, que es la unica condicion bajo
+// la cual todo lo que hagamos despues seria sobre un binario que no sabemos
+// cual es. Los demas invariantes se reportan pero no bloquean, porque todavia
+// no estan medidos en los tres juegos y apagar el mod por uno de ellos seria
+// exactamente el tipo de regla no verificada que este trabajo viene a sacar.
+static void evaluar_invariantes(void) {
+    if (g_fase != (LONG)Fase::ARMADO) return;
+    int vivas = 0, con_cuenta = 0, con_pacer = 0;
+    for (int i = 0; i < g_copias_n; ++i) {
+        if (!g_copias[i].viva) continue;
+        ++vivas;
+        if (g_copias[i].sitios_cuenta > 0) ++con_cuenta;
+        if (g_copias[i].sitios_pacer > 0) ++con_pacer;
+    }
+    log_line("--- FASE: invariantes de la topologia ---");
+    log_num("  copias de sl.dlss_g mapeadas ", (unsigned)g_copias_n);
+    log_num("  de esas, vivas ", (unsigned)vivas);
+    log_num("  vivas con sitio de cuenta ", (unsigned)con_cuenta);
+    log_num("  vivas con sitio de pacer ", (unsigned)con_pacer);
+    log_num("  copia que EJECUTA identificada (1 = si) ",
+            (unsigned)(g_copia_ejecuta >= 0 ? 1 : 0));
+    if (g_copia_ejecuta >= 0) {
+        log_num("    indice ", (unsigned)g_copia_ejecuta);
+        log_num("    sitios de cuenta ", (unsigned)g_copias[g_copia_ejecuta].sitios_cuenta);
+        log_num("    sitios de pacer ", (unsigned)g_copias[g_copia_ejecuta].sitios_pacer);
+    }
+    log_num("  semantica: la cuenta es el multiplicador (1 = si) ",
+            (unsigned)(cuenta_es_multiplicador() ? 1 : 0));
+    log_num("  el interposer llego a resolvernos una funcion (1 = si) ",
+            (unsigned)(g_ejecuta_resuelto ? 1 : 0));
+    if (g_ejecuta_resuelto && g_copia_ejecuta < 0) {
+        g_fase = (LONG)Fase::PASIVO;
+        log_line("  VEREDICTO: PASIVO -- no se pudo identificar que copia ejecuta.");
+        log_line("  No se parchea ni se reescriben opciones. El multiplicador");
+        log_line("  queda como lo pide el juego. Esto NO es un crash: es el mod");
+        log_line("  negandose a actuar sobre un binario que no sabe cual es.");
+        return;
+    }
+    g_fase = (LONG)Fase::VERIFICADO;
+    g_fase = (LONG)Fase::ACTIVO;
+    log_line("  VEREDICTO: ACTIVO");
 }
 
 static void copia_descargada(const unsigned char *base, size_t largo) {
