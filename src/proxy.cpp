@@ -7024,7 +7024,19 @@ static void hook_swapchain_present(void *sc) {
     // 6,5 s, el del juego a los 10,6 s, misma vtable): la segunda llegada
     // simplemente no hace nada, y el contador ya cuenta por esa vtable.
     for (LONG i = 0; i < g_vt_present_n; ++i)
-        if (g_vt_present[i].vt == vt) return;
+        if (g_vt_present[i].vt == vt) {
+            // La vtable ya esta hecha, pero la INSTANCIA es nueva y lo que es
+            // por instancia se toma igual. Medido en Cyberpunk desde Steam: la
+            // adopcion registra la vtable desde el descartable y lo suelta
+            // (g_swapchain = nullptr); el swapchain real del juego llegaba
+            // aca, salia por este return, y presentes_del_runtime se quedaba
+            // sin swapchain que leer: cero lineas de PresentCount y el HUD en
+            // cero. La ultima instancia gana, igual que en hk_cscfh.
+            g_swapchain = reinterpret_cast<IDXGISwapChain *>(sc);
+            hook_frame_latency(sc);
+            log_line("present: vtable ya enganchada; se adopta la instancia nueva");
+            return;
+        }
     if (vt[8] == reinterpret_cast<void *>(&hk_dxgi_present)) {
         // Slot nuestro en una vtable que no registramos: no puede pasar salvo
         // que la tabla se haya llenado o que alguien haya copiado la vtable.
