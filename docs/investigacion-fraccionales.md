@@ -4,6 +4,36 @@ Documento vivo. Objetivo, hipotesis rankeadas, lo medido, y el conocimiento
 externo. Se actualiza cada vez que se aprende algo; nada entra sin medicion o
 sin una cita.
 
+## ESTADO ACTUAL (2026-09-12) — que hay implementado y como usarlo
+
+**El mecanismo esta resuelto y medido: `fracres`.** Difunde la reserva [ctx+8]
+por frame via el inmediato parcheado (sin API, sin enfriamiento). Da fraccional
+real 2.25-5.5, 4-6x mas estable en el ratio que la alternancia por bloques, misma
+latencia, 0 crash. El disasm (0x45984) confirma por que: [ctx+8] es el bound del
+loop de slots, re-leido por presentacion. Seguro en cualquier juego: topa en
+count_cap() (el max declarado, Halo=3), no en el estructural.
+
+**Como usarlo (opt-in por ahora):** un archivo `mfg-fracres.txt` con `1` al lado
+del juego, en modo DYNAMIC (mode 8). El controlador decide el ratio y fracres lo
+difunde por frame. Nada mas hace falta (dynpin es solo para medir un ratio fijo).
+
+**Por que sigue OFF por defecto y no lo prendi solo:** prenderlo es un cambio de
+comportamiento, y la regla es que eso entra con la regresion de los juegos
+CORRIDA (jugandolos), no solo con el banco. Fue validado en Cyberpunk (escena
+-benchmark) pero NO en gameplay largo ni en Halo/GTA V en DYNAMIC. Con el usuario
+durmiendo no se corren juegos (regla). fracres es no-op en modos enteros (Halo=3,
+GTA V=6 no lo tocan), asi que el riesgo es solo en DYNAMIC.
+
+**Para promoverlo a DEFAULT (una sesion con el usuario):**
+1. Cyberpunk gameplay real (no solo -benchmark) con `fracres 1`, mode 8: sin
+   crash, ratio estable, se siente bien.
+2. Halo y GTA V en DYNAMIC con `fracres 1`: sin crash (count_cap ya cubre el
+   max de Halo, pero hay que verlo corriendo).
+3. Si pasa: en config_apply, hacer que la difusion de la reserva sea el camino
+   normal del fraccional dynamic (o `g_frac_res = true` por defecto), con la
+   regresion de los tres verde. Es lo que pide [[flags-only-disable]]: lo que
+   mejora va encendido, no escondido en un flag que se olvida.
+
 ## El objetivo, afinado
 
 Un ratio fraccionario R (ej. 2.5x) que entregue:
