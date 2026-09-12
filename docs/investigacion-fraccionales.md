@@ -73,6 +73,41 @@ OJO: los campos estan en `sl.dlss_g.dll` (el PLUGIN, 612992 bytes), NO en
 Los dos campos se consumen por separado y el bound es una lectura viva. La via
 para difundir por frame existe a nivel de codigo.
 
+### Plan de fracdiff, listo para ejecutar con el usuario (2026-09-11)
+
+Estado del disasm: generacion y pacer siguen el bound [ctx+4]; solo la memoria
+sigue la reserva [ctx+8]. La unica duda es el flip queue con bound < reserva.
+fracdiff la mide directo. NO escribir el codigo sin poder correrlo (parcheo del
+plugin sin test = crash a ciegas); esto es el plan para hacerlo juntos.
+
+Implementacion (un commit, con test + regresion):
+
+1. Config `fracdiff` (off por defecto), como dynstep/dynpin. `g_frac_diff`.
+2. En fractional_tick, rama nueva cuando `g_frac_diff && sel_is_frac()`:
+   - Reserva a la API = ceil(R), UNA vez: set g_force_generated = ceil, marcar
+     g_opt_pending SOLO cuando ceil cambia (no por frame). Unico enfriamiento,
+     al arrancar o si R cruza un entero.
+   - Difusion por frame del bound con Bresenham (== Euclidiano para k/n):
+     acc += frac; add = (LONG)acc; acc -= add; n = lo + add;  (add 0 o 1).
+     Reparte los +1 lo mas parejo posible sin tabla.
+   - Escribir n SOLO en los sitios del bound y del pacer (g_wic_sites[0] y
+     g_pace_count), NUNCA en el de la reserva (g_wic_sites[1] queda en ceil).
+     Hoy set_count_now escribe los dos wic sites iguales: separarlos. n nunca
+     por encima de ceil.
+   - gen_flag = (n>0). Cero llamadas a slDLSSGSetOptions por frame.
+3. Medicion (dynpin 250 + fracdiff on, un juego de base baja):
+   - ratio: modula a 2.5? Si queda en 3.0 o para -> el flip queue si se ata a
+     la reserva, H1 muere y volvemos a H2/H3.
+   - latencia.py: sim->driver end UNIMODAL intermedia (exito) vs bimodal
+     (swing) vs clavada en L_ceil.
+   - regresion: los cuatro juegos con fracdiff OFF sin cambios.
+
+Riesgo: si el flip queue se estanca con bound<reserva, se ve como freeze o
+ratio clavado -- no crash (el byte nunca pasa la reserva, el lado que crashea).
+Reversible: fracdiff off.
+
+---
+
 ### El pacer computa el timing DESDE el bound (2026-09-11, disasm 0x48728)
 
 Disasm de la computacion del pacer (0x180048728), el sitio de patch_pacer_count:
