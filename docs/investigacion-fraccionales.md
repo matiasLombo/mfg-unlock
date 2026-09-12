@@ -524,6 +524,23 @@ docs.rs/euclidean-rhythm.)
 DLSS 4.5 Dynamic MFG cambia entre enteros 2-6x para un target; no fracciona.
 El fraccionario es nuestro. (hothardware DLSS 4.5.)
 
+### STREAM CERRADO (2026-09-12): la distribucion de la cuenta es optima ("saber plegar")
+
+El goal listaba "delta-sigma / Euclidiano" como conocimiento a explorar. Resuelto:
+son EL MISMO algoritmo, ya lo usamos, y es optimo. `scheduler::diffuse_step` es
+un modulador delta-sigma de primer orden (`acc += frac; add = floor(acc);
+acc -= add`); para un `frac` constante produce exactamente la secuencia de
+Bresenham/Euclides, que es el reparto de MAXIMA evenness (Toussaint 2005). No
+existe una secuencia de CUENTA mas pareja -- probado por construccion y por
+test_diffuse (2.25-5.9 + composicion con cap). Y para R variable (el controlador
+dynamic moviendo el target) el acumulador arrastra el error entre cambios, que es
+lo correcto.
+
+Conclusion (saber plegar, en el buen sentido): el eje de la CUENTA esta cerrado
+-- ni una distribucion mas lista mejora la fluidez, porque la que hay ya es la
+optima. La fluidez que falta NO sale de repartir mejor la cuenta; sale del OTRO
+eje, la colocacion temporal (H4). Ahi es donde poner el esfuerzo.
+
 ### Conocimiento externo (2026-09-12): el eje de COLOCACION TEMPORAL, confirmado
 
 Un fork mas nuevo (ImDreamt/MFGAdaUnlock-RenoDx, `midpoint.hpp`) confirma y
