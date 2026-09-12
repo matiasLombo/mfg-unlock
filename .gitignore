@@ -7,6 +7,12 @@ __pycache__/
 # NVIDIA's own PTX -- rebuild it with tools/rebuild_cubins.py, never commit it.
 src/cubins.h
 
+# The Streamline set embedded as bytes (tools/embed_sdk.py): NVIDIA binaries,
+# 5 MB, rebuilt from the SDK zip or the cache. Never commit them.
+src/sdk_blob.S
+src/sdk_manifest.h
+build/
+
 # Build output and logs
 version.dll
 *.log

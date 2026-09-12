@@ -989,6 +989,8 @@ static bool name_is(const UNICODE_STRING *s, const wchar_t *want) {
     return i == n && want[i] == 0;
 }
 
+#include "zipmini.h"        // inflate del set embebido
+#include "sdk_manifest.h"   // generado por tools/embed_sdk.py
 #include "loader.h"
 // ------------------------------------------------------------ forwarding ---
 //
@@ -1219,6 +1221,9 @@ BOOL APIENTRY DllMain(HMODULE self, DWORD reason, LPVOID) {
     }
     AddVectoredExceptionHandler(1, exception_witness);
     log_line("--- mfg-unlock attached ---  (F9 records)");
+    // El set de Streamline sale del dll si la cache no esta: antes de que el
+    // juego pida el primer sl.* (Metro a los 6 s, GTA V a los 16 s).
+    ensure_sdk_cache();
 
     init_streamline_env(self);
 

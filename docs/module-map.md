@@ -24,7 +24,7 @@ con `tools/compare_sections.py` (.text byte a byte).
 | `adopted.h` | 66 | los swapchains adoptados: se cuenta el mas nuevo y solo se toca ese (leer los demas crasheo GTA V: un chain muerto sigue mapeado); vida y cuenta se inyectan | `test_adopted` (los dos casos de GTA V del 11/09) | -- |
 | `present_policy.h` | 75 | que se hace con un swapchain nuevo (registrar la vtable, escribir el slot, adoptar) segun overlay, dueno del slot, modo host, vtable ya vista; y la guarda de `write_slot` | `test_present_policy` (una fila por incidente medido) | -- |
 | `sites.h` | 189 | los patrones de bytes de cada parche y el `.text` de un PE | `test_sites` (los dll REALES de la cache) | -- |
-| `zipmini.h` | 258 | leer el zip del SDK (deflate) | `test_zipmini <zip>` | -- |
+| `zipmini.h` | 258 | leer un zip (deflate): el set embebido al arrancar | `test_zipmini <zip>` | -- |
 
 ## Con Windows: los mecanismos, cubiertos por la corrida
 
@@ -39,7 +39,7 @@ con `tools/compare_sections.py` (.text byte a byte).
 | `writer.h` | 1191 | el camino de escritura: `hk_slDLSSGSetOptions`, `force_into`, el latch, `set_count_now`, `fractional_tick` | `numFramesToGenerate` recibido == pedido, `force_into:` | `policy.h`, `controller.h`, `scheduler.h`, `patches.h` |
 | `frametoken.h` | 233 | el pulso por frame: `hk_slGetNewFrameToken` y su armado | `VEREDICTO ACTIVO` (evalua invariantes ahi) | `measurement.h`, `writer.h`, `reflex.h`, `present.h`, `loader.h` |
 | `recorder.h` | 494 | el grabador F9, el CSV y el hilo del panel | `pacing:` en el log, `mfg-frames.csv` | `present.h`, `overlay.h` |
-| `loader.h` | 1682 | que set y que snippet corren: copias del plugin, veredicto, cache, `LdrLoadDll`, `on_dll_load` | `VEREDICTO ACTIVO copias=N vivas=1 ...`, `se carga el nuestro` | `patches.h`, `slinit.h`, `diag.h` |
+| `loader.h` | 1782 | que set y que snippet corren: copias del plugin, veredicto, cache, `LdrLoadDll`, `on_dll_load`; `ensure_sdk_cache` escribe el set embebido (`tools/embed_sdk.py` -> `sdk_blob.S`) si la cache no esta | `sdk: cache escrita desde el dll, archivos 6`, `VEREDICTO ACTIVO ...`, `se carga el nuestro` | `patches.h`, `slinit.h`, `diag.h`, `zipmini.h` |
 | `present.h` | 1073 | el swapchain y Present: `write_slot` (el unico escritor de slots de vtable), la ejecucion de `present_policy`, la lista de adoptados comprobada antes de usarse, el contador del runtime | `present: overlay de Steam presente`, `se adopta la instancia nueva`, `el swapchain adoptado ya no existe` | `present_policy.h`, `recorder.h` (note_present) |
 | `host.h` | 508 | modo host (`host 1`): nosotros como aplicacion de Streamline en un juego que no lo trae -- slInit, proxies de fabrica/device, tags y constantes desde los parametros de NGX, PCL y Reflex, `slDLSSGSetOptions` | `host: slInit -> 0`, `EvaluateFeature, llamadas`, PresentCount = 2x tokens en Metro | los headers del SDK, `present.h` (los hooks de fabrica y Present), `loader.h` |
 | `exceptions.h` | 257 | el testigo de excepciones y la autopsia del sub-frame | `EXCEPCION ----` (que no aparezca) | -- |

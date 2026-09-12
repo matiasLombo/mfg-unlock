@@ -1,5 +1,10 @@
 # Configuracion
 
+El dll se basta solo: el set de Streamline que usa (seis archivos, 2.12) va
+adentro y se escribe en `%LOCALAPPDATA%\mfg-unlock\sdk\2.12` la primera vez
+(`sdk: cache escrita desde el dll, archivos 6` en el log). No hay nada que
+descargar ni copiar.
+
 Dos archivos al lado de `version.dll`:
 
 - **`mfg-settings.txt`** — lo que el panel guarda: `mode`, `target`, `dynfps`,

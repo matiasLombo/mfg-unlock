@@ -7,6 +7,10 @@ cd "$(dirname "$0")"
 # this machine. It is not in the repository -- it is derived from NVIDIA's
 # binary, so it is generated locally or not at all. Without it the proxy still
 # builds; the kernel swap is simply compiled out.
+if [ ! -f src/sdk_blob.S ] || [ ! -f build/sdk-2.12.zip ]; then
+  echo "src/sdk_blob.S missing -- running: python tools/embed_sdk.py (from the cache)"
+  python tools/embed_sdk.py || exit 1
+fi
 if [ ! -f src/cubins.h ]; then
   echo "src/cubins.h missing -- run: python tools/rebuild_cubins.py"
   echo "building without the kernel rebuild"
@@ -24,7 +28,7 @@ STUB
 fi
 
 g++ -shared -std=c++20 -O2 -DNDEBUG -w -I external/minhook/include -I external/streamline/include \
-  -o version.dll src/proxy.cpp src/forwards_winmm.S src/exports.def \
+  -o version.dll src/proxy.cpp src/forwards_winmm.S src/sdk_blob.S src/exports.def \
   external/minhook/src/hook.c external/minhook/src/buffer.c \
   external/minhook/src/trampoline.c external/minhook/src/hde/hde64.c \
   -static -static-libgcc -static-libstdc++ -Wl,--enable-stdcall-fixup -lkernel32 -luser32 -lgdi32

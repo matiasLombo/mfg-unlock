@@ -991,6 +991,93 @@ static bool path_in_our_sdk(const wchar_t *module, unsigned minor, wchar_t *out)
     return GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES;
 }
 
+// ---- el set embebido -------------------------------------------------------
+//
+// El dll no descarga nada y la cache de %LOCALAPPDATA%\mfg-unlock\sdk\2.12
+// se armaba a mano: sin ella el mod no andaba, contra [[ships-as-one-dll]].
+// Los seis archivos que se cargan de verdad van adentro del dll como un zip
+// (tools/embed_sdk.py -> src/sdk_blob.S por .incbin, 4,97 MB con deflate;
+// crudos son 10,35 MB), y al arrancar, si falta alguno o el tamano no
+// coincide con src/sdk_manifest.h, se escriben. Se escribe a <nombre>.tmp y
+// se renombra: un archivo a medias no puede quedar con el nombre bueno.
+extern "C" const unsigned char sdk_zip[];
+extern "C" const unsigned char sdk_zip_end[];
+
+static bool sdk_cache_dir(wchar_t *out) {
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", out, MAX_PATH - 80);
+    if (n == 0 || n >= MAX_PATH - 80) return false;
+    int k = (int)n;
+    const wchar_t *parts[3] = { L"\\mfg-unlock", L"\\sdk", L"\\2.12" };
+    for (int p = 0; p < 3; ++p) {
+        for (int i = 0; parts[p][i] != 0; ++i) out[k++] = parts[p][i];
+        out[k] = 0;
+        CreateDirectoryW(out, nullptr);
+    }
+    return true;
+}
+static bool sdk_file_size_is(const wchar_t *dir, const wchar_t *name, unsigned size) {
+    wchar_t path[MAX_PATH];
+    int k = 0;
+    for (; dir[k] != 0; ++k) path[k] = dir[k];
+    path[k++] = L'\\';
+    for (int i = 0; name[i] != 0; ++i) path[k++] = name[i];
+    path[k] = 0;
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &a)) return false;
+    return a.nFileSizeHigh == 0 && a.nFileSizeLow == size;
+}
+static bool sdk_write_file(const wchar_t *dir, const wchar_t *name, const unsigned char *data, unsigned size) {
+    wchar_t tmp[MAX_PATH], path[MAX_PATH];
+    int k = 0;
+    for (; dir[k] != 0; ++k) path[k] = dir[k];
+    path[k++] = L'\\';
+    for (int i = 0; name[i] != 0; ++i) path[k++] = name[i];
+    path[k] = 0;
+    for (int i = 0; i <= k; ++i) tmp[i] = path[i];
+    tmp[k] = L'.'; tmp[k + 1] = L't'; tmp[k + 2] = L'm'; tmp[k + 3] = L'p'; tmp[k + 4] = 0;
+    HANDLE h = CreateFileW(tmp, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD wrote = 0;
+    const BOOL ok = WriteFile(h, data, size, &wrote, nullptr);
+    CloseHandle(h);
+    if (!ok || wrote != size) { DeleteFileW(tmp); return false; }
+    return MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING) != 0;
+}
+// Deja la cache completa. Devuelve cuantos archivos escribio (0 = ya estaba).
+static int ensure_sdk_cache(void) {
+    wchar_t dir[MAX_PATH];
+    if (!sdk_cache_dir(dir)) { log_line("sdk: sin LOCALAPPDATA; la cache no se puede escribir"); return 0; }
+    bool missing[16] = { false };
+    int need = 0;
+    for (int i = 0; i < kSdkFilesN && i < 16; ++i)
+        if (!sdk_file_size_is(dir, kSdkFiles[i].name, kSdkFiles[i].size)) { missing[i] = true; ++need; }
+    if (need == 0) { log_line("sdk: cache completa (los seis del set embebido)"); return 0; }
+    const size_t zn = (size_t)(sdk_zip_end - sdk_zip);
+    unsigned cap = 0;
+    for (int i = 0; i < kSdkFilesN; ++i) if (kSdkFiles[i].size > cap) cap = kSdkFiles[i].size;
+    unsigned char *buf = static_cast<unsigned char *>(VirtualAlloc(nullptr, cap, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (buf == nullptr) { log_line("sdk: sin memoria para extraer el set"); return 0; }
+    int written = 0;
+    zipmini::walk(sdk_zip, zn, [&](const zipmini::Entry &e) {
+        for (int i = 0; i < kSdkFilesN && i < 16; ++i) {
+            if (!missing[i]) continue;
+            // el nombre de la entrada es ASCII; el del manifiesto, wide
+            int j = 0;
+            while (j < e.name_len && kSdkFiles[i].name[j] != 0 && (wchar_t)e.name[j] == kSdkFiles[i].name[j]) ++j;
+            if (j != e.name_len || kSdkFiles[i].name[j] != 0) continue;
+            const long got = zipmini::extract(sdk_zip, zn, e, buf, cap);
+            if (got != (long)kSdkFiles[i].size) { log_num("sdk: no se pudo extraer el archivo numero ", (unsigned)i); break; }
+            if (sdk_write_file(dir, kSdkFiles[i].name, buf, (unsigned)got)) { ++written; missing[i] = false; }
+            else log_num("sdk: no se pudo escribir el archivo numero ", (unsigned)i);
+            break;
+        }
+    });
+    VirtualFree(buf, 0, MEM_RELEASE);
+    log_num("sdk: cache escrita desde el dll, archivos ", (unsigned)written);
+    if (written != need) log_num("  ! faltaban y no se pudieron escribir ", (unsigned)(need - written));
+    return written;
+}
+
 // Busca en la cache un archivo del modulo pedido cuya version sea 2.<menor>.
 static bool find_in_cache(const wchar_t *module, unsigned minor, wchar_t *out) {
     // Nuestra carpeta manda. La cache de NGX queda de respaldo: si el archivo
