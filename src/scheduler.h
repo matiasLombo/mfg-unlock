@@ -153,4 +153,34 @@ inline Output tick(State &e, const Config &c, const Input &in, Log &log) {
     return s;
 }
 
-}  // namespace rep
+
+// ---- difusion por frame (fracdiff): el nucleo puro, testeable sin GPU -------
+//
+// La alternativa a los bloques: en vez de correr floor(R) por un tramo y
+// ceil(R) por otro, se decide la cuenta de CADA frame para que el promedio
+// corriente siga R. Es error-feedback de primer orden (delta-sigma), que para
+// una fraccion constante produce la distribucion de Bresenham -- la misma que
+// el ritmo Euclidiano/Bjorklund, el reparto pareto optimo de los +1
+// (docs/investigacion-fraccionales.md). Sin tabla, sin estado mas que un
+// acumulador.
+//
+// PURA: no toca nada del plugin ni de Windows. fracdiff (el modo con juego)
+// escribiria `lo + add` en el bound y el pacer por frame, con la reserva fija
+// en ceil. Aca solo esta la matematica del reparto, para que un test sin GPU
+// confirme que promedia R y que los +1 quedan lo mas parejos posible ANTES de
+// tocar el plugin.
+//
+// Devuelve la cuenta de este frame (lo, o lo+1). `acc` es el unico estado.
+inline long diffuse_step(double &acc, double per_frame) {
+    if (per_frame < 0.0) per_frame = 0.0;
+    const long lo = (long)per_frame;
+    const double frac = per_frame - (double)lo;
+    acc += frac;
+    long add = (long)acc;      // 0 o 1 mientras frac < 1 (siempre, es una fraccion)
+    if (add < 0) add = 0;
+    if (add > 1) add = 1;      // defensa: nunca subir mas de un escalon por frame
+    acc -= (double)add;
+    return lo + add;
+}
+
+}  // namespace scheduler

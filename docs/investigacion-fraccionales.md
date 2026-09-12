@@ -80,7 +80,13 @@ sigue la reserva [ctx+8]. La unica duda es el flip queue con bound < reserva.
 fracdiff la mide directo. NO escribir el codigo sin poder correrlo (parcheo del
 plugin sin test = crash a ciegas); esto es el plan para hacerlo juntos.
 
-Implementacion (un commit, con test + regresion):
+El nucleo puro del reparto YA esta hecho y testeado sin GPU
+(`scheduler::diffuse_step`, tools/test_diffuse.cpp, en test-host): promedia R
+exacto y da el reparto de maxima evenness (Euclidiano) para R de 2.25 a 5.90,
+incluida la banda >5.0. Correcto por construccion; lo que falta es cablearlo al
+plugin (parcheo) y medir. Ver [[politica-sin-gpu]].
+
+Implementacion del cableado (un commit, con test + regresion):
 
 1. Config `fracdiff` (off por defecto), como dynstep/dynpin. `g_frac_diff`.
 2. En fractional_tick, rama nueva cuando `g_frac_diff && sel_is_frac()`:
