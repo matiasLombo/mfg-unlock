@@ -36,16 +36,24 @@ cruzando un entero (ej. 2.8 -> 3.2, ceil 3 -> 4) fracres paga UN enfriamiento de
   gana con el controlador MOVIENDOSE, no solo a ratio clavado?". Esa es la
   medicion que falta (gameplay real, controlador activo).
 
-**H1b-opt (nueva, sin medir): fracres SIN enfriamiento ni en los cruces.** Si se
-dimensiona la asignacion al MAXIMO (count_cap) UNA vez al arranque (un solo
-enfriamiento), la reserva inmediata puede difundirse en [floor,ceil] para
-siempre sin resize -- la asignacion ya alcanza para cualquier cuenta <= count_cap.
-Eso eliminaria el hitch por cruce de entero del controlador. RIESGO a medir: memoria
-[[base-rate-pinned-by-ceiling]] dice que declarar un techo mas alto puede clavar
-la base (menos fps). El experimento mfg-ceilfirst probo declarar el techo y dio
-"sin efecto" en el ratio, pero el costo en la base no quedo cerrado. NO
-implementar a ciegas: primero medir si dimensionar al max clava la base. Si NO la
-clava -> fracres queda cooldown-free de verdad, con el controlador moviendose.
+**H1b-opt (mecanismo ACLARADO por disasm + premisa del enfriamiento; falta UNA
+medicion): fracres SIN enfriamiento ni en los cruces.** Cuadro completo ahora:
+- El array de METADATA de sub-frames es inline y SIEMPRE de 6 (disasm 0x473d0).
+- Los BUFFERS de GPU de los frames generados siguen la cuenta de la API
+  (numFramesToGenerate): cambiarla libera y re-reserva con 100 ms
+  (0x1800497fd escribe 100.0) -- esa ES la premisa del enfriamiento.
+- Por eso: a ratio FIJO la API se setea al ceil una vez -> sin realloc ->
+  cooldown-free (medido). Con el controlador MOVIENDOSE y cruzando un entero, la
+  cuenta de la API tiene que crecer -> realloc -> un enfriamiento por cruce
+  (mi scoping, ahora confirmado por mecanismo, no solo por la corrida a ratio fijo).
+- **H1b-opt:** setear la cuenta de la API = MAX (count_cap) UNA vez al arranque
+  (un solo enfriamiento) -> los buffers ya alcanzan para cualquier cuenta -> se
+  difunde el bound [ctx+8] en [floor,ceil] para siempre SIN realloc, ni en los
+  cruces. Queda cooldown-free de verdad con el controlador moviendose.
+- Lo UNICO sin medir: declarar el max, ¿clava la base fps?
+  ([[base-rate-pinned-by-ceiling]]). mfg-ceilfirst probo declarar el techo y dio
+  "sin efecto en el ratio", pero el costo en la base no se cerro. Es la unica
+  medicion que separa H1b-opt de "listo". NO implementar a ciegas.
 
 **Por que sigue OFF por defecto y no lo prendi solo:** prenderlo es un cambio de
 comportamiento, y la regla es que eso entra con la regresion de los juegos
@@ -175,6 +183,31 @@ reconfigurar, o si reasigna la memoria por frame -> inerte o crash. Riesgo:
 transitorio bound>reserva (se evita con el orden subir=reserva primero,
 bajar=bound primero, arrancando iguales) y churn de reasignacion
 ([[fractional-swapchain-churn]]). Es el unico camino sin medir hacia el premio.
+
+### DISASM del array de slots (2026-09-12): es inline y SIEMPRE de 6
+
+En 0x473d0, el camino de config construye el array de sub-frames:
+```
+1800473d0: sub  $0x28,%rsp
+1800473d4: add  $0x48,%rcx           ; base = ctx+0x48
+1800473d8: lea  0x18003b2b0,%r9      ; fn por elemento (ctor/init)
+1800473df: ba c0 00 00 00  mov $0xc0,%edx   ; stride = 0xC0
+1800473e4: 41 b8 06 00 00 00 mov $0x6,%r8d  ; count = 6 (CONSTANTE)
+1800473ea: call 0x1800680bc          ; init de 6 elementos de 0xC0 en ctx+0x48
+```
+El array de METADATA de sub-frames es INLINE en el contexto y se construye
+SIEMPRE para 6 (0x6 hardcodeado, stride 0xC0, base ctx+0x48). Coincide con
+[[multiframe-ceiling-is-structural]] (el array es inline, 6x es el maximo). El
+loop de 0x45984 (bound = [ctx+8]) indexa ESTE array inline.
+
+Implicacion para fracres / H1b-opt: el bound [ctx+8] se puede difundir en
+[2, count_cap] contra un array que SIEMPRE tiene 6 slots -- ese array NUNCA se
+reasigna, exista el ratio que exista. O sea, la metadata no es lo que forzaria un
+resize al cruzar un entero. QUEDA ABIERTO (no resuelto por este disasm): si los
+BUFFERS de GPU de los frames generados siguen numFramesToGenerateMax (fijado una
+vez) o la cuenta por-llamada; de eso depende si el enfriamiento en el cruce que
+documente es real o si fracres ya es cooldown-free hasta 6. Se cierra con el sitio
+de asignacion de los buffers de GPU o midiendo con el controlador moviendose.
 
 ### DISASM que EXPLICA H1a/H1b (2026-09-12, snippet 2.12 embebido, reproducible)
 
