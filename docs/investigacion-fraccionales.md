@@ -4,6 +4,32 @@ Documento vivo. Objetivo, hipotesis rankeadas, lo medido, y el conocimiento
 externo. Se actualiza cada vez que se aprende algo; nada entra sin medicion o
 sin una cita.
 
+## VERDICTO FINAL de grilla+fracres (2026-09-12): OPT-IN, no default
+
+Con el crash arreglado, grilla+fracres es SEGURO (0 crashes en Cyberpunk + Halo,
+23 reloads; Halo hasta 6x, count_cap=6 -- el max de Halo Campaign Evolved es 6,
+NO 3; la memoria vieja era otro Halo) y reproduciblemente MAS SUAVE en la cuenta
+(apiChg 9-14 vs 22-27; ratio mas apretado). PERO:
+- La latencia es NEUTRA (ruido), no baja.
+- La suavidad de cadencia que gana esta, por la nota MEDIDA del propio controlador
+  (controller.h:224), ~10x por debajo del umbral perceptible -> probablemente NO
+  se siente.
+- La grilla CUESTA precision del objetivo (hasta step/2 x base en fps).
+- [[present-timing-is-not-fluidity]]: el proyecto ya se quemo con mejoras
+  estadisticas que no se ven.
+
+**Decision (disciplinada): NO se hace default.** Cambiar el default de envio por
+una mejora estadistica pero probablemente imperceptible, con costo de precision,
+es exactamente el error que las memorias marcan. Queda como OPT-IN documentado,
+seguro y listo (mfg-fracres.txt=1 + dynstep 25, modo dynamic) para quien quiera el
+ratio fraccional pineado o experimentar. Si se quiere decidir el default de
+verdad, hace falta un A/B VISUAL (solo un humano juzga fluidez), no mas
+estadistica. La palanca de fluidez PERCEPTIBLE que queda es H4 (colocacion
+temporal), no esto.
+
+**Lo que SI fue una mejora real de esta linea: el fix de la carrera del reload**
+(abajo) -- endurece el default de TODOS los juegos contra un crash real.
+
 ## FIX de la carrera del reload (2026-09-12): VALIDADO
 
 El crash de fracres+grilla era apply_override_now llamando g_orig_setoptions, un
