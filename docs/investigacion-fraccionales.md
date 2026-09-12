@@ -4,6 +4,36 @@ Documento vivo. Objetivo, hipotesis rankeadas, lo medido, y el conocimiento
 externo. Se actualiza cada vez que se aprende algo; nada entra sin medicion o
 sin una cita.
 
+## VEREDICTO de fracres con el CONTROLADOR (2026-09-12): PLIEGA para el default
+
+A/B medido en Cyberpunk -benchmark, mode 8 dynamic SIN dynpin (el controlador
+decide y se mueve), instrumento honesto (counted multiplier del swapchain):
+
+| fracres | crashes | enfriamientos (API a ceil) | ratio p10-p90 | lat p90 |
+|---------|---------|----------------------------|---------------|---------|
+| ON      | 0       | **100**                    | 4.17-5.06     | 4611 us |
+| OFF     | 0       | **0**                      | 4.11-5.00     | 4365 us |
+
+Lo que dice, sin adornar: el controlador cruza enteros TODO el tiempo mientras
+persigue el target, y cada cruce hace que fracres suba el ceil por la API =
+resize + 100 ms de enfriamiento. 100 en una corrida (~14% del tiempo degradado).
+El baseline (bloques) varia el inmediato POR DEBAJO de la asignacion que ya
+existe, sin tocar la API: 0 enfriamientos. Resultado: con el controlador
+moviendose, fracres NO gana -- la ventaja de ratio estable que tenia a dynpin
+FIJO desaparece (el movimiento del controlador domina la dispersion), y la
+latencia p90 queda peor por los enfriamientos.
+
+**DECISION (medida): fracres NO se promueve a default.** El baseline por bloques
+ya es igual o mejor para el uso real (controlador en movimiento). fracres queda
+como herramienta de NICHO: solo gana a un ratio fraccional FIJO/pineado (dynpin),
+donde no hay cruces -- ahi si es 3-6x mas estable sin costo. Es "saber plegar":
+el mecanismo existe y funciona, pero NVIDIA hace enteros por algo, y nuestro
+baseline por bloques ya cubre el fraccional del controlador. La unica via que
+haria a fracres competitivo con el controlador es H1b-opt (asignacion al max una
+vez, sin resize), pero eso probablemente clava la base ([[base-rate-pinned-by-ceiling]])
+-> peor negocio. fracres se queda off por defecto, documentado, para el caso
+pineado.
+
 ## REGRESION CERRADA (2026-09-12, build be5aa217, config por defecto flags off)
 
 Los tres juegos instalados, corridos en el build de envio (count_cap + fracres
