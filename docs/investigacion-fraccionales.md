@@ -133,8 +133,13 @@ sitio distinto -- el flip queue con `reserva` ranuras desbordado por generar de
 mas -- y es el caso POR ENCIMA, no por debajo.
 
 Queda por confirmar en el flip queue si bound < reserva sub-llena la cola y eso
-para, o si presenta n limpio. Esa es la unica duda que el disasm no cierra y que
-fracdiff mediria directo.
+para, o si presenta n limpio. **El disasm estatico NO puede cerrar esto**
+(intentado 2026-09-11): los strings "Present queue is empty" / "Present count
+mismatch" / "Num frames to present" (en .rdata 0x778xx) no tienen xref-lea
+directo -- se referencian por la capa de logging (tabla de format strings), asi
+que el chequeo que estanca vive en el hilo ASINCRONO de rsync/present, no en un
+if inline. Es una propiedad de runtime del pacer asincrono. Solo fracdiff (con
+juego) la contesta. NO gastar mas disasm aca.
 
 ---
 
