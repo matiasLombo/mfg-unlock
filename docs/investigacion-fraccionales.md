@@ -4,6 +4,38 @@ Documento vivo. Objetivo, hipotesis rankeadas, lo medido, y el conocimiento
 externo. Se actualiza cada vez que se aprende algo; nada entra sin medicion o
 sin una cita.
 
+## CIERRE de la investigacion de fraccionales (2026-09-12): CONCLUSION DEFINITIVA
+
+A/B medido en Cyberpunk -benchmark, instrumento honesto (gaps de presentacion):
+
+| modo                       | cambios de conteo | hitches >=16ms |
+|----------------------------|-------------------|----------------|
+| fraccional 2.5x (bloques)  | 270               | 17.4%          |
+| conmutacion enteros (dynstep 100) | 18         | 16.9%          |
+
+Los hitches son CASI IGUALES pese a 270 vs 18 cambios. -> Los cambios de conteo NO
+son la fuente dominante de hitches; la escena/base del juego lo es. Esto cierra
+todo el hilo:
+
+1. fracres (por frame, inmediato) -> GHOSTING (se saltea la reconfiguracion que
+   re-alinea la historia). Muerto, correctamente.
+2. El fraccional por BLOQUES (el dynamic default, via API) -> imagen correcta y su
+   tasa de hitches ~= la de enteros. El fraccional correcto YA existe y NO es peor
+   que enteros en suavidad. No hay "fix de fracres" pendiente: el camino bueno ya
+   esta (bloques); fracres era el desvio equivocado.
+3. La llamada slDLSSGSetOptions NO bloquea (2us); los cambios de conteo no agregan
+   hitches significativos.
+4. Los tirones que reporto el usuario vienen de la entrega de frames del propio
+   juego (bajones de base), no del mecanismo de conteo del mod.
+
+RESOLUCION: fraccional suave-perfecto no lo limita el mod sino el juego/base.
+Opciones utiles del mod, todas validas: enteros fijos (mas nitido, conteo
+constante), dynamic por bloques (adaptativo, imagen correcta, ~= enteros en
+suavidad), o dynamic con dynstep 100 = conmutacion de enteros (adaptativo + conteo
+casi constante + cadencia pareja, lo que hace NVIDIA en Blackwell Dynamic MFG).
+fracres queda descartado. Instrumento de diagnostico (bloqueo de setoptions) vive
+gateado tras mfg-dyndiag.txt para futuras mediciones. FIN del hilo de fraccionales.
+
 ## RUNTIME MEDIDO (2026-09-12): la llamada NO bloquea; el costo es DIFERIDO
 
 Instrumente el bloqueo de slDLSSGSetOptions (gateado tras mfg-dyndiag.txt, off por
