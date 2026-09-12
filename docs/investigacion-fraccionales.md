@@ -54,6 +54,41 @@ frame**. Mientras `[ctx+4] <= [ctx+8]` no hay deref nulo: la ranura extra queda
 reservada y sin usar (desperdicio de reserva, no crash). Eso seria difusion por
 frame SIN enfriamiento -- el mecanismo viejo, resucitado sobre la base nueva.
 
+### Disasm confirmado en sl.dlss_g.dll 2.12 (2026-09-11, sesion Opus 4.8)
+
+OJO: los campos estan en `sl.dlss_g.dll` (el PLUGIN, 612992 bytes), NO en
+`nvngx_dlssg.dll` (el snippet, 7.5 MB). El RVA 0x47333 encaja en el plugin.
+
+- Constructor de los dos contadores en **0x47333** -- MISMO RVA que la memoria
+  de 2.13, la estructura no cambio entre 2.12 y 2.13:
+      0x47333  mov eax,[rdx+4]          (bound)
+      0x4733c  mov [rcx+4],eax          (+9 del patron)
+      0x4733f  mov eax,[rdx+8]          (reserva)
+      0x47348  mov [rcx+8],eax          (+15)
+- **El loop de generacion RE-LEE [ctx+4] de memoria cada iteracion** (no lo
+  cachea): `cmp [r13+4],ebx` en 0x3ddfa y `cmp edi,[r13+4]` en 0x3e210. Esto
+  es lo decisivo: escribir ctx+4 por frame cambia el bound por frame.
+- La reserva se dimensiona de [ctx+8]: `mov r14d,[rdx+8]` en 0x45984, una vez.
+
+Los dos campos se consumen por separado y el bound es una lectura viva. La via
+para difundir por frame existe a nivel de codigo.
+
+### Preguntas abiertas, en orden, para la proxima sesion
+
+0. Son r13(gen), rdx(fill) y rcx(ctor) el MISMO ctx en runtime? El ctor escribe
+   [rcx+4]/[rcx+8]; los consumidores leen [r13+4] y [rdx+8]. Confirmar que es un
+   unico objeto persistente. Camino: ver de que puntero vienen r13 y rdx.
+1. Que escribe hoy g_wic_sites (set_count_now)? Si ya escribe el ctx+4 vivo por
+   frame, difundir es: parchear el [ctx+8] del ctor a ceil por separado y
+   escribir floor/ceil en ctx+4 por frame. Camino: patch_work_item_count y a
+   que direccion apunta g_wic_sites.
+2. [ctx+4] < [ctx+8] presenta limpio o para la presentacion? Con dynpin y un
+   parche de prueba que fije [ctx+8]=3 y ponga [ctx+4]=2: si presenta a 2x sin
+   crash ni freeze, la desigualdad es segura hacia abajo.
+3. El pacer y la latencia siguen a [ctx+4] o a [ctx+8]? Con lo anterior
+   andando, latencia.py sobre un dynpin 250 por difusion: unimodal intermedia
+   (exito) vs bimodal o clavada en L_ceil.
+
 Esto es hipotesis, no resultado. Lo que hay que medir:
 1. `[ctx+4] < [ctx+8]` -> presenta limpio, o "para la presentacion" (la memoria
    [[subframe-bound-semantics]] vio eso, pero con `[ctx+8]` tambien bajo)?
