@@ -74,6 +74,8 @@ static void apply_config(void) {
             g_nullalt = a.nullalt;
             g_dyn_step = a.dynstep;
             if (a.dynstep != 0) log_num("dynamic: grilla del ratio (dynstep), centesimas ", (unsigned)a.dynstep);
+            g_dyn_pin = a.dynpin;
+            if (a.dynpin != 0) log_num("dynamic: ratio FIJADO (dynpin) en centesimas -- instrumento ", (unsigned)a.dynpin);
             if (a.blockms > 0) {
                 g_block_ms = a.blockms;
                 log_num("slowalt: block length from file, ms ", (unsigned)a.blockms);

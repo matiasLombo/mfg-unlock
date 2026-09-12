@@ -73,6 +73,7 @@ struct Settings {
     int queue          = -1;      // mfg-queue.txt: un digito 0..3
     int blocks         = 0;       // mfg-blocks.txt: 2..64
     int dynstep        = 0;       // dynstep: grilla del ratio de DYNAMIC en centesimas (0 = sin grilla, defecto)
+    int dynpin         = 0;       // dynpin: fija el ratio de DYNAMIC en centesimas (0 = off; medicion, no juego normal)
 
     // --- mfg-settings.txt: -1 = la clave no estaba o no valia ---
     int mode           = -1;
@@ -275,6 +276,7 @@ inline const Numeric kNumerics[] = {
     { "queue",        &Settings::queue,        0, 3 },
     { "blocks",       &Settings::blocks,       2, 64 },
     { "dynstep",      &Settings::dynstep,      0, 100 },
+    { "dynpin",       &Settings::dynpin,       0, 600 },
 };
 inline const int kNumericsN = (int)(sizeof(kNumerics) / sizeof(kNumerics[0]));
 

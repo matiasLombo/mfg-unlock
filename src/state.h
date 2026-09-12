@@ -48,6 +48,8 @@ static double g_base_fps = 0.0;       // that, divided by the multiplier in forc
 static int  g_block_ms = 0;           // mfg-blockms.txt, 0 = default
 // escribe: config_apply.h; lee: writer.h
 static int  g_dyn_step = 0;           // dynstep: grilla del ratio de DYNAMIC, centesimas (0 = sin grilla, defecto)
+// escribe: config_apply.h; lee: writer.h
+static int  g_dyn_pin = 0;            // dynpin: fija g_dyn_target (centesimas); 0 = off. Instrumento de medicion.
 
 // escribe: config_apply.h; lee: writer.h
 static bool g_blockalt = false;       // mfg-blockalt.txt: blocks above 2.0x too

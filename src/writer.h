@@ -819,6 +819,7 @@ static const int kCtrlMinMuestras = 4;
 
 static void dyn_apply(double base_fps) {
     if (g_force_sel != kSelDynFuture) return;
+    if (g_dyn_pin > 0) { g_dyn_target = g_dyn_pin; return; }   // ratio fijado: el controlador no decide
     if (base_fps <= 1.0) return;
     if (g_ctrl_fps > 0.0 && g_ctrl_n < kCtrlMinMuestras) {
         static int muted = 0;
@@ -917,6 +918,7 @@ static double g_frac_acc = 0.0;
 static double g_produced_avg = 0.0;
 
 static void fractional_tick(void) {
+    if (g_dyn_pin > 0 && sel_is_frac()) g_dyn_target = g_dyn_pin;
     static LONG was_sel = -1;
     if (g_force_sel != was_sel) {
         was_sel = g_force_sel;
