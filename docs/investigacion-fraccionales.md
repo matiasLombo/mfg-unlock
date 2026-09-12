@@ -4,6 +4,31 @@ Documento vivo. Objetivo, hipotesis rankeadas, lo medido, y el conocimiento
 externo. Se actualiza cada vez que se aprende algo; nada entra sin medicion o
 sin una cita.
 
+## FIX de la carrera del reload (2026-09-12): VALIDADO
+
+El crash de fracres+grilla era apply_override_now llamando g_orig_setoptions, un
+puntero que quedaba COLGADO al descargarse el plugin (el handler de unload
+dropeaba los sitios de datos pero NO los punteros a funciones; la guarda
+"== nullptr" no saltaba porque estaba colgado, no nulo). Fix en loader.h
+(on_dll_load, reason UNLOADED): anular todo g_orig_* que caiga en el rango
+descargado y limpiar el override pendiente; se re-resuelven al recargar. No
+gated: endurece tambien el default (misma clase de crash posible con el baseline).
+
+Validado: crash-repro (grilla+fracres) 3/3 limpio (6 reloads), + regresion en el
+build con el fix: Cyberpunk 0 crash (2 reloads, 390 ventanas), Halo 0 crash
+(**8 reloads**, 4292 ventanas). En total **14 eventos de reload, 0 crashes**,
+contra el crash de antes. GTA V: el DLL carga limpio (plugin armado, sin crash de
+init) pero el run automatico se traba en el Rockstar Launcher (necesita click en
+Play); cubierto por su validacion full en el build previo (be5aa217, 113 ventanas)
++ el fix siendo codigo de unload comun, probado en 14 reloads de otros dos juegos.
+
+**Consecuencia para el veredicto:** el crash era EL bloqueante de grilla+fracres
+para default. Con el fix, grilla+fracres queda: mas suave en la cuenta (menos
+cambios de API, ratio mas apretado, reproducible), latencia neutra (ruido), y sin
+crash. O sea, ahora SI es una opcion de default real -- la mejora es de fluidez
+de cadencia, no de latencia. Falta: confirmar la suavidad con mas corridas y
+decidir si se expone (grilla+fracres como el camino fraccional del dynamic).
+
 ## CORRECCION (2026-09-12, idea del usuario: grilla 0.25 + fracres)
 
 El veredicto "pliega" de abajo estaba basado en (a) un conteo de cooldowns MAL
