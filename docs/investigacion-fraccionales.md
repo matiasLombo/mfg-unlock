@@ -73,6 +73,45 @@ OJO: los campos estan en `sl.dlss_g.dll` (el PLUGIN, 612992 bytes), NO en
 Los dos campos se consumen por separado y el bound es una lectura viva. La via
 para difundir por frame existe a nivel de codigo.
 
+### CORRECCION (2026-09-11, mismo dia, mas disasm): H1 NO refutada, SIN AISLAR
+
+Seguir el disasm de los consumidores corrige la refutacion de abajo. Mapa
+completo de quien lee que, en sl.dlss_g.dll 2.12:
+
+- BOUND [ctx+4]: lo lee el loop de generacion (0x3ddfa, 0x3e210) Y **el pacer**
+  (`mov ecx,[r13+4]` en la firma de patch_pacer_count -- r13 es el mismo ctx).
+  Los dos estan parcheados (g_wic_sites[0], g_pace_count).
+- RESERVA [ctx+8]: **solo la lee el fill** (0x45984), que dimensiona la memoria.
+- gen-flag: parcheado (g_gen_flag).
+
+O sea: generacion Y pacer siguen al BOUND; solo la reserva de memoria usa
+[ctx+8]. Eso es lo contrario de "el metering se ata a la reserva" que escribi
+abajo. El metering (pacer) sigue al bound, que controlamos por frame.
+
+La evidencia de "detiene la presentacion" hay que releerla con esto:
+- El deadlock de Metro (RSYNC "Present queue is empty", mode 2->4) fue el pacer
+  POR ENCIMA de la API (pacer 3, reserva 2). Confirma que **por encima** de la
+  reserva es malo. NO dice nada de por debajo.
+- set_count_now HOY recorta el byte A la API (`w > ap -> w = ap`) y mueve la
+  reserva en bloques junto con el byte. Asi que "reserva fija en ceil, bound por
+  debajo" **nunca se aislo**: el codigo siempre movio los dos juntos.
+
+**Estado corregido: H1 no esta refutada. Esta sin probar en aislamiento.** El
+disasm muestra un camino viable (pacer sigue el bound; solo el fill usa la
+reserva). El experimento definitivo, nunca corrido:
+
+    fracdiff (modo experimental): reserva fijada a ceil(R) por la API UNA vez
+    (un enfriamiento al arrancar); bound + pace + gen difundidos por frame en
+    [floor, ceil] (byte NUNCA por encima de la reserva); CERO llamadas a la API
+    por frame. Medir: (a) modula el ratio? (b) latencia unimodal intermedia?
+
+Si (a) modula: H1 revive y es el premio -- difusion por frame, cero
+enfriamientos, latencia intermedia estable. Si no modula: entonces si hay algo
+mas atado a la reserva y ahi si esta el muro. Es un cambio de comportamiento
+(config fracdiff) + una corrida con juego: no se puede cerrar solo con disasm.
+
+---
+
 ### RESULTADO (2026-09-11): hipotesis 1 REFUTADA en 2.12
 
 Q0 (mismo ctx): SI, probado por la regla de crash (que [ctx+4]>[ctx+8]
