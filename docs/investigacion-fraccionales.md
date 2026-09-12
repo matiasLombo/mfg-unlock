@@ -4,7 +4,37 @@ Documento vivo. Objetivo, hipotesis rankeadas, lo medido, y el conocimiento
 externo. Se actualiza cada vez que se aprende algo; nada entra sin medicion o
 sin una cita.
 
-## VEREDICTO VISUAL de fracres (2026-09-12): EMPEORA la imagen (ghosting) — ABANDONAR
+## MECANISMO del ghosting, del disasm (2026-09-12) -- y el fix real
+
+Disasm de sl.dlss_g.dll 2.12. El ghosting de fracres NO es misterioso:
+
+- Cambiar el conteo correctamente exige una RECONFIGURACION, disparada por el flag
+  byte [ctx+0x4488] (seteado en 0x49fb1 en la ruta de opciones, chequeado en
+  0x470ca). Con el flag en 1, el plugin (0x470ca -> 0x473d0 y calls vecinas)
+  RECONSTRUYE el array inline de sub-frames (0x473d0: 6 slots x 0xC0, siempre 6) y
+  realoca buffers -> re-alinea la historia temporal para el nuevo conteo -> imagen
+  correcta. Ese trabajo ES el costo (la tabla del baseline mide p99 121ms / 19
+  hitches a 2.50x; no hay un timer de 100ms separado -> el cooldown es la
+  reconfiguracion misma).
+- La API setea ese flag -> reconfigura -> sin ghosting, con el hitch. fracres
+  cambio el conteo por el inmediato SIN setear el flag -> sin reconfiguracion ->
+  la historia queda para el conteo viejo -> GHOSTING. Confirmado.
+
+Por que no hay fix barato trivial: setear el flag = reconfigurar = pagar el hitch;
+no setearlo = ghosting. Misma disyuntiva que vio el usuario (bloques vs fracres).
+
+El fix REAL (candidato, deep): reconfiguracion LIVIANA. El array es SIEMPRE de 6
+slots, asi que reconstruirlo en un 2<->3 es redundante; un cambio dentro de [2,6]
+no necesita realloc, solo re-alinear la historia. Parchear la ruta de reconfig del
+plugin para hacer SOLO eso = fraccional LIMPIO (sin ghosting) y BARATO (sin el
+hitch pesado). Es, en esencia, lo que Blackwell hace por hardware y Ada no.
+
+Estado: mecanismo mapeado y confirmado. El fix es cirugia del plugin (alto riesgo)
++ validacion VISUAL; es un proyecto, no un parche. Camino concreto, no callejon.
+Proximo paso si se persigue: disasm de 0x473d0 y calls vecinas (0x47430, 0x4b230,
+0x3b0b0) para separar re-alinear-historia (necesario) de realloc (redundante).
+
+## VEREDICTO VISUAL de fracres (2026-09-12): EMPEORA la imagen (ghosting) \u2014 ABANDONAR
 
 El usuario probo fracres+grilla en GTA V (dynamic) y reporto: **"mucho ghosting y
 no fluida"**. Esto es lo que la estadistica NO capturaba y lo que decide: fracres
