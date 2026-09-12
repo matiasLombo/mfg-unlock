@@ -73,6 +73,42 @@ OJO: los campos estan en `sl.dlss_g.dll` (el PLUGIN, 612992 bytes), NO en
 Los dos campos se consumen por separado y el bound es una lectura viva. La via
 para difundir por frame existe a nivel de codigo.
 
+### RESULTADO (2026-09-11): hipotesis 1 REFUTADA en 2.12
+
+Q0 (mismo ctx): SI, probado por la regla de crash (que [ctx+4]>[ctx+8]
+desreferencie nulo solo pasa si son campos del mismo objeto).
+
+Q1 (direccionables por separado): SI. patch_work_item_count reescribe el codigo
+del ctor: `mov eax,[rdx+4]` -> `push N; pop rax` (g_wic_sites[0] = inmediato del
+bound) y `mov eax,[rdx+8]` -> igual (g_wic_sites[1] = inmediato de la reserva).
+set_count_now escribe el MISMO valor a los dos. Separarlos seria trivial.
+
+Q2 (presenta limpio con [ctx+4] < [ctx+8]?): **NO. Detiene la presentacion.**
+Medido en [[frac-por-cuenta-de-api]]: "byte por encima de la reserva crashea,
+POR DEBAJO detiene la presentacion." La idea (reserva=ceil fija, bound difundido
+por debajo) ES lo que describen los comentarios viejos de fractional_tick ("the
+loop is free to produce fewer"), pero eso era la base VIEJA. En 2.12 generar
+menos que la reserva no presenta menos: no presenta.
+
+Por que: el bound [ctx+4] SI es lectura viva y genera menos (el disasm no
+mentia), pero el metering/pacer del plugin espera `reserva` frames por batch y
+un batch que entrega menos SE ESTANCA ("a batch stalls when the loop delivers
+fewer than the presentation side was promised"). El metering se ata a la reserva
+/ cuenta de la API, no a nuestros bytes. Por eso la reserva solo se cambia por
+la API, solo por bloques, con el enfriamiento -- de donde sale el pulso.
+
+**Consecuencia:** la difusion por frame no se recupera en 2.12 tocando solo el
+bound. El muro es que el metering se ata a la reserva. Re-ranking:
+
+- **H2 (el enfriamiento de 100 ms)** sube: unico camino para cambiar la reserva
+  por frame. ALTO riesgo.
+- **H3 (ciclo mas corto)**: baja el periodo del pulso, no lo elimina. Barato,
+  parcial, sin riesgo. Candidato para lo proximo con juego.
+- **Nueva sub-pregunta**: el metering que se estanca -- contador SEPARADO y
+  parcheable (como el bound), o intrinseco al flip queue? Si es aparte y se
+  difunde junto al bound, H1 revive. Camino: disasm del consumidor de [ctx+8]
+  en el camino de PRESENTACION (no el de fill 0x45984).
+
 ### Preguntas abiertas, en orden, para la proxima sesion
 
 0. Son r13(gen), rdx(fill) y rcx(ctor) el MISMO ctx en runtime? El ctor escribe
