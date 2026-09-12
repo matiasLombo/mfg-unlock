@@ -42,7 +42,13 @@ def tramos(lineas):
         ("tok", re.compile(r"raw token calls (\d+)")),
         ("hit", re.compile(r"hitches over 33ms (\d+)")),
         ("lat", re.compile(r"latency sim to driver end us (\d+)")),
+        ("ms", re.compile(r"window elapsed, ms (\d+)")),
+        ("cv", re.compile(r"cadencia: desvio relativo x1000 (\d+)")),
+        ("near", re.compile(r"off-refresh near a change x1000 (\d+)")),
+        ("far", re.compile(r"off-refresh away x1000 (\d+)")),
+        ("techo", re.compile(r"techo declarado a la API (\d+)")),
     ]
+    re_ofp = re.compile(r"      of presents (\d+)")
     re_fps = re.compile(r"\[(\d+)ms\] measured: rendered fps (\d+)")
     re_modo = re.compile(r"panel: mode now (\d+)|settings: restored mode (\d+)")
     for l in lineas:
@@ -64,6 +70,11 @@ def tramos(lineas):
             continue
         if cur is None:
             continue
+        m = re_ofp.search(l)
+        if m:
+            # sigue a "near" o a "far", en ese orden
+            cur["far_n" if "near_n" in cur else "near_n"] = int(m.group(1))
+            continue
         for k, pat in pats:
             m = pat.search(l)
             if m:
@@ -84,9 +95,23 @@ def resumen(etiqueta, ws):
     pres = statistics.median(w["fps"] * w["pc"] / w["tok"] for w in ws)
     hit = sum(w.get("hit", 0) for w in ws)
     lat = [w["lat"] for w in ws if "lat" in w]
-    return "%-16s ventanas %4d  ratio med %.2f (p10 %.2f p90 %.2f)  base med %4d  presentados med %4d  hitches %3d%s" % (
+    out = "%-16s ventanas %4d  ratio med %.2f (p10 %.2f p90 %.2f)  base med %4d  presentados med %4d  hitches %3d%s" % (
         etiqueta, len(ws), statistics.median(r), r[len(r) // 10], r[int(len(r) * 0.9)], base, pres, hit,
         ("  lat med %d us" % statistics.median(lat)) if lat else "")
+    # lo que solo existe con nuestro hook de Present (lanzado directo, sin overlay)
+    secs = sum(w.get("ms", 0) for w in ws) / 1000.0
+    # cambios de la cuenta de la API: el techo declarado cambia entre ventanas
+    # consecutivas (cada cambio = slDLSSGSetOptions + 100 ms de enfriamiento)
+    techos = [w["techo"] for w in ws if "techo" in w]
+    api = sum(1 for i in range(1, len(techos)) if techos[i] != techos[i - 1])
+    bad = sum(w.get("near", 0) * w.get("near_n", 0) + w.get("far", 0) * w.get("far_n", 0) for w in ws) / 1000.0
+    tot = sum(w.get("near_n", 0) + w.get("far_n", 0) for w in ws)
+    cv = [w["cv"] for w in ws if "cv" in w]
+    if tot > 0 or api > 0:
+        out += "\n%16s cambios API %d (%.2f/s)  fuera de cadencia %.1f%%  desvio cadencia med %.1f%%" % (
+            "", api, api / secs if secs > 0 else 0.0, 100.0 * bad / tot if tot else 0.0,
+            statistics.median(cv) / 10.0 if cv else 0.0)
+    return out
 
 
 def main():

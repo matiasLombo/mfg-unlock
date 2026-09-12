@@ -52,6 +52,7 @@ struct State {
 struct Config {
     bool sat_on = true;            // mfg-sinsat.txt lo apaga
     bool use_debt = true;        // mfg-sin-deuda.txt lo apaga
+    int  step_x100 = 0;          // `dynstep`: grilla del ratio pedido, en centesimas; 0 = sin grilla (defecto)
 };
 
 inline void sat_reset(State &e) {
@@ -214,6 +215,22 @@ inline ApplyOutput apply(State &e, const Config &c, const ApplyInput &in, Log &l
         want = 6.0;
     }
     if (want < 2.0) want = 2.0;
+    // La grilla (`dynstep`, defecto 0.50). Lo que cuesta cadencia en DYNAMIC
+    // es cada cambio de la cuenta de la API -- el techo del ciclo, que cruza
+    // un entero -- con sus 100 ms de enfriamiento del plugin: 2.4 por segundo
+    // medidos, ~24 % del tiempo degradado (docs/mejorar-dynamic.md). Con banda
+    // muerta de 0.10, un objetivo que oscila 2.95 <-> 3.05 cruza el entero en
+    // cada replanteo; redondeado a 0.50 los dos caen en 3.00 y no hay cruce.
+    // La dispersion fina que la grilla tambien empareja esta diez veces por
+    // debajo del umbral perceptible y no cuenta (docs/dynamic-que-importa.md).
+    // El precio es precision del objetivo: hasta step/2 x base en fps.
+    if (c.step_x100 > 0) {
+        const double step = (double)c.step_x100 / 100.0;
+        double q = step * (double)(long)(want / step + 0.5);
+        if (q > 6.0) q = 6.0;
+        if (q < 2.0) q = 2.0;
+        want = q;
+    }
     e.asked_sum += (double)in.dyn_target / 100.0;
     ++e.asked_n;
     s.target_eff = target_eff;

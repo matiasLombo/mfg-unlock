@@ -77,9 +77,49 @@ int main(void) {
         check("entregando el doble de lo pedido: el sesgo topa en 0.80", x100(e.bias[2]), 80);
     }
 
-    printf("\naplicar: objetivo 180 fps con base 37 (Cyberpunk, cp-dyn-steam-ok)\n");
+    printf("\nla grilla (dynstep, defecto 0.50): menos cruces de entero, que son los que cuestan\n");
+    {
+        State e; Config c; Log log; c.step_x100 = 50;
+        ApplyInput in{ 37.0, 180.0, 1000000, 1000000, 1000, 200 };
+        ApplyOutput s = apply(e, c, in, log);
+        check("grilla 0.50: 180/37 = 4.86 -> 5.00", s.changes ? s.next : -1, 500);
+    }
+    {
+        // Un objetivo que oscila alrededor de 3 mas que la banda muerta (0.10):
+        // sin grilla, 2.88 <-> 3.12 cruza el entero en cada replanteo; con 0.50
+        // los dos caen en 3.00 y la cuenta de la API no cambia nunca.
+        State e; Config c; Log log; c.step_x100 = 50;
+        ApplyInput in{ 62.5, 180.0, 1000000, 1000000, 1000, 300 };    // 180/62.5 = 2.88
+        ApplyOutput s = apply(e, c, in, log);
+        check("2.88 con grilla 0.50: 3.00, no cambia", s.changes ? 1 : 0, 0);
+        in.base_fps = 57.7;                                          // 180/57.7 = 3.12
+        in.now_qpc += 600000; in.pc += 100;
+        s = apply(e, c, in, log);
+        check("3.12 con grilla 0.50: 3.00, no cambia", s.changes ? 1 : 0, 0);
+        c.step_x100 = 0;
+        in.base_fps = 62.5; in.now_qpc += 600000; in.pc += 100;
+        s = apply(e, c, in, log);
+        check("  sin grilla, 2.88 desde 3.00: si cambia (cruza el entero)", s.changes ? 1 : 0, 1);
+    }
+    {
+        State e; Config c; Log log; c.step_x100 = 25;
+        ApplyInput in{ 37.0, 180.0, 1000000, 1000000, 1000, 200 };
+        ApplyOutput s = apply(e, c, in, log);
+        check("dynstep 25: 4.86 -> 4.75", s.changes ? s.next : -1, 475);
+        in.base_fps = 80.0; in.now_qpc += 600000; in.pc += 100; in.dyn_target = 475;   // 2.25
+        s = apply(e, c, in, log);
+        check("  180/80 = 2.25 se queda en 2.25", s.changes ? s.next : -1, 225);
+    }
     {
         State e; Config c; Log log;
+        ApplyInput in{ 20.0, 180.0, 1000000, 1000000, 1000, 200 };
+        ApplyOutput s = apply(e, c, in, log);
+        check("la grilla no pasa el techo: 9 -> 6.00", s.changes ? s.next : -1, 600);
+    }
+
+    printf("\naplicar: objetivo 180 fps con base 37 (Cyberpunk, cp-dyn-steam-ok) -- sin grilla\n");
+    {
+        State e; Config c; Log log; c.step_x100 = 0;   // sin grilla: se prueba lo demas
         ApplyInput in{ 37.0, 180.0, 1000000, 1000000, 1000, 200 };
         ApplyOutput s = apply(e, c, in, log);
         check("primer tick: 180/37 = 4.86 -> 486", s.changes ? s.next : -1, 486);
@@ -97,7 +137,7 @@ int main(void) {
         check("salto de 0.6 s: la deuda vuelve a 0", x100(e.debt), 0);
     }
     {
-        State e; Config c; Log log;
+        State e; Config c; Log log; c.step_x100 = 0;   // sin grilla: se prueba lo demas
         ApplyInput in{ 20.0, 180.0, 1000000, 1000000, 1000, 486 };
         ApplyOutput s = apply(e, c, in, log);
         check("base 20: 180/20 = 9 -> se recorta a 6.00", s.next, 600);
@@ -108,7 +148,7 @@ int main(void) {
         check("  y no lo repite", log.count("dynamic: target needs more than 6x"), 1);
     }
     {
-        State e; Config c; Log log;
+        State e; Config c; Log log; c.step_x100 = 0;   // sin grilla: se prueba lo demas
         e.sat_ratio_max = 4.0;
         ApplyInput in{ 37.0, 180.0, 1000000, 1000000, 1000, 200 };
         ApplyOutput s = apply(e, c, in, log);
@@ -119,7 +159,7 @@ int main(void) {
         check("sat apagado (mfg-sinsat): no recorta, 486", s.next, 486);
     }
     {
-        State e; Config c; Log log;
+        State e; Config c; Log log; c.step_x100 = 0;   // sin grilla: se prueba lo demas
         c.use_debt = false;
         e.debt = 30.0;
         ApplyInput in{ 37.0, 180.0, 1000000, 1000000, 1000, 200 };
@@ -127,7 +167,7 @@ int main(void) {
         check("sin integrador (mfg-sin-deuda): la deuda no entra, 486", s.next, 486);
     }
     {
-        State e; Config c; Log log;
+        State e; Config c; Log log; c.step_x100 = 0;   // sin grilla: se prueba lo demas
         ApplyInput in{ 37.0, 180.0, 1000000, 1000000, 1000, 580 };
         ApplyOutput s = apply(e, c, in, log);
         check("de 5.80 a 4.86 es una caida de mas de 0.80: arranca la sonda", s.probe ? 1 : 0, 1);

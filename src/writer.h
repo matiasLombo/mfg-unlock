@@ -807,7 +807,7 @@ struct ControllerLog {
 static void dyn_control(double base_fps, double presented_fps) {
     if (g_force_sel != kSelDynFuture) return;
     ControllerLog log;
-    const controller::Config c{ g_sat_on, g_use_debt };
+    const controller::Config c{ g_sat_on, g_use_debt, g_dyn_step };
     controller::control(g_ctrl, c, base_fps, presented_fps, log);
 }
 
@@ -845,7 +845,7 @@ static void dyn_apply(double base_fps) {
     in.pc = g_rt_present_count;
     in.dyn_target = g_dyn_target;
     ControllerLog log;
-    const controller::Config c{ g_sat_on, g_use_debt };
+    const controller::Config c{ g_sat_on, g_use_debt, g_dyn_step };
     const controller::ApplyOutput s = controller::apply(g_ctrl, c, in, log);
     if (!s.changes) return;
     const LONG cur = g_dyn_target;

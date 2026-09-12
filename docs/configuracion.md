@@ -75,6 +75,7 @@ Fuente: `src/config.h` (la tabla `kFlags` y `kNumerics`). Test:
 | `clamplatency N` | 1..9 | `mfg-clamplatency.txt` | latencia maxima de frames |
 | `queue N` | 0..3 | `mfg-queue.txt` | modo de paralelismo de la cola |
 | `markergap A B [C D]` | ms | `mfg-markergap.txt` | banco: apagones de marcadores Reflex |
+| `dynstep` | 0 | -- | DYNAMIC: grilla del ratio pedido en centesimas (50 = 2.00/2.50/3.00; 25 = cuartos; 0 = sin grilla, defecto). Idea: menos cruces de entero = menos enfriamientos del plugin. A/B en Cyberpunk (mode 7, 165, 3+3 corridas) NO mostro diferencia -- esa escena cambia el techo 3 veces en toda la corrida, asi que no hay cruces que evitar. Solo puede ayudar donde el techo oscila alrededor de un entero. Cuesta hasta step/2 x base en precision del objetivo |
 | `slowframe A [B C]` | us | `mfg-slowframe.txt` | banco: frame lento ([[bench-needs-a-slow-frame]]) |
 
 ## Ejemplo

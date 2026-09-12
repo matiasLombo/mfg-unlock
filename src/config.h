@@ -72,6 +72,7 @@ struct Settings {
     int clamplatency   = 0;       // mfg-clamplatency.txt: un digito 1..9
     int queue          = -1;      // mfg-queue.txt: un digito 0..3
     int blocks         = 0;       // mfg-blocks.txt: 2..64
+    int dynstep        = 0;       // dynstep: grilla del ratio de DYNAMIC en centesimas (0 = sin grilla, defecto)
 
     // --- mfg-settings.txt: -1 = la clave no estaba o no valia ---
     int mode           = -1;
@@ -273,6 +274,7 @@ inline const Numeric kNumerics[] = {
     { "clamplatency", &Settings::clamplatency, 1, 9 },
     { "queue",        &Settings::queue,        0, 3 },
     { "blocks",       &Settings::blocks,       2, 64 },
+    { "dynstep",      &Settings::dynstep,      0, 100 },
 };
 inline const int kNumericsN = (int)(sizeof(kNumerics) / sizeof(kNumerics[0]));
 
