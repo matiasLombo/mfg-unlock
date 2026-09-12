@@ -4,7 +4,49 @@ Documento vivo. Objetivo, hipotesis rankeadas, lo medido, y el conocimiento
 externo. Se actualiza cada vez que se aprende algo; nada entra sin medicion o
 sin una cita.
 
-## VEREDICTO de fracres con el CONTROLADOR (2026-09-12): PLIEGA para el default
+## CORRECCION (2026-09-12, idea del usuario: grilla 0.25 + fracres)
+
+El veredicto "pliega" de abajo estaba basado en (a) un conteo de cooldowns MAL
+medido (usaba una linea de log que solo tiene la rama fracres -> baseline daba 0
+falso; el conteo justo por transiciones del "techo API" da fracres 20 vs baseline
+23, casi iguales) y (b) no haber probado la grilla que el usuario propuso.
+Rehecho bien:
+
+A/B con grilla 0.25 (dynstep 25) + fracres vs baseline, dynamic moviendose, DOS
+corridas por config, instrumento justo (transiciones del techo API, igual para
+ambos):
+
+| config            | apiChg (r1,r2) | ratio spread | lat p90 (r1,r2) | crash |
+|-------------------|----------------|--------------|-----------------|-------|
+| grilla + fracres  | 14, 14         | ~0.68        | 4201, 4097      | 0, 1  |
+| grilla + baseline | 22, 27         | ~0.86        | 4447, 3873      | 0, 0  |
+
+Lo que REPRODUCE (real):
+- fracres+grilla hace MENOS cambios de API (14 vs 22-27) -- la grilla evita que
+  el controlador oscile a traves del entero, y fracres difunde por debajo sin
+  re-tocar la API. La idea del usuario funciona.
+- fracres+grilla da un ratio mas APRETADO (~0.68 vs ~0.86 de spread) -- mas
+  suave en la cuenta.
+Lo que NO reproduce:
+- La latencia: es RUIDO. El baseline r2 tuvo el mejor p90 (3873) de todos. No se
+  puede afirmar que fracres baje la latencia.
+Lo NUEVO (bloqueante):
+- fracres+grilla CRASHEO una vez (r2): 0xc0000005 en una direccion sin modulo,
+  2.2 s despues de "modulo descargado: sitios que quedan 0". El unload/reload del
+  plugin pasa 2x por corrida en TODAS las configs (churn de las dos copias de
+  Cyberpunk), pero solo fracres crasheo. Causa probable: fracres escribe LOS DOS
+  sitios parcheados CADA frame (mucho mas que el baseline), asi que tiene mucha
+  mas exposicion a la carrera TOCTOU cuando los sitios se desmapean en el reload.
+
+**Veredicto corregido:** con la grilla, fracres es reproduciblemente MAS SUAVE en
+la cuenta (menos cambios de API, ratio mas apretado) -- la idea del usuario
+rescata la parte de fluidez. PERO no baja la latencia (ruido) y AGREGA riesgo de
+crash por la carrera del reload (escribe los sitios volatiles cada frame). NO es
+default-ready hasta arreglar esa carrera (sincronizar las escrituras de sitios
+con el unload, o escribir menos). El fix es de riesgo (clase
+[[hooking-driver-modules]]); no se hace a ciegas.
+
+## VEREDICTO de fracres con el CONTROLADOR (2026-09-12): PLIEGA para el default (SUPERSEDED, ver arriba)
 
 A/B medido en Cyberpunk -benchmark, mode 8 dynamic SIN dynpin (el controlador
 decide y se mueve), instrumento honesto (counted multiplier del swapchain):
