@@ -482,6 +482,28 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
         site_drop(g_imm2_sites, &g_imm2_n, b, size);
         site_drop(g_imm3_sites, &g_imm3_n, b, size);
         copy_unloaded(b, size);
+        // Los punteros a funciones del plugin/interposer quedan COLGANDO cuando
+        // su modulo se descarga. site_drop limpia los sitios de datos, pero no
+        // estos. Si no se anulan, una llamada de INICIATIVA PROPIA
+        // (apply_override_now -> g_orig_setoptions) entra en memoria desmapeada
+        // = 0xc0000005 en una direccion sin modulo. Es el crash del reload que
+        // aparece con fracres, que dispara el override mas seguido (medido:
+        // 0xc0000005 2.2 s despues de "modulo descargado"). Cyberpunk descarga y
+        // recarga el plugin 2x por corrida (las dos copias). Anular deja que las
+        // guardas "== nullptr" que ya existen salten, y no reproduce un override
+        // pendiente sobre un plugin que ya no esta.
+        {
+            const ULONG_PTR lo = (ULONG_PTR)b, hi = lo + size;
+            #define DROP_PFN_IF_IN(p) do { if ((ULONG_PTR)(p) >= lo && (ULONG_PTR)(p) < hi) (p) = nullptr; } while (0)
+            DROP_PFN_IF_IN(g_orig_setoptions);
+            DROP_PFN_IF_IN(g_orig_getfeaturefn);
+            DROP_PFN_IF_IN(g_orig_pclmarker);
+            DROP_PFN_IF_IN(g_orig_reflexmarker);
+            DROP_PFN_IF_IN(g_orig_reflexstate);
+            DROP_PFN_IF_IN(g_orig_slinit);
+            #undef DROP_PFN_IF_IN
+            if (g_orig_setoptions == nullptr) { g_opt_pending = 0; g_opt_have = 0; }
+        }
         const int now_qpc = g_wic_n + g_imm_n + g_imm2_n + g_imm3_n;
         if (now_qpc != before) {
             log_line("modulo descargado: se retiran sus sitios parcheados");
