@@ -4,6 +4,25 @@ Documento vivo. Objetivo, hipotesis rankeadas, lo medido, y el conocimiento
 externo. Se actualiza cada vez que se aprende algo; nada entra sin medicion o
 sin una cita.
 
+## REFINAMIENTO (2026-09-12): el costo es GPU-side; falta runtime para el fix barato
+
+Seguimiento del disasm de la reconfiguracion (0x473d0/0x3b2b0 y calls vecinas):
+- El per-element ctor (0x3b2b0) llama por la IAT a _invalid_parameter_noinfo_noreturn
+  (stub de error del CRT), NO un allocator.
+- Imports del plugin: malloc/free/realloc/LocalAlloc/CoTaskMemFree -- NINGUN import
+  de CUDA. La memoria de GPU se maneja DINAMICAMENTE (nvcuda por GetProcAddress),
+  invisible en el disasm estatico.
+- Conclusion: la reconfiguracion ESTATICA (re-init del array inline de 6 slots) es
+  BARATA y no aloca. El hitch de ~100ms NO es CPU -> es GPU-side (dinamico). Lo mas
+  probable: un DRAIN/sync del pipeline (esperar la generacion en vuelo antes de
+  cambiar el conteo) -- la misma sync que fracres salteo -> ghosting.
+
+Disyuntiva que decide si existe fix barato (NO resoluble estatico):
+- DRAIN necesario -> no hay fix barato (correccion misma; Blackwell por HW).
+- THROTTLE artificial -> se podria sacar -> fix barato.
+Como la llamada GPU es dinamica, distinguir necesita RUNTIME: hookear la ruta del
+cambio de conteo y medir que espera y cuanto. Proximo paso concreto si se persigue.
+
 ## MECANISMO del ghosting, del disasm (2026-09-12) -- y el fix real
 
 Disasm de sl.dlss_g.dll 2.12. El ghosting de fracres NO es misterioso:
