@@ -4,6 +4,30 @@ Documento vivo. Objetivo, hipotesis rankeadas, lo medido, y el conocimiento
 externo. Se actualiza cada vez que se aprende algo; nada entra sin medicion o
 sin una cita.
 
+## VEREDICTO VISUAL de fracres (2026-09-12): EMPEORA la imagen (ghosting) — ABANDONAR
+
+El usuario probo fracres+grilla en GTA V (dynamic) y reporto: **"mucho ghosting y
+no fluida"**. Esto es lo que la estadistica NO capturaba y lo que decide: fracres
+no es "imperceptiblemente mejor", es **visiblemente PEOR**.
+
+Mecanismo (coherente con H4): la colocacion temporal correcta la hace el kernel
+Blackwell calculando la `t` de cada sub-frame para un conteo CONSISTENTE. fracres
+VARIA el conteo por frame -> la `t` y las posiciones temporales se desincronizan
+del cadence real -> los frames generados caen en posiciones equivocadas =
+ghosting/doble imagen, y cadencia despareja = no fluido. O sea fracres PELEA
+contra la colocacion temporal que los cubins arreglan. Los dos ejes NO son
+independientes cuando se varia el conteo por frame.
+
+**Decision FINAL: fracres se abandona como camino.** No default, y ni siquiera
+recomendable como opt-in -- degrada la imagen. La ganancia estadistica (ratio mas
+apretado) era enganosa; el render real es peor. Es "saber plegar" del modo mas
+claro: NVIDIA hace enteros por algo, y variar el conteo por frame rompe la
+interpolacion. El codigo queda off por defecto y documentado como via muerta; el
+fix del crash del reload (independiente) se queda porque endurece el default.
+
+Leccion: la unica prueba que valia era la VISUAL. Tres corridas de estadistica
+decian "casi igual"; un minuto de juego dijo "ghosting". [[present-timing-is-not-fluidity]].
+
 ## H4 RESUELTO — YA lo arreglan nuestros cubins (CORRIGE lo de abajo)
 
 **Correccion (2026-09-12, verificado al nivel de PTX):** NO heredamos el bug del
