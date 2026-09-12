@@ -1062,8 +1062,15 @@ static void fractional_tick(void) {
         const LONG lo = (LONG)per_frame;
         const double frac = per_frame - (double)lo;
         LONG ceil_n = frac > 0.0001 ? lo + 1 : lo;
-        { const LONG t6 = (g_six || count_is_multiplier()) ? 6 : 5; if (ceil_n > t6) ceil_n = t6; }
-        if (ceil_n < 2) ceil_n = 2;
+        // El techo NO es el estructural (5/6) sino lo que el plugin DECLARA por
+        // juego: count_cap() = numFramesToGenerateMax topado al estructural. En
+        // Halo son 3, y pedir por encima entrega CERO frames, no menos -- es el
+        // crash de [[ngx-caps-the-count]]. La difusion (bound y reserva) nunca
+        // pasa esto, asi que fracres es seguro en cualquier juego, no solo donde
+        // el techo es 6.
+        const LONG cap = count_cap();
+        if (ceil_n > cap) ceil_n = cap;
+        if (ceil_n < 2) ceil_n = (cap >= 2 ? 2 : cap);
         // La reserva = ceil, por la API, SOLO cuando ceil cambia (un enfriamiento).
         if (g_force_generated != ceil_n) {
             g_force_generated = ceil_n;

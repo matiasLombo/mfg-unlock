@@ -116,6 +116,46 @@ transitorio bound>reserva (se evita con el orden subir=reserva primero,
 bajar=bound primero, arrancando iguales) y churn de reasignacion
 ([[fractional-swapchain-churn]]). Es el unico camino sin medir hacia el premio.
 
+### DISASM que EXPLICA H1a/H1b (2026-09-12, snippet 2.12 embebido, reproducible)
+
+Disasm del sl.dlss_g.dll 2.12 embebido (AppData\Local\mfg-unlock\sdk\2.12),
+imagen base 0x180000000. Confirma con codigo lo que la medicion ya habia dicho.
+
+**0x45984 -- [ctx+8] (la reserva) ES el bound del loop de slots, por frame:**
+```
+180045984: 44 8b 72 08     mov  0x8(%rdx),%r14d   ; r14d = [ctx+8] = la reserva
+180045988: 41 83 ee 01     sub  $0x1,%r14d        ; count-1
+18004598c: 0f 88 ...       js   0x180045b98       ; count==0 -> sale (no genera)
+180045992: 49 63 c6        movslq %r14d,%rax
+180045995: 48 8d 04 40     lea  (%rax,%rax,2),%rax ; *3
+180045999: 48 c1 e0 06     shl  $0x6,%rax          ; *0x40  -> i*0xC0
+18004599d: 4c 8d 62 48     lea  0x48(%rdx),%r12    ; base del array inline (+0x48)
+1800459a1: 4c 03 e0        add  %rax,%r12          ; &slot[count-1], cada slot 0xC0
+```
+Se lee [ctx+8] al ENTRAR y arma un loop sobre `count` slots de un array inline
+(0xC0 = 192 bytes por slot, empieza en ctx+0x48). Esta funcion corre por
+presentacion y RE-LEE [ctx+8] cada vez -> por eso difundir la reserva por frame
+(fracres) cambia la generacion sin llamar a la API y sin reasignar (no hay
+enfriamiento). Y por eso escribir la reserva POR ENCIMA de los slots asignados
+se sale del array = crash: la cota correcta es count_cap() (el max declarado por
+el plugin, Halo=3), NO el estructural 5/6. El fix del 2026-09-12 topa ahi.
+
+**0x47333 -- [ctx+4] (el bound) es una COPIA de struct, no el loop:**
+```
+180047326: 8b 02           mov  (%rdx),%eax
+18004732b: 89 01           mov  %eax,(%rcx)        ; copia campo a campo...
+18004732d: 41 b9 06 00..   mov  $0x6,%r9d          ; 6 = max frames (constante)
+180047333: 8b 42 04        mov  0x4(%rdx),%eax     ; lee [ctx+4] = el bound
+18004733c: 89 41 04        mov  %eax,0x4(%rcx)     ; ...y lo copia al destino
+18004733f: 8b 42 08        mov  0x8(%rdx),%eax     ; sigue con [ctx+8], +0x10, ...
+```
+[ctx+4] se lee como UN campo mas de un memcpy de config, no como cota de
+generacion. Por eso difundirlo (H1a) fue inerte para lo presentado: el loop que
+genera (0x45984) mira [ctx+8], no [ctx+4]. La pregunta del goal ("se puede
+difundir [ctx+4] bajo [ctx+8] fija?") queda respondida: SI se puede difundir sin
+crash, pero NO sirve -- el que manda es [ctx+8]. Difundir [ctx+8] (fracres) es el
+que funciona.
+
 ### BARRIDO de H1b sobre la banda (2026-09-12, Cyberpunk -benchmark)
 
 Seis corridas (una instancia, secuencial), instrumento honesto = counted
