@@ -548,12 +548,25 @@ noche): nuestros cubins, ¿colocan los frames en su posicion temporal correcta o
 tambien heredan el 0.5? Si lo heredan, el enfoque de RenoDx (reescribir el peso
 desde el parametro temporal) seria un fix mas barato y quirurgico -> H4 abajo.
 
-H4 (nueva, no empezada): colocacion temporal pareja. Verificar si el kernel que
-corremos coloca los frames generados en t=i/(N) o todos en 0.5. Si en 0.5, portar
-la idea de midpoint.hpp (peso de blend desde el parametro temporal). Es el eje
-que mas puede mover la fluidez PERCIBIDA, ortogonal a fracres. Riesgo: es codigo
-de GPU (un byte mal = crash/corrupcion silenciosa, [[gpu-code-demands-more-care]]),
-valida solo con GPU y con el usuario presente.
+H4 (nueva, no empezada) — colocacion temporal pareja. HALLAZGO clave del
+2026-09-12: nuestros cubins reemplazan SOLO 3 kernels -- Shared_Prev2Curr/
+Curr2Prev (mvec), Shared_PackedInpaintDynamic (inpaint), Shared_NeedsInpainting
+(decision de inpaint). NINGUNO es el kernel de blend/interpolacion temporal. O
+sea: nuestro proyecto arregla la CALIDAD de mvec/inpaint ([[cubins-are-the-fluidity-fix]])
+pero NO toca la colocacion temporal, asi que muy probablemente HEREDA el 0.5
+compilado que documenta RenoDx (todos los frames generados al punto medio). Es
+una hipotesis razonada con cita, no medida.
+
+Por que puede ser la mejora VISIBLE mas grande: afecta a TODOS los modos multi
+(2x/3x/4x/6x), no solo el fraccional -- a 4x hoy serian tres frames identicos al
+medio (el contador sube, el movimiento no se suaviza). Es ortogonal a fracres
+(cuenta) y se combina. Plan: (1) confirmar estaticamente el 0.5 en el kernel de
+blend del snippet (cuobjdump/nvdisasm sobre el fatbin; es LECTURA, seguro); (2)
+si esta, portar la idea de midpoint.hpp -- reescribir el peso de blend para que
+salga del parametro temporal del kernel, re-emitir el fatbin, que el driver lo
+JITee; (3) validar VISUALMENTE con GPU y con el usuario. Riesgo alto: codigo de
+GPU, un byte mal = crash/corrupcion silenciosa ([[gpu-code-demands-more-care]]);
+NO se toca ni valida de noche. Es el candidato #1 para la proxima sesion con GPU.
 
 ### Fuentes
 - https://github.com/ImDreamt/MFGAdaUnlock-RenoDx (midpoint.hpp; temporal midpoint fix, fatbin JIT, ForceFlipMeteringOff)
