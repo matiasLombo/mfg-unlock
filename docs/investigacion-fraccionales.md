@@ -267,6 +267,58 @@ El hallazgo de los dos campos es el candidato a recuperar (1) sobre la base (2).
   lo que a ellos no. Cualquier comparacion con lo que hace NVIDIA tiene que
   descontar esa ventaja de hardware.
 
+## Conocimiento externo (ampliado, 2026-09-11) con fuentes
+
+### Ada no tiene flip metering por hardware; se emula en CPU
+Confirmado por varias fuentes: DLSS 3 en Ada paceaba por CPU, con variabilidad
+que se compone al agregar frames; Blackwell movio el pacing al display engine
+(hardware flip metering). Los mods de MFG en Ada (el nuestro incluido) corren
+ese codigo de metering en CPU y backportean las instrucciones de timing de
+Blackwell. Consecuencia para nosotros: el "metering" que puede estancar la
+presentacion ES nuestro path de CPU, no una caja negra de hardware -- se puede
+inspeccionar y tocar. (nvidia.com DLSS4 news; tomshardware; tweaktown.)
+
+### El punto medio temporal: un eje SEPARADO de la cuenta
+Un mod hermano (mavismmg/MFGAdaUnlock-RenoDx) documenta un bug distinto de Ada:
+el kernel de interpolacion mezcla con un **0.5 compilado**, asi que todos los
+frames generados caen en el punto medio temporal -- "4x produces three
+identical half-way frames". Lo corrige reescribiendo el peso de blend para que
+use el parametro temporal y cada frame caiga en su posicion (0.25, 0.5, 0.75
+para 4x). ESTE es otro eje de fluidez, independiente de la cuenta y del pulso:
+donde se muestrea cada frame generado en el tiempo. Nuestro proyecto lo aborda
+por otro lado -- los cubins Blackwell recompilados ([[cubins-are-the-fluidity-fix]])
+hacen la colocacion correcta. Vale tenerlo separado en la cabeza: "latencia
+intermedia" (cuenta/reserva) y "colocacion temporal pareja" (blend weight) son
+dos problemas distintos. (github.com/mavismmg/MFGAdaUnlock-RenoDx.)
+
+### Otros chocan con el mismo freeze del flip-metering
+El mismo RenoDx no implementa su propio scheduler (deja el pacing a DLSS-G) y
+tiene un "legacy compatibility setting" que **desactiva el path de flip-metering
+del plugin y fuerza el fallback de software cuando los multiplicadores altos si
+no congelan la presentacion**. O sea: el freeze del flip-metering a
+multiplicadores altos es un problema conocido por mas de uno, y un fallback
+posible es apagar ese path. Corrobora nuestro riesgo del flip queue en fracdiff
+y sugiere una salida si fracdiff congela: probar con el flip-metering apagado.
+(github.com/mavismmg/MFGAdaUnlock-RenoDx.)
+
+### Teoria del reparto (ya anclado arriba)
+Euclidiano/Bjorklund = reparto pareto optimo de k pulsos en n ranuras, con
+error-feedback (delta-sigma) como la generalizacion para fracciones arbitrarias
+y para el sub-2.0x. Bresenham es el mismo algoritmo. (Toussaint 2005;
+docs.rs/euclidean-rhythm.)
+
+### NVIDIA no hace fraccionales (ya anclado arriba)
+DLSS 4.5 Dynamic MFG cambia entre enteros 2-6x para un target; no fracciona.
+El fraccionario es nuestro. (hothardware DLSS 4.5.)
+
+### Fuentes
+- https://www.nvidia.com/en-us/geforce/news/dlss4-multi-frame-generation-ai-innovations/
+- https://hothardware.com/news/nvidia-dlss-45-dynamic-mfg-tested
+- https://www.tomshardware.com/video-games/pc-gaming/nvidia-app-update-fails-to-block-unofficial-dlss-multi-frame-generation-on-rtx-40-series-modders-restore-support-across-multiple-games-within-hours
+- https://www.tweaktown.com/news/113411/dlss-multi-frame-generation-works-on-rtx-40-series-gpus-with-new-mod-for-cyberpunk-2077/
+- https://github.com/mavismmg/MFGAdaUnlock-RenoDx
+- https://docs.rs/euclidean-rhythm/latest/euclidean_rhythm/ (Bjorklund; Toussaint 2005)
+
 ## Hipotesis, rankeadas por promesa/riesgo
 
 1. **Difusion por frame via `[ctx+4]` con reserva `[ctx+8]=ceil` fija.** El
