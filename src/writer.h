@@ -636,6 +636,9 @@ static LONG loop_bound_for(LONG n) {
 }
 
 static void set_count_now(LONG n) {
+    // Instrumento fracdiff: cada llamada aca con el experimento encendido pisa
+    // el byte que la difusion acaba de escribir. Solo cuenta con fracdiff on.
+    if (g_frac_diff) InterlockedIncrement(&g_fd_overwrite);
     // La mitad del byte del tope de 6X. Ver tope_cuenta.
     {
         const LONG t = count_cap();
@@ -668,6 +671,31 @@ static void set_count_now(LONG n) {
         // n is generated frames, which is what the field holds: the multiplier
         // is n + 1.
         if (g_wic_n > 0) {
+            // fracdiff: la difusion (fractional_tick) es dueña del bound
+            // (indice 0), del pacer y de count_live, y los escribe por frame.
+            // set_count_now corre cada frame por el wrapper de opciones de
+            // Cyberpunk (el juego reemite slDLSSGSetOptions por frame): escribir
+            // los dos sitios wic iguales pisaba la difusion. Medido: 45 pisadas
+            // por ventana, el bound entraba en 3 SIEMPRE aunque escribieramos 2
+            // y 3 mitad y mitad. Aca, con el experimento encendido y en un modo
+            // fraccional, solo se SOSTIENE la reserva (indice 1, [ctx+8]) en el
+            // ceil que fija la difusion -- nunca por debajo del bound, asi que
+            // no se cae en el crash de bound>reserva -- y se deja el resto a la
+            // difusion. Apagado por defecto: los cuatro juegos no pasan por aca.
+            // Ver docs/investigacion-fraccionales.md.
+            if (g_frac_diff &&
+                (g_force_sel == kSelDynamic || g_force_sel == kSelDynFuture) &&
+                g_wic_n >= 2 && g_wic_sites[1] != nullptr) {
+                // H1b (fracres): la difusion es dueña de LOS DOS sitios; aca no
+                // se toca ninguno, asi la reserva difundida no se pisa cada frame.
+                if (g_frac_res) return;
+                // H1a: solo se sostiene la reserva en ceil; el bound es de la difusion.
+                LONG res = g_force_generated;
+                if (res < 2) res = 2;
+                { const LONG t6 = (g_six || count_is_multiplier()) ? 6 : 5; if (res > t6) res = t6; }
+                *g_wic_sites[1] = (unsigned char)res;
+                return;
+            }
             if (n < 0) n = 0;
             { const LONG t6 = (g_six || count_is_multiplier()) ? 6 : 5; if (n > t6) n = t6; }
             // Solo si el parche esta PUESTO. Con el parche sacado esa
@@ -1024,6 +1052,13 @@ static void fractional_tick(void) {
     // docs/investigacion-fraccionales.md; el flip queue con bound<reserva es
     // lo que esto mide. Apagado por defecto.
     if (g_frac_diff && g_wic_mode && g_wic_n >= 2 && g_wic_set != 0) {
+        // Instrumento: que tenia el sitio del bound al ENTRAR a este frame (lo
+        // que sobrevivio del frame anterior + lo que haya pisado en el medio).
+        if (g_wic_sites[0] != nullptr) {
+            LONG pre = (LONG)*g_wic_sites[0];
+            if (pre < 0) pre = 0; if (pre > 6) pre = 6;
+            InterlockedIncrement(&g_fd_pre_hist[pre]);
+        }
         const LONG lo = (LONG)per_frame;
         const double frac = per_frame - (double)lo;
         LONG ceil_n = frac > 0.0001 ? lo + 1 : lo;
@@ -1042,10 +1077,31 @@ static void fractional_tick(void) {
         // Escribir SOLO el bound y el pacer (g_wic_sites[0], g_pace_count); la
         // reserva (g_wic_sites[1]) queda en ceil, escrita por el wrapper de
         // opciones cuando la API cambio. gen_flag por si genera algo.
-        if (g_wic_sites[0] != nullptr) *g_wic_sites[0] = (unsigned char)n;
+        if (g_frac_res) {
+            // H1b: mover TAMBIEN la reserva [ctx+8] por frame, via el inmediato,
+            // sin llamar a la API (sin el enfriamiento de 100 ms). bound y
+            // reserva van a la misma n. Orden seguro para que nunca haya
+            // bound>reserva ni un instante (arrancan iguales): subiendo, reserva
+            // primero; bajando, bound primero. n nunca pasa ceil, que es el
+            // tamaño que la API ya reservo, asi que no se escribe fuera.
+            const LONG prev = (g_wic_sites[0] != nullptr) ? (LONG)*g_wic_sites[0] : n;
+            if (n >= prev) {
+                if (g_wic_sites[1] != nullptr) *g_wic_sites[1] = (unsigned char)n;
+                if (g_wic_sites[0] != nullptr) *g_wic_sites[0] = (unsigned char)n;
+            } else {
+                if (g_wic_sites[0] != nullptr) *g_wic_sites[0] = (unsigned char)n;
+                if (g_wic_sites[1] != nullptr) *g_wic_sites[1] = (unsigned char)n;
+            }
+        } else {
+            if (g_wic_sites[0] != nullptr) *g_wic_sites[0] = (unsigned char)n;
+        }
         if (g_pace_count != nullptr) *g_pace_count = (unsigned char)n;
         if (g_gen_flag != nullptr) *g_gen_flag = (unsigned char)(n > 0 ? 1 : 0);
         g_count_live = n;
+        // Instrumento: el valor que efectivamente escribimos este frame.
+        { LONG h = n; if (h < 0) h = 0; if (h > 6) h = 6;
+          InterlockedIncrement(&g_fd_diff_hist[h]); }
+        InterlockedIncrement(&g_fd_frames);
         return;
     }
 

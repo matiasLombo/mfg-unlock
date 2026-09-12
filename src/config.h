@@ -75,6 +75,7 @@ struct Settings {
     int dynstep        = 0;       // dynstep: grilla del ratio de DYNAMIC en centesimas (0 = sin grilla, defecto)
     int dynpin         = 0;       // dynpin: fija el ratio de DYNAMIC en centesimas (0 = off; medicion, no juego normal)
     bool fracdiff      = false;   // fracdiff: difusion por frame (experimento; reserva=ceil, bound difundido). Ver docs/investigacion-fraccionales.md
+    bool fracres       = false;   // fracres: H1b, difunde tambien la reserva [ctx+8] por frame via inmediato, sin API. Requiere fracdiff. Ver docs/investigacion-fraccionales.md
 
     // --- mfg-settings.txt: -1 = la clave no estaba o no valia ---
     int mode           = -1;
@@ -131,6 +132,7 @@ inline const Flag kFlags[] = {
     { L"mfg-host.txt",           "host", &Settings::host },
     { L"mfg-hosthudless.txt",    "hosthudless", &Settings::hosthudless },
     { L"mfg-fracdiff.txt",       "fracdiff", &Settings::fracdiff },
+    { L"mfg-fracres.txt",        "fracres", &Settings::fracres },
 };
 inline const int kFlagsN = (int)(sizeof(kFlags) / sizeof(kFlags[0]));
 

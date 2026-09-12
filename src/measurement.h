@@ -61,6 +61,7 @@ struct ClosedWindow {
     double token_block_us, present_block_us;
     int    clamp_latency; LONG smfl_calls, token_calls, frames_gated;
     LONG   step_same, step_plus_one, step_forward, step_back;
+    LONG   fd_frames, fd_overwrite; LONG fd_diff_hist[7], fd_pre_hist[7];
     int    gap_hist[6];
     int    pres_n; double pres_ms_sum, pres_ms_max; int pres_hitch;
     LONG   rfx_n; double rfx_gpu, rfx_drv, rfx_ft; unsigned rfx_min, rfx_max;
@@ -97,6 +98,8 @@ static void snapshot_window(ClosedWindow &w, double win_elapsed) {
     w.token_block_us = g_token_block_us; w.present_block_us = g_present_block_us;
     w.clamp_latency = g_clamp_latency; w.smfl_calls = g_smfl_calls;
     w.token_calls = g_token_calls; w.frames_gated = g_frames_gated;
+    w.fd_frames = g_fd_frames; w.fd_overwrite = g_fd_overwrite;
+    for (int i = 0; i < 7; ++i) { w.fd_diff_hist[i] = g_fd_diff_hist[i]; w.fd_pre_hist[i] = g_fd_pre_hist[i]; }
     w.step_same = g_step_same; w.step_plus_one = g_step_plus_one;
     w.step_forward = g_step_forward; w.step_back = g_step_back;
     for (int i = 0; i < 6; ++i) w.gap_hist[i] = g_gap_hist[i];
@@ -138,6 +141,26 @@ static void dump_window(const ClosedWindow &w) {
         log_num("  g_force_generated ", (unsigned)w.force_generated);
         log_num("  cuenta_es_multiplicador ", (unsigned)(w.multiplier ? 1 : 0));
         log_num("  byte vivo (la cadencia) ", (unsigned)w.count_live);
+        // Triangulacion de fracdiff: si escribimos 2 y 3 pero el sitio entra
+        // siempre en 3, algo lo pisa entre frames (pisadas = set_count_now).
+        if (g_frac_diff && w.fd_frames > 0) {
+            static const char *kWrote[7] = {
+                "  fracdiff: escrito =0 x", "  fracdiff: escrito =1 x",
+                "  fracdiff: escrito =2 x", "  fracdiff: escrito =3 x",
+                "  fracdiff: escrito =4 x", "  fracdiff: escrito =5 x",
+                "  fracdiff: escrito =6 x" };
+            static const char *kEntered[7] = {
+                "  fracdiff: entro =0 x", "  fracdiff: entro =1 x",
+                "  fracdiff: entro =2 x", "  fracdiff: entro =3 x",
+                "  fracdiff: entro =4 x", "  fracdiff: entro =5 x",
+                "  fracdiff: entro =6 x" };
+            log_num("  fracdiff: frames en la rama ", (unsigned)w.fd_frames);
+            log_num("  fracdiff: pisadas (set_count_now) ", (unsigned)w.fd_overwrite);
+            for (int i = 0; i < 7; ++i) if (w.fd_diff_hist[i] > 0)
+                log_num(kWrote[i], (unsigned)w.fd_diff_hist[i]);
+            for (int i = 0; i < 7; ++i) if (w.fd_pre_hist[i] > 0)
+                log_num(kEntered[i], (unsigned)w.fd_pre_hist[i]);
+        }
     }
     if (!g_quiet)
     log_num("  base por Reflex ", (unsigned)(int)(w.rfx_base + 0.5));
@@ -260,6 +283,10 @@ static void close_window(double win_elapsed) {
         g_present_block_us = 0.0;
         g_raw_calls = 0;
         for (int i = 0; i < 6; ++i) g_gap_hist[i] = 0;
+        if (g_frac_diff && w.fd_frames > 0) {
+            g_fd_frames = 0; g_fd_overwrite = 0;
+            for (int i = 0; i < 7; ++i) { g_fd_diff_hist[i] = 0; g_fd_pre_hist[i] = 0; }
+        }
         if (w.rfx_n > 0) {
             g_hud_lat_us = (LONG)(w.rfx_drv / w.rfx_n);
             g_rfx_gpu = 0.0; g_rfx_drv = 0.0;

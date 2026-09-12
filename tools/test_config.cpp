@@ -67,6 +67,7 @@ int main(void) {
         check("hosthudless apagado", a.hosthudless, 0);
         check("dynstep 0 (sin grilla)", a.dynstep, 0);
         check("fracdiff apagado", a.fracdiff, 0);
+        check("fracres apagado", a.fracres, 0);
         check("queue -1 (sin archivo)", a.queue, -1);
         check("mode -1 (sin settings)", a.mode, -1);
     }

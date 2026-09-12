@@ -73,6 +73,122 @@ OJO: los campos estan en `sl.dlss_g.dll` (el PLUGIN, 612992 bytes), NO en
 Los dos campos se consumen por separado y el bound es una lectura viva. La via
 para difundir por frame existe a nivel de codigo.
 
+### RESULTADO MEDIDO de fracdiff / H1a (2026-09-12, Cyberpunk -benchmark)
+
+**H1a REFUTADA, con aislamiento y medicion.** Difundir el bound [ctx+4] por
+frame bajo una reserva [ctx+8] fija en ceil NO produce fraccional. La mitad de
+H1 que hablaba de crash/parada SI se cumplio (bound<reserva presenta limpio); la
+otra mitad no: la presentacion sigue la RESERVA, no el bound.
+
+Corrida instrumentada (fracdiff 1, dynpin 250, mode 8; foco ok, interpolacion
+habilitada x1, 0 EXCEPCION / 0 CONGELAMIENTO):
+
+Primera version (bound difundido, reserva por la API) mostro el cableado roto:
+la difusion escribia 2 y 3 mitad y mitad (`escrito =2 x22 / =3 x22`) PERO el
+sitio entraba a cada frame en 3 (`entro =3 x45`), con 45 `pisadas
+(set_count_now)` por ventana = una por frame. Causa medida: Cyberpunk reemite
+slDLSSGSetOptions POR FRAME; el wrapper llamaba set_count_now, que escribia los
+DOS sitios wic iguales y pisaba el bound difundido. [[frac-por-cuenta-de-api]].
+
+Corregido (set_count_now, con fracdiff+modo fraccional, SOLO sostiene la reserva
+[ctx+8] en ceil; el bound, el pacer y count_live quedan para la difusion). Nueva
+corrida: el bound YA sobrevive por frame (`escrito =2 x23 / =3 x22`,
+`entro =2 x22 / =3 x23`, byte vivo alternando 2 y 3). Sin crash, sin freeze. Y
+sin embargo el instrumento honesto (counted multiplier del swapchain) dio **3.00
+en las ventanas con generacion** (54 ventanas en 300, ninguna en 250; una
+ventana tipica: base Reflex 43, rendered 46, PresentCount 135/ventana ->
+3.00x). O sea: reserva=3 -> genera 3, con el bound difundiendo 2/3 libremente
+debajo, sin efecto en lo presentado.
+
+**Conclusion:** el bound [ctx+4] NO decide cuantos frames se presentan; la
+reserva [ctx+8] si. Difundir el bound es gratis y seguro pero inerte para el
+ratio. Coincide con [[sub-frame-bound-semantics]] y [[ngx-caps-the-count]]: la
+cuenta de la API (=la reserva) decide la generacion Y dimensiona la memoria.
+Esto corrige la lectura previa del disasm ("generacion y pacer siguen el
+bound"): el pacer leera el bound, pero lo PRESENTADO sigue la reserva.
+
+**Fork que queda (H1b, no corrido):** difundir la RESERVA [ctx+8] por frame via
+el inmediato parcheado, SIN llamar a la API (sin el enfriamiento de 100 ms).
+Si el plugin re-lee [ctx+8] por frame como cuenta de generacion -> fraccional
+sin enfriamiento = el premio (latencia intermedia estable). Si solo la lee al
+reconfigurar, o si reasigna la memoria por frame -> inerte o crash. Riesgo:
+transitorio bound>reserva (se evita con el orden subir=reserva primero,
+bajar=bound primero, arrancando iguales) y churn de reasignacion
+([[fractional-swapchain-churn]]). Es el unico camino sin medir hacia el premio.
+
+### BARRIDO de H1b sobre la banda (2026-09-12, Cyberpunk -benchmark)
+
+Seis corridas (una instancia, secuencial), instrumento honesto = counted
+multiplier del swapchain, ventanas con generacion. Metrica de estabilidad
+ROBUSTA = ancho del IQR (la sd la infla una sola ventana con hitch; ver abajo).
+
+| punto | modo    | n  | ratio  | IQR       | ancho | lat mediana | crash |
+|-------|---------|----|--------|-----------|-------|-------------|-------|
+| 2.25  | bloques | 70 | 2.24   | 217-228   | 11    | 2.98 ms     | 0     |
+| 2.25  | H1b     | 74 | 2.234  | 224-226   | **2** | 2.95 ms     | 0     |
+| 2.50  | H1b     | 72 | 2.48   | 248-251   | **3** | 2.97 ms     | 0     |
+| 3.50  | bloques | 65 | 3.479  | 342-355   | 13    | 2.99 ms     | 0     |
+| 3.50  | H1b     | 67 | 3.486  | 348-351   | **3** | 3.00 ms     | 0     |
+| 5.50  | H1b     | 60 | 5.465  | 544-553   | 9     | 2.98 ms     | 0     |
+
+Lo que dice, sin adornar:
+- H1b acierta el ratio en TODA la banda 2.25-5.5 (223/248/349/546 para
+  225/250/350/550), llega a 5.5 limpio, 0 crash en ningun punto.
+- H1b es 4-6x mas estable en el grueso del ratio (ancho IQR 2-3 vs 11-13 de
+  bloques). Bloques topa en 5.0 (scheduler.h:148), asi que a 5.5 no hay A/B.
+- La LATENCIA (Reflex sim->driver) es PLANA e IGUAL en todo: ~2.95-3.00 ms en
+  los seis, los dos modos. H1b NO cambia la latencia; la fluidez que gana es la
+  cadencia de generacion mas pareja, no latencia mas baja. No afirmar lo otro.
+- La banda alta (5.5) dispersa mas (IQR 9, p05-p95 513-562): el instrumento del
+  multiplicador es mas ruidoso arriba ([[el-juego-apaga-y-no-vuelve]]), pero
+  acierta y no crashea.
+- Run-to-run: la confirmacion de 2.5 dio sd=10.0 contra 3.0 de la primera, PERO
+  el grueso es igual de fino (IQR 3, 30 ventanas en 248 y 27 en 251); la sd la
+  inflo UNA ventana en 166 (un hitch de transicion). La metrica robusta (IQR)
+  concuerda entre corridas; la sd sola engana ([[mfg-lab-is-flaky]]).
+
+### RESULTADO MEDIDO de H1b (2026-09-12, Cyberpunk -benchmark): FUNCIONA
+
+**H1b CONFIRMADA.** Difundir la RESERVA [ctx+8] por frame via el inmediato
+parcheado (sin llamar a la API) produce fraccional real y es MAS ESTABLE en el
+ratio que la alternancia por bloques, sin costo de latencia ni crash.
+
+Config: fracdiff 1 + fracres 1 + dynpin 250, mode 8. Foco ok, interpolacion x1,
+0 EXCEPCION / 0 CONGELAMIENTO. La difusion escribe los dos sitios a la misma n
+por frame (orden seguro: subiendo reserva primero, bajando bound primero;
+arrancan iguales, nunca bound>reserva), n nunca por encima del ceil que la API
+ya reservo (no se escribe fuera).
+
+A/B contra alternancia por bloques (fracdiff off, dynpin 250), 70+ ventanas de
+juego cada uno, instrumento honesto = counted multiplier del swapchain:
+
+| modo            | ratio media | sd(x100) | IQR      | lat sim->driver (mediana) | crash |
+|-----------------|-------------|----------|----------|---------------------------|-------|
+| H1b (fracres)   | 2.493       | **3.0**  | 248-251  | ~2.9 ms                   | 0     |
+| bloques         | 2.485       | **9.4**  | 240-255  | ~2.9 ms                   | 0     |
+
+**Lo que dice la medicion, sin adornar:**
+- El plugin RE-LEE [ctx+8] por frame como cuenta de generacion: escribir el
+  inmediato 2/3 por frame da 2.5 exacto. Corrige la lectura de H1a (el bound
+  [ctx+4] no decide lo presentado; la reserva [ctx+8] si).
+- H1b es 3x mas estable en el ratio por ventana (sd 3.0 vs 9.4). El byte vivo
+  alterna parejo (200/201) contra el bloque sesgado (87/302). Mas consistencia
+  en cuantos frames se generan por frame real = cadencia de entrega mas pareja.
+- La LATENCIA de render (Reflex sim->driver end) es IGUAL entre los dos
+  (mediana ~2.9 ms, mismo histograma). H1b NO baja la latencia; iguala la de
+  bloques y gana solo en consistencia del ratio. No afirmar mejora de latencia.
+- Premisa vieja corregida: ninguno de los dos usa la API para cambiar la cuenta
+  (ambos escriben el inmediato); el enfriamiento de 100 ms es del API y NO
+  distingue a los dos caminos en esta config. Por eso las latencias empatan.
+  El costo "por cambio de cuenta" de [[block-length-tradeoff]] NO se ve aca
+  aunque H1b hace ~15x mas cambios (uno por frame) que los bloques.
+
+**Estado:** fracres cableado, off por defecto, test-host verde (11), build
+limpio. Un A/B por lado (70+ ventanas c/u, no una sola cifra). Falta: confirmar
+con una segunda corrida por lado (run-to-run, [[mfg-lab-is-flaky]]); barrer
+otros ratios (2.25, 3.5, 5.5) para ver si la ventaja de consistencia se sostiene
+en toda la banda 2-6; y la regresion de los cuatro (fracres off = sin cambio).
+
 ### Plan de fracdiff, listo para ejecutar con el usuario (2026-09-11)
 
 Estado del disasm: generacion y pacer siguen el bound [ctx+4]; solo la memoria

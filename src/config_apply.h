@@ -78,6 +78,8 @@ static void apply_config(void) {
             if (a.dynpin != 0) log_num("dynamic: ratio FIJADO (dynpin) en centesimas -- instrumento ", (unsigned)a.dynpin);
             g_frac_diff = a.fracdiff;
             if (g_frac_diff) log_line("fracdiff: difusion por frame ENCENDIDA (experimento: reserva=ceil, bound difundido)");
+            g_frac_res = a.fracres;
+            if (g_frac_res) log_line("fracres: H1b ENCENDIDA (la difusion tambien mueve la reserva por frame, sin API)");
             if (a.blockms > 0) {
                 g_block_ms = a.blockms;
                 log_num("slowalt: block length from file, ms ", (unsigned)a.blockms);

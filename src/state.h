@@ -52,6 +52,7 @@ static int  g_dyn_step = 0;           // dynstep: grilla del ratio de DYNAMIC, c
 static int  g_dyn_pin = 0;            // dynpin: fija g_dyn_target (centesimas); 0 = off. Instrumento de medicion.
 // escribe: config_apply.h; lee: writer.h
 static bool g_frac_diff = false;      // fracdiff: difusion por frame (experimento)
+static bool g_frac_res = false;       // fracres (H1b): difunde tambien la reserva por frame
 static double g_frac_diff_acc = 0.0;  // acumulador de la difusion, solo writer.h
 
 // escribe: config_apply.h; lee: writer.h
@@ -1011,6 +1012,19 @@ static bool g_snippet_on = true;
 // Forma del salto de indice entre llamadas consecutivas al token, para saber si
 // el gate se rompe por intercalado de hilos.
 static volatile LONG g_step_same = 0, g_step_plus_one = 0, g_step_forward = 0, g_step_back = 0;
+
+// escribe: writer.h (rama fracdiff), set_count_now; lee: measurement.h
+// Instrumento del experimento fracdiff, por ventana. Triangula por que el byte
+// vivo se queda clavado: g_fd_diff_hist = distribucion del valor que ESCRIBIMOS
+// (dice si la difusion produce 2 y 3); g_fd_pre_hist = distribucion de
+// *g_wic_sites[0] leido al ENTRAR al frame (lo que sobrevivio del frame
+// anterior); g_fd_overwrite = llamadas a set_count_now con fracdiff encendido
+// (dice si algo pisa el byte por frame). Solo se tocan dentro de la rama
+// fracdiff / con g_frac_diff, asi que con fracdiff apagado no cuestan nada.
+static volatile LONG g_fd_frames = 0;
+static volatile LONG g_fd_diff_hist[7] = { 0 };
+static volatile LONG g_fd_pre_hist[7] = { 0 };
+static volatile LONG g_fd_overwrite = 0;
 
 // escribe: config_apply.h, proxy.cpp; lee: -
 // mfg-sub2.txt: SOLO para medir. Baja el piso del target por debajo de 200
