@@ -4,7 +4,35 @@ Documento vivo. Objetivo, hipotesis rankeadas, lo medido, y el conocimiento
 externo. Se actualiza cada vez que se aprende algo; nada entra sin medicion o
 sin una cita.
 
-## H4 CONFIRMADO (2026-09-12): heredamos el 0.5 del punto medio temporal
+## H4 RESUELTO — YA lo arreglan nuestros cubins (CORRIGE lo de abajo)
+
+**Correccion (2026-09-12, verificado al nivel de PTX):** NO heredamos el bug del
+punto medio. La seccion de abajo ("H4 CONFIRMADO: heredamos el 0.5") solo miro el
+kernel ORIGINAL de Ada (sm_89), no lo que ENVIAMOS. Verificado:
+- El original Ada (sm_89) SI tiene los 104 `mul.ftz.f32 ...,0f3F000000` (0.5 fijo).
+- PERO el kernel Blackwell (sm_120) del MISMO idx 7 tiene CERO de esos y en cambio:
+  `ld.param.f32 %f1,[main_kernel_param_0+32]` (carga la t temporal, el MISMO
+  offset +32 que RenoDx inyecta), `sub.ftz.f32 %f4,%f27,%f1` (1-t), y decenas de
+  `mul.ftz.f32 ...,%f1,...` (mezcla con la t, no con 0.5).
+- idx 7 (fingerprint 36992,7776,39, slot 39712) ESTA en src/cubins.h -> lo
+  reconstruimos desde el PTX Blackwell y lo swapeamos (entra en el slot). O sea
+  reemplazamos el kernel de Ada (0.5 fijo) por el de Blackwell (usa la t).
+
+**Conclusion:** nuestro swap de cubins hace la colocacion temporal correcta por
+un camino distinto al de RenoDx: ellos parchean el PTX sm_89 para inyectar la t;
+nosotros swapeamos el kernel Blackwell entero que YA la usa (y de paso trae la
+calidad Blackwell). Es lo que dice [[cubins-are-the-fluidity-fix]] -- por esto los
+cubins hacen 4x fluido. NO hay nada que implementar; el fix perceptible YA ENVIA,
+encendido por defecto (mfg-nocubins.txt lo apagaria). CAVEAT: depende de que el
+swap ocurra (cubins on por defecto) y que idx 7 entre en el slot (entra en 2.12);
+si una version futura del snippet no entra, ahi si caeriamos al 0.5 de Ada -- eso
+es lo que hay que vigilar en un OTA ([[mfg-ota-updates-break-patches]]), y
+tools/h4_find_blend.py + revisar que la fingerprint siga en cubins.h lo detecta.
+
+El error que cometi: confirmar el bug en el original sin chequear que lo
+reemplazamos. Verificar SIEMPRE el kernel que se ENVIA, no el de stock.
+
+## (SUPERSEDED, ver arriba) H4 "CONFIRMADO": heredamos el 0.5 del punto medio temporal
 
 Confirmado con nvdisasm/cuobjdump (pip nvidia-cuda-*, en site-packages/nvidia/
 cu13/bin) sobre el snippet 2.12 embebido, reproducible:
