@@ -48,9 +48,41 @@ static void run(double R) {
     check("  reparto de maxima evenness (Euclidiano)", max_even(seq, hi), d);
 }
 
+// La composicion que hace fracres: diffuse_step topado al max declarado por el
+// juego (count_cap). El valor escrito nunca debe salir de [0, cap] -- es lo que
+// evita el crash de escribir mas slots de los reservados (ngx-caps-the-count).
+// Con R <= cap promedia R exacto; con R > cap se clava en cap (se pierde ratio,
+// no se gana un crash).
+static void run_capped(double R, long cap) {
+    const int N = 4000;
+    double acc = 0.0;
+    long sum = 0, mn = 1000, mx = -1000;
+    for (int i = 0; i < N; ++i) {
+        long n = diffuse_step(acc, R);
+        if (n > cap) n = cap;          // el tope de fracres (count_cap)
+        if (n < 0) n = 0;
+        if (n < mn) mn = n;
+        if (n > mx) mx = n;
+        sum += n;
+    }
+    char d[96];
+    const double mean = (double)sum / N;
+    const double target = R <= (double)cap ? R : (double)cap;
+    snprintf(d, sizeof d, "R=%.2f cap=%ld  media=%.4f  [%ld,%ld]", R, cap, mean, mn, mx);
+    check("  nunca sale de [0,cap]", mn >= 0 && mx <= cap, d);
+    check("  media = min(R,cap) (0.5%)", std::fabs(mean - target) < 0.005 * (target > 0 ? target : 1), d);
+}
+
 int main(void) {
     printf("diffuse_step: promedia R y reparte parejo\n");
     for (double R : { 2.25, 2.50, 2.75, 3.10, 3.50, 4.33, 5.50, 5.90 }) run(R);
+
+    printf("\ncomposicion de fracres: diffuse topado a count_cap\n");
+    run_capped(2.50, 6);     // holgado: promedia 2.5
+    run_capped(3.50, 3);     // Halo: cap 3, R>cap -> se clava en 3, sin pasarse
+    run_capped(2.50, 3);     // Halo con fraccional dentro del cap: 2.5 exacto
+    run_capped(5.50, 6);     // banda alta con techo 6: 5.5 exacto
+    run_capped(5.50, 5);     // techo 5: se clava en 5
 
     printf("\nborde: entero exacto no alterna\n");
     {
