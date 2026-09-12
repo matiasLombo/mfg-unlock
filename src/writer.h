@@ -1016,6 +1016,38 @@ static void fractional_tick(void) {
     }
     if (per_frame < 0.0) per_frame = 0.0;
     if (per_frame > 6.0) per_frame = 6.0;
+    // fracdiff (experimento): difusion por frame en vez de bloques. La reserva
+    // (g_wic_sites[1]) se fija a ceil por la API una vez; el bound
+    // (g_wic_sites[0]) y el pacer se difunden por frame con Bresenham
+    // (scheduler::diffuse_step, testeado sin GPU). Cero llamadas a la API por
+    // frame. Solo con los dos sitios parcheados. Ver
+    // docs/investigacion-fraccionales.md; el flip queue con bound<reserva es
+    // lo que esto mide. Apagado por defecto.
+    if (g_frac_diff && g_wic_mode && g_wic_n >= 2 && g_wic_set != 0) {
+        const LONG lo = (LONG)per_frame;
+        const double frac = per_frame - (double)lo;
+        LONG ceil_n = frac > 0.0001 ? lo + 1 : lo;
+        { const LONG t6 = (g_six || count_is_multiplier()) ? 6 : 5; if (ceil_n > t6) ceil_n = t6; }
+        if (ceil_n < 2) ceil_n = 2;
+        // La reserva = ceil, por la API, SOLO cuando ceil cambia (un enfriamiento).
+        if (g_force_generated != ceil_n) {
+            g_force_generated = ceil_n;
+            g_opt_pending = 1;
+            log_num("fracdiff: reserva (API) a ceil ", (unsigned)ceil_n);
+        }
+        // El bound de este frame, difundido; nunca por encima de la reserva.
+        LONG n = scheduler::diffuse_step(g_frac_diff_acc, per_frame);
+        if (n < 0) n = 0;
+        if (n > ceil_n) n = ceil_n;
+        // Escribir SOLO el bound y el pacer (g_wic_sites[0], g_pace_count); la
+        // reserva (g_wic_sites[1]) queda en ceil, escrita por el wrapper de
+        // opciones cuando la API cambio. gen_flag por si genera algo.
+        if (g_wic_sites[0] != nullptr) *g_wic_sites[0] = (unsigned char)n;
+        if (g_pace_count != nullptr) *g_pace_count = (unsigned char)n;
+        if (g_gen_flag != nullptr) *g_gen_flag = (unsigned char)(n > 0 ? 1 : 0);
+        g_count_live = n;
+        return;
+    }
 
     // The shape of a whole period, decided once, rather than a value decided
     // per frame and then held back.

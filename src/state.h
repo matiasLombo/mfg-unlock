@@ -50,6 +50,9 @@ static int  g_block_ms = 0;           // mfg-blockms.txt, 0 = default
 static int  g_dyn_step = 0;           // dynstep: grilla del ratio de DYNAMIC, centesimas (0 = sin grilla, defecto)
 // escribe: config_apply.h; lee: writer.h
 static int  g_dyn_pin = 0;            // dynpin: fija g_dyn_target (centesimas); 0 = off. Instrumento de medicion.
+// escribe: config_apply.h; lee: writer.h
+static bool g_frac_diff = false;      // fracdiff: difusion por frame (experimento)
+static double g_frac_diff_acc = 0.0;  // acumulador de la difusion, solo writer.h
 
 // escribe: config_apply.h; lee: writer.h
 static bool g_blockalt = false;       // mfg-blockalt.txt: blocks above 2.0x too

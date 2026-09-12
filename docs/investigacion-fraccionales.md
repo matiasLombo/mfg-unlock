@@ -86,7 +86,23 @@ exacto y da el reparto de maxima evenness (Euclidiano) para R de 2.25 a 5.90,
 incluida la banda >5.0. Correcto por construccion; lo que falta es cablearlo al
 plugin (parcheo) y medir. Ver [[politica-sin-gpu]].
 
-Implementacion del cableado (un commit, con test + regresion):
+CABLEADO HECHO (2026-09-12, apagado por defecto, EFECTO IN-GAME SIN MEDIR):
+config `fracdiff` (off) + rama aislada en fractional_tick. Corre solo con los
+dos sitios parcheados (g_wic_n>=2): fija la reserva a ceil por la API cuando
+ceil cambia (un enfriamiento), difunde el bound (g_wic_sites[0]) y el pacer
+(g_pace_count) por frame con scheduler::diffuse_step, nunca por encima de la
+reserva, cero API por frame. Build limpio, test-host verde (10), default off =
+el dll de envio no cambia. Falta LA MEDICION -- es lo unico que dice si
+funciona. NO afirmar que anda hasta correrlo.
+
+Como medir (con el usuario, juego de base baja): mfg-config con `fracdiff 1` +
+`dynpin 250`, mode 8; una corrida; ver en el log `fracdiff: reserva (API) a
+ceil`, el ratio real (presents/tokens ~2.5 = modula; ~3.0 o freeze = el flip
+queue se ata a la reserva, H1 muere); latencia.py sobre el log (unimodal
+intermedia = premio). Regresion: los cuatro con fracdiff off (default) sin
+cambio.
+
+Implementacion del cableado (referencia, ya hecha):
 
 1. Config `fracdiff` (off por defecto), como dynstep/dynpin. `g_frac_diff`.
 2. En fractional_tick, rama nueva cuando `g_frac_diff && sel_is_frac()`:

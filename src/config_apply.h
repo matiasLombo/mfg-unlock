@@ -76,6 +76,8 @@ static void apply_config(void) {
             if (a.dynstep != 0) log_num("dynamic: grilla del ratio (dynstep), centesimas ", (unsigned)a.dynstep);
             g_dyn_pin = a.dynpin;
             if (a.dynpin != 0) log_num("dynamic: ratio FIJADO (dynpin) en centesimas -- instrumento ", (unsigned)a.dynpin);
+            g_frac_diff = a.fracdiff;
+            if (g_frac_diff) log_line("fracdiff: difusion por frame ENCENDIDA (experimento: reserva=ceil, bound difundido)");
             if (a.blockms > 0) {
                 g_block_ms = a.blockms;
                 log_num("slowalt: block length from file, ms ", (unsigned)a.blockms);
