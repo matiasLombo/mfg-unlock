@@ -4,6 +4,39 @@ Documento vivo. Objetivo, hipotesis rankeadas, lo medido, y el conocimiento
 externo. Se actualiza cada vez que se aprende algo; nada entra sin medicion o
 sin una cita.
 
+## H4 CONFIRMADO (2026-09-12): heredamos el 0.5 del punto medio temporal
+
+Confirmado con nvdisasm/cuobjdump (pip nvidia-cuda-*, en site-packages/nvidia/
+cu13/bin) sobre el snippet 2.12 embebido, reproducible:
+- El kernel de interpolacion (idx 7 de las 31 fatbins, slot 39712, el mismo que
+  llamamos "mvec" y que nuestros cubins reconstruyen) tiene su PTX sm_89 de
+  99439 bytes con **exactamente 104** `mul.ftz.f32 ..., 0f3F000000` -- el 0.5
+  compilado. Coincide EXACTO con la firma de RenoDx (kExpectedMidpoints=104,
+  kExpectedPtxBytes=99362; el nuestro 99439, misma clase de kernel).
+- O sea: TODOS los frames generados se mezclan en el punto medio temporal. A 4x
+  son tres frames casi identicos a mitad de camino -- el contador sube, el
+  movimiento NO se suaviza. Nuestro rebuild de cubins arregla la CALIDAD de
+  mvec/inpaint pero NO el peso de blend, asi que heredamos el bug.
+- Este es el eje de fluidez PERCEPTIBLE (a diferencia de fraccionales, que es
+  imperceptible). tools/scratchpad blend_sm89.ptx tiene el PTX guardado.
+
+**Receta del fix (de RenoDx midpoint.hpp, verificada contra nuestro PTX):**
+1. Ubicar el kernel: fatbin con PTX sm_89 de ~99362-99439 bytes y 104
+   `mul.ftz.f32 ...,0f3F000000` (o por nombre main_kernel + tamaño).
+2. Inyectar despues del label `$L__BB0_3:`:
+   `ld.param.f32 %f134,[main_kernel_param_0+32];` (t),
+   `mov.f32 %f135,0f3F800000;` (1.0), `sub.ftz.f32 %f136,%f135,%f134;` (1-t).
+3. Reemplazar los 104 `0f3F000000`: los primeros 52 por `%f136` (1-t), los
+   ultimos 52 por `%f134` (t) -> cada frame cae en su posicion temporal.
+4. Re-emitir: RenoDx re-arma el fatbin y deja que el driver lo JITee; nosotros
+   podriamos ptxas->cubin y usar el swap de cubins que ya existe (si entra en el
+   slot) o adoptar el JIT.
+
+**Estado:** CONFIRMADO que el bug esta y que el fix es bien definido. Falta
+IMPLEMENTARLO (codigo de GPU, [[gpu-code-demands-more-care]] -- se hace tras un
+flag, off por defecto, con regresion) y VALIDARLO VISUALMENTE (solo un humano
+juzga si el movimiento se suaviza). Es el candidato #1 de mejora VISIBLE.
+
 ## VERDICTO FINAL de grilla+fracres (2026-09-12): OPT-IN, no default
 
 Con el crash arreglado, grilla+fracres es SEGURO (0 crashes en Cyberpunk + Halo,
