@@ -17,6 +17,36 @@ count_cap() (el max declarado, Halo=3), no en el estructural.
 del juego, en modo DYNAMIC (mode 8). El controlador decide el ratio y fracres lo
 difunde por frame. Nada mas hace falta (dynpin es solo para medir un ratio fijo).
 
+**ALCANCE HONESTO de lo medido (correccion 2026-09-12, self-review):** el barrido
+uso `dynpin` = ratio FIJO, asi que el ceil se fijaba UNA vez al arranque y nunca
+cruzaba un entero -> cero enfriamientos, cero llamadas a la API. Por eso se vio
+perfecto. PERO la asignacion la dimensiona la cuenta de la API
+([[sub-frame-bound-semantics]]), asi que subir la reserva por encima de la
+asignacion actual necesita SI o SI una llamada a la API que la agrande primero
+(o la difusion se sale del array del loop 0x45984). No es crash -- count_cap + ese
+resize lo cubren -- pero significa que con el CONTROLADOR dynamic moviendose y
+cruzando un entero (ej. 2.8 -> 3.2, ceil 3 -> 4) fracres paga UN enfriamiento de
+100 ms por cruce. Raro, no cero. Conclusion medida con honestidad:
+- "fracres sin enfriamiento" y "3x mas estable" estan probados para un ratio
+  FRACCIONAL SOSTENIDO dentro de una banda entera (lo que midio dynpin).
+- El caso del controlador moviendose y cruzando enteros esta SIN medir: ahi
+  fracres tendria un hitch por cruce, como los bloques en cada cambio. Su ventaja
+  podria ser menor de lo que sugiere el barrido a ratio fijo.
+- Lo que hay que validar antes del default NO es solo "anda", sino "¿fracres
+  gana con el controlador MOVIENDOSE, no solo a ratio clavado?". Esa es la
+  medicion que falta (gameplay real, controlador activo).
+
+**H1b-opt (nueva, sin medir): fracres SIN enfriamiento ni en los cruces.** Si se
+dimensiona la asignacion al MAXIMO (count_cap) UNA vez al arranque (un solo
+enfriamiento), la reserva inmediata puede difundirse en [floor,ceil] para
+siempre sin resize -- la asignacion ya alcanza para cualquier cuenta <= count_cap.
+Eso eliminaria el hitch por cruce de entero del controlador. RIESGO a medir: memoria
+[[base-rate-pinned-by-ceiling]] dice que declarar un techo mas alto puede clavar
+la base (menos fps). El experimento mfg-ceilfirst probo declarar el techo y dio
+"sin efecto" en el ratio, pero el costo en la base no quedo cerrado. NO
+implementar a ciegas: primero medir si dimensionar al max clava la base. Si NO la
+clava -> fracres queda cooldown-free de verdad, con el controlador moviendose.
+
 **Por que sigue OFF por defecto y no lo prendi solo:** prenderlo es un cambio de
 comportamiento, y la regla es que eso entra con la regresion de los juegos
 CORRIDA (jugandolos), no solo con el banco. Fue validado en Cyberpunk (escena
