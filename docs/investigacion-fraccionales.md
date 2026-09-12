@@ -4,6 +4,28 @@ Documento vivo. Objetivo, hipotesis rankeadas, lo medido, y el conocimiento
 externo. Se actualiza cada vez que se aprende algo; nada entra sin medicion o
 sin una cita.
 
+## RUNTIME MEDIDO (2026-09-12): la llamada NO bloquea; el costo es DIFERIDO
+
+Instrumente el bloqueo de slDLSSGSetOptions (gateado tras mfg-dyndiag.txt, off por
+defecto -- no mete QPC en el hot path). Cyberpunk, dynpin 250 (fuerza 2<->3 por
+bloques via el wrapper que el juego llama por frame):
+- **270 llamadas CON cambio de conteo: mediana 2us, media 3us, p90 4us, max 117us.
+  NINGUNA >=50ms.** La llamada NO bloquea, ni siquiera al cambiar el conteo. El
+  drain NO es sincrono adentro de la llamada.
+- PERO los cambios de conteo SI cuestan: 17.4% de los gaps de presentacion son
+  >=16ms a 2.5x (contra ~5% en modo entero como GTA V mode 6). Ratio 2.48 correcto.
+
+Conclusion: el hitch del fraccional es un costo DIFERIDO/POSTERIOR a la llamada
+(reconfiguracion o generacion degradada que aparece como gaps de presentacion en
+los frames siguientes), NO un bloqueo de la API. Eso DESCARTA "drain sincrono en
+la llamada". Deja dos opciones para el costo diferido:
+- reconfiguracion diferida necesaria (re-alinear historia en la sig. generacion)
+- o un throttle/periodo degradado deliberado (removible).
+Distinguirlo necesita trazar la GENERACION diferida (GPU-side, dinamico) -- mas
+profundo: hookear la ruta de generacion, no solo el setoptions. Ahi quedo la
+investigacion; el negativo firme es "la llamada no bloquea" y el costo esta en la
+generacion posterior.
+
 ## REFINAMIENTO (2026-09-12): el costo es GPU-side; falta runtime para el fix barato
 
 Seguimiento del disasm de la reconfiguracion (0x473d0/0x3b2b0 y calls vecinas):

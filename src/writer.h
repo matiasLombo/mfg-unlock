@@ -327,7 +327,27 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
         }
     }
     read_max_generated();      // antes de la llamada
-    const unsigned r = g_orig_setoptions(viewport, options_for_call(options));
+    // Diagnostico H4 (mfg-dyndiag.txt, off por defecto): cuanto BLOQUEA la
+    // llamada y si bloquea mas cuando el conteo cambia. MEDIDO en Cyberpunk: NO
+    // bloquea -- 270 cambios de conteo, mediana 2us, max 117us, ninguna >=50ms.
+    // El drain NO es sincrono en la llamada; el hitch del fraccional es
+    // posterior (reconfiguracion/generacion degradada diferida, ver docs). Se
+    // deja detras del flag para no meter QPC en el hot path por defecto.
+    unsigned r;
+    if (g_dyn_diag) {
+        LARGE_INTEGER h4a, h4b, h4f;
+        QueryPerformanceCounter(&h4a);
+        r = g_orig_setoptions(viewport, options_for_call(options));
+        QueryPerformanceCounter(&h4b);
+        QueryPerformanceFrequency(&h4f);
+        const unsigned h4us = (unsigned)((h4b.QuadPart - h4a.QuadPart) * 1000000 / h4f.QuadPart);
+        static LONG h4_last = -999;
+        LONG h4_now = (p != nullptr) ? *(LONG *)(p + 36) : -1;
+        if (h4_now != h4_last) { h4_last = h4_now; log_num("setoptions[cambio de conteo]: bloqueo us ", h4us); }
+        else if (h4us > 2000) log_num("setoptions[sin cambio]: bloqueo us ", h4us);
+    } else {
+        r = g_orig_setoptions(viewport, options_for_call(options));
+    }
     read_max_generated();      // y despues: si la llamada lo cambia, se ve
     if (p != nullptr && memcmp(p + 8, kDlssgOptionsGuid, 16) == 0) {
         g_api_applied = *(LONG *)(p + 36);
@@ -558,7 +578,20 @@ static void apply_override_now(void) {
         const LONG ap = g_api_applied, wants = g_force_generated;
         if (ap >= 1 && wants >= 1 && wants < ap) set_count_now(wants);
     }
-    g_orig_setoptions(g_vp_copy, options_for_call(g_opt_copy));
+    // Diagnostico H4 (mfg-dyndiag.txt): el envio de nuestra iniciativa. En
+    // Cyberpunk casi no dispara (el juego reemite por frame por el wrapper);
+    // dejado gateado por consistencia. MEDIDO no bloqueante (ver el wrapper).
+    if (g_dyn_diag) {
+        LARGE_INTEGER a, b, f;
+        QueryPerformanceCounter(&a);
+        g_orig_setoptions(g_vp_copy, options_for_call(g_opt_copy));
+        QueryPerformanceCounter(&b);
+        QueryPerformanceFrequency(&f);
+        const unsigned us = (unsigned)((b.QuadPart - a.QuadPart) * 1000000 / f.QuadPart);
+        log_num("setoptions[override]: bloqueo de la llamada (us) ", us);
+    } else {
+        g_orig_setoptions(g_vp_copy, options_for_call(g_opt_copy));
+    }
     // El byte del bound se escribe ACA, pegado a la llamada.
     //
     // Las dos filas de la tabla medida son fatales: bound mayor que la reserva
