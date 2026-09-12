@@ -494,7 +494,39 @@ docs.rs/euclidean-rhythm.)
 DLSS 4.5 Dynamic MFG cambia entre enteros 2-6x para un target; no fracciona.
 El fraccionario es nuestro. (hothardware DLSS 4.5.)
 
+### Conocimiento externo (2026-09-12): el eje de COLOCACION TEMPORAL, confirmado
+
+Un fork mas nuevo (ImDreamt/MFGAdaUnlock-RenoDx, `midpoint.hpp`) confirma y
+detalla el segundo eje de fluidez, SEPARADO de la cuenta que trabaja fracres:
+- El kernel de interpolacion mezcla con un **0.5 compilado**, asi que TODOS los
+  frames generados caen en el punto medio temporal -- "4x produces three
+  identical half-way frames, the counter doubles and the motion does not get
+  smoother". El contador sube pero el movimiento no se suaviza.
+- Su fix: descomprime el PTX del kernel, **reescribe el peso de blend para que
+  venga del parametro temporal propio del kernel**, y re-emite el fatbin para
+  que el driver lo JITee corregido. No da la formula de posiciones (0.25/0.5/
+  0.75 para 4x) en el README; vive en midpoint.hpp.
+- No tiene soporte fraccional: **fracres (cuenta fraccional por frame) es
+  nuestro y es un eje distinto al de ellos.** Los dos ejes se combinan.
+- Confirma tambien que en Ada hay que apagar el flip metering (ForceFlipMetering
+  Off) o "it freezes the presented image" -- coincide con [[no-pelearle-el-eoff-al-juego]].
+
+Relacion con lo nuestro: nuestros cubins ([[cubins-are-the-fluidity-fix]])
+atacan el MISMO eje pero cambiando kernels enteros (Blackwell-PTX) en vez de
+reescribir solo el peso de blend. PREGUNTA ABIERTA (necesita GPU, no se puede de
+noche): nuestros cubins, ¿colocan los frames en su posicion temporal correcta o
+tambien heredan el 0.5? Si lo heredan, el enfoque de RenoDx (reescribir el peso
+desde el parametro temporal) seria un fix mas barato y quirurgico -> H4 abajo.
+
+H4 (nueva, no empezada): colocacion temporal pareja. Verificar si el kernel que
+corremos coloca los frames generados en t=i/(N) o todos en 0.5. Si en 0.5, portar
+la idea de midpoint.hpp (peso de blend desde el parametro temporal). Es el eje
+que mas puede mover la fluidez PERCIBIDA, ortogonal a fracres. Riesgo: es codigo
+de GPU (un byte mal = crash/corrupcion silenciosa, [[gpu-code-demands-more-care]]),
+valida solo con GPU y con el usuario presente.
+
 ### Fuentes
+- https://github.com/ImDreamt/MFGAdaUnlock-RenoDx (midpoint.hpp; temporal midpoint fix, fatbin JIT, ForceFlipMeteringOff)
 - https://www.nvidia.com/en-us/geforce/news/dlss4-multi-frame-generation-ai-innovations/
 - https://hothardware.com/news/nvidia-dlss-45-dynamic-mfg-tested
 - https://www.tomshardware.com/video-games/pc-gaming/nvidia-app-update-fails-to-block-unofficial-dlss-multi-frame-generation-on-rtx-40-series-modders-restore-support-across-multiple-games-within-hours

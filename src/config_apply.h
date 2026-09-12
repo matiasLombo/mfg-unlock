@@ -76,10 +76,17 @@ static void apply_config(void) {
             if (a.dynstep != 0) log_num("dynamic: grilla del ratio (dynstep), centesimas ", (unsigned)a.dynstep);
             g_dyn_pin = a.dynpin;
             if (a.dynpin != 0) log_num("dynamic: ratio FIJADO (dynpin) en centesimas -- instrumento ", (unsigned)a.dynpin);
-            g_frac_diff = a.fracdiff;
-            if (g_frac_diff) log_line("fracdiff: difusion por frame ENCENDIDA (experimento: reserva=ceil, bound difundido)");
+            // fracres implica la difusion: con un solo flag (mfg-fracres.txt)
+            // se enciende todo -- fraccional por frame moviendo la reserva, que
+            // es el mecanismo que de verdad modula el ratio (H1b). fracdiff solo
+            // (sin fracres) queda para el experimento historico (difunde el
+            // bound, inerte para lo presentado; ver docs/investigacion-fraccionales.md).
             g_frac_res = a.fracres;
-            if (g_frac_res) log_line("fracres: H1b ENCENDIDA (la difusion tambien mueve la reserva por frame, sin API)");
+            g_frac_diff = a.fracdiff || a.fracres;
+            if (g_frac_res)
+                log_line("fracres: fraccional por frame ENCENDIDO (difunde la reserva, sin API; el ratio lo decide el controlador dynamic o dynpin)");
+            else if (g_frac_diff)
+                log_line("fracdiff: difusion del bound ENCENDIDA (experimento historico; inerte para lo presentado)");
             if (a.blockms > 0) {
                 g_block_ms = a.blockms;
                 log_num("slowalt: block length from file, ms ", (unsigned)a.blockms);
