@@ -73,6 +73,30 @@ OJO: los campos estan en `sl.dlss_g.dll` (el PLUGIN, 612992 bytes), NO en
 Los dos campos se consumen por separado y el bound es una lectura viva. La via
 para difundir por frame existe a nivel de codigo.
 
+### El pacer computa el timing DESDE el bound (2026-09-11, disasm 0x48728)
+
+Disasm de la computacion del pacer (0x180048728), el sitio de patch_pacer_count:
+
+    mov rsi, [r14+0xcc8]     ; unidad de intervalo
+    mov ecx, [r13+4]         ; el BOUND (ctx+4) = nuestra cuenta
+    imul rcx, rsi            ; rcx = bound * unidad
+    sub  rcx, rax            ; - tiempo transcurrido (rax = 1e6*const/[r14+0xcb0])
+    ... cmp/cmovne: clamp del intervalo a >=0, NO un gate por conteo de frames
+
+El pacer computa el intervalo de present como **funcion lineal del BOUND**, no
+de la reserva, y NO tiene aca un "espera hasta juntar N frames". Con reserva
+fija en ceil y bound=n por frame, el pacer pacea n frames. Sube la confianza en
+que fracdiff module: todo el timing sigue el bound; solo la memoria sigue la
+reserva. El deadlock "Present queue is empty" de Metro (bound > reserva) es un
+sitio distinto -- el flip queue con `reserva` ranuras desbordado por generar de
+mas -- y es el caso POR ENCIMA, no por debajo.
+
+Queda por confirmar en el flip queue si bound < reserva sub-llena la cola y eso
+para, o si presenta n limpio. Esa es la unica duda que el disasm no cierra y que
+fracdiff mediria directo.
+
+---
+
 ### CORRECCION (2026-09-11, mismo dia, mas disasm): H1 NO refutada, SIN AISLAR
 
 Seguir el disasm de los consumidores corrige la refutacion de abajo. Mapa
