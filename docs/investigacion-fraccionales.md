@@ -4,6 +4,17 @@ Documento vivo. Objetivo, hipotesis rankeadas, lo medido, y el conocimiento
 externo. Se actualiza cada vez que se aprende algo; nada entra sin medicion o
 sin una cita.
 
+## REGRESION CERRADA (2026-09-12, build be5aa217, config por defecto flags off)
+
+Los tres juegos instalados, corridos en el build de envio (count_cap + fracres
+un-flag, todo off por defecto):
+- Cyberpunk: 0 crashes, dynamic ~4.63x, 59 ventanas de generacion. PASS.
+- Halo Campaign Evolved: 0 crashes, ~4.93x (mode 5), 1330 ventanas. PASS.
+- GTA V: 0 crashes, mode 6 aplicado (114 ventanas, 113 generando), 0 apagones de
+  Reflex; el fastfail historico de sl.pcl NO reaparecio. PASS.
+La precondicion "regresion de los tres antes del commit del cambio" queda
+satisfecha. Nada del cambio (gated off) afecta el comportamiento por defecto.
+
 ## ESTADO ACTUAL (2026-09-12) — que hay implementado y como usarlo
 
 **El mecanismo esta resuelto y medido: `fracres`.** Difunde la reserva [ctx+8]
