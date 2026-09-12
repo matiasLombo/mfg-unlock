@@ -54,6 +54,17 @@ medicion): fracres SIN enfriamiento ni en los cruces.** Cuadro completo ahora:
   ([[base-rate-pinned-by-ceiling]]). mfg-ceilfirst probo declarar el techo y dio
   "sin efecto en el ratio", pero el costo en la base no se cerro. Es la unica
   medicion que separa H1b-opt de "listo". NO implementar a ciegas.
+- EVIDENCIA EXTERNA (2026-09-12) que INCLINA H1b-opt hacia PLEGAR: en una RTX
+  4080 la base cae ~38 -> ~30 fps al subir 2x -> 6x (tweaktown), y nuestra propia
+  [[base-rate-pinned-by-ceiling]] dice que el techo declarado clava la base. Los
+  dos apuntan a que declarar el max clavaria la base baja -> mal negocio contra
+  el enfriamiento raro del cruce. NO es concluyente: el loop de generacion corre
+  [ctx+8] veces (la cuenta REAL, disasm 0x45984), asi que "declarar max pero
+  generar menos" PODRIA esquivar el clavado si el costo sigue la generacion real
+  y no la declaracion. Sigue necesitando LA medicion (declarar max via fracres,
+  difundir menos, medir la base) para decidir. Lectura actual: probablemente
+  fracres como esta (API=ceil, enfriamiento solo en cruces) ya es el buen diseño,
+  y H1b-opt pliega -- pero es "probable", no medido.
 
 **Por que sigue OFF por defecto y no lo prendi solo:** prenderlo es un cambio de
 comportamiento, y la regla es que eso entra con la regresion de los juegos
