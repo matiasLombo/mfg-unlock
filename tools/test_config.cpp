@@ -58,6 +58,7 @@ int main(void) {
         check("wic encendido", a.wic, 1);
         check("cubins encendido", a.cubins, 1);
         check("panel encendido", a.panel, 1);
+        check("adopt encendido (default)", a.adopt, 1);
         check("sat encendido", a.sat, 1);
         check("latch encendido", a.latch, 1);
         check("deuda encendida", a.deuda, 1);
@@ -70,6 +71,13 @@ int main(void) {
         check("fracres apagado", a.fracres, 0);
         check("queue -1 (sin archivo)", a.queue, -1);
         check("mode -1 (sin settings)", a.mode, -1);
+    }
+
+    printf("\nmfg-noadopt.txt apaga la adopcion (issue #8, laptops hibridas)\n");
+    {
+        Folder c{ { L"mfg-noadopt.txt" }, { nullptr }, 1 };
+        Settings a = load(c);
+        check("mfg-noadopt.txt apaga adopt", a.adopt, 0);
     }
 
     printf("\nGTA V: mfg-debug.txt, mfg-sllog.txt, mfg-settings.txt\n");

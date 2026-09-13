@@ -156,6 +156,7 @@ static void apply_config(void) {
             }
             g_blockalt = a.blockalt;
             g_no_waitable = a.nowaitable;
+            g_adopt_enabled = a.adopt;
             if (a.slowframe[0] > 0 && a.slowframe[0] <= 100000) {
                 g_slow_frame_us = a.slowframe[0];
                 log_num("bench: frame slowed by us ", (unsigned)a.slowframe[0]);
@@ -180,7 +181,12 @@ static void apply_config(void) {
                 log_num("slowalt: blocks per cycle from file ", (unsigned)a.blocks);
             }
             if (g_frac_enabled)
-                log_line("fractional multiplier ON (experimental: can stall the game)");
+                // OJO: este flag gatea el PARCHE DE CUENTA (patch_subframe_count),
+                // que es lo que hace que set_count_now controle el multiplicador en
+                // TODOS los modos -- no es un experimento opcional. Solo los ratios
+                // fraccionales (no enteros) son experimentales. El nombre viejo hacia
+                // que los reportes atribuyeran crashes a esto por error (issue #8).
+                log_line("count patch ON (per-frame multiplier control; fractional ratios are the experimental part)");
             if (g_peralt)
                 log_line("slowalt: per-frame error diffusion (mfg-peralt.txt)");
             if (g_debug) log_line("debug: F9 recorder armed (hooks Present)");

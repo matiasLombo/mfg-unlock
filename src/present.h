@@ -20,6 +20,8 @@
 // paso siguiente. Reglas que este archivo carga: [[never-byte-detour-present]]
 // y [[measure-with-the-runtime-counter]].
 #pragma once
+#include <dxgi1_2.h>        // IDXGIFactory2 / IDXGISwapChain1 / DXGI_SWAP_CHAIN_DESC1
+#include <d3d12.h>          // adopt_existing_swapchain crea un descartable D3D12
 #include "present_policy.h"
 #include "adopted.h"
 
@@ -780,6 +782,11 @@ typedef HRESULT(WINAPI *PFN_D3D11CDSC)(void *, int, HMODULE, UINT, const int *, 
 static bool g_adopt_done = false;
 static void adopt_existing_swapchain(void) {
     if (g_adopt_done || g_orig_dxgi_present != nullptr) return;
+    // El descartable D3D11 crashea en laptops hibridas (issue #8): crear un
+    // device D3D11 HARDWARE dentro de un juego D3D12 elige mal el adaptador.
+    // mfg-noadopt.txt lo apaga; el hook de la factory sigue cubriendo los
+    // juegos que crean su swapchain despues de que enganchamos (casi todos).
+    if (!g_adopt_enabled) { g_adopt_done = true; log_line("adopcion: apagada (mfg-noadopt.txt)"); return; }
     // Primero se le da su chance al camino normal: si el juego crea su swapchain
     // despues que nosotros, el hook de la factory lo agarra y esto no hace falta.
     static unsigned long long seen = 0;
@@ -787,11 +794,19 @@ static void adopt_existing_swapchain(void) {
     if (GetTickCount64() - seen < 5000ULL) return;
     g_adopt_done = true;
 
-    HMODULE d3d11 = LoadLibraryW(L"d3d11.dll");
-    if (d3d11 == nullptr) { log_line("adopcion: no hay d3d11.dll"); return; }
-    PFN_D3D11CDSC create = reinterpret_cast<PFN_D3D11CDSC>(
-            GetProcAddress(d3d11, "D3D11CreateDeviceAndSwapChain"));
-    if (create == nullptr) { log_line("adopcion: no hay D3D11CreateDeviceAndSwapChain"); return; }
+    // Descartable D3D12, NO D3D11: crear un device D3D11 HARDWARE dentro de un
+    // juego D3D12 crashea en laptops hibridas -- elige mal el adaptador (iGPU vs
+    // dGPU) y el crash ni pasa por la VEH (issue #8). La vtable de IDXGISwapChain
+    // vive en dxgi.dll y es la misma para cualquier device/adaptador, asi que un
+    // descartable D3D12 (misma API que el juego) sirve igual y no crashea.
+    HMODULE d3d12 = LoadLibraryW(L"d3d12.dll");
+    HMODULE dxgi  = LoadLibraryW(L"dxgi.dll");
+    if (d3d12 == nullptr || dxgi == nullptr) { log_line("adopcion: falta d3d12.dll o dxgi.dll"); return; }
+    typedef HRESULT (WINAPI *PFN_D3D12Create)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
+    typedef HRESULT (WINAPI *PFN_Factory2)(UINT, REFIID, void **);
+    auto d3d12create = reinterpret_cast<PFN_D3D12Create>(GetProcAddress(d3d12, "D3D12CreateDevice"));
+    auto makefactory = reinterpret_cast<PFN_Factory2>(GetProcAddress(dxgi, "CreateDXGIFactory2"));
+    if (d3d12create == nullptr || makefactory == nullptr) { log_line("adopcion: faltan exports d3d12/dxgi"); return; }
 
     WNDCLASSEXW wc;
     memset(&wc, 0, sizeof(wc));
@@ -804,27 +819,32 @@ static void adopt_existing_swapchain(void) {
                               nullptr, nullptr, wc.hInstance, nullptr);
     if (hw == nullptr) { log_line("adopcion: no se pudo crear la ventana oculta"); return; }
 
-    DXGI_SWAP_CHAIN_DESC sd;
-    memset(&sd, 0, sizeof(sd));
-    sd.BufferCount = 1;
-    sd.BufferDesc.Width = 8;
-    sd.BufferDesc.Height = 8;
-    sd.BufferDesc.Format = static_cast<DXGI_FORMAT>(28);   // R8G8B8A8_UNORM
-    sd.BufferUsage = 0x20u;                                // RENDER_TARGET_OUTPUT
-    sd.OutputWindow = hw;
+    ID3D12Device *dev = nullptr;
+    if (FAILED(d3d12create(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev))) || dev == nullptr) {
+        log_line("adopcion: D3D12CreateDevice fallo"); DestroyWindow(hw); return;
+    }
+    D3D12_COMMAND_QUEUE_DESC qd{};
+    qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    ID3D12CommandQueue *q = nullptr;
+    if (FAILED(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&q))) || q == nullptr) {
+        log_line("adopcion: CreateCommandQueue fallo"); dev->Release(); DestroyWindow(hw); return;
+    }
+    IDXGIFactory2 *fac = nullptr;
+    if (FAILED(makefactory(0, IID_PPV_ARGS(&fac))) || fac == nullptr) {
+        log_line("adopcion: CreateDXGIFactory2 fallo"); q->Release(); dev->Release(); DestroyWindow(hw); return;
+    }
+    DXGI_SWAP_CHAIN_DESC1 sd{};
+    sd.Width = 8; sd.Height = 8;
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     sd.SampleDesc.Count = 1;
-    sd.Windowed = TRUE;
-    sd.SwapEffect = static_cast<DXGI_SWAP_EFFECT>(0);      // DISCARD
-
-    IDXGISwapChain *sc = nullptr;
-    void *dev = nullptr;
-    void *ctx = nullptr;
-    const HRESULT hr = create(nullptr, 1 /* HARDWARE */, nullptr, 0, nullptr, 0,
-                             7 /* D3D11_SDK_VERSION */, &sd, &sc, &dev, nullptr, &ctx);
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.BufferCount = 2;                                    // FLIP exige >= 2
+    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;         // lo unico que D3D12 acepta
+    IDXGISwapChain1 *sc = nullptr;
+    const HRESULT hr = fac->CreateSwapChainForHwnd(q, hw, &sd, nullptr, nullptr, &sc);
     if (FAILED(hr) || sc == nullptr) {
-        log_num("adopcion: D3D11CreateDeviceAndSwapChain fallo, hr ", (unsigned)hr);
-        DestroyWindow(hw);
-        return;
+        log_num("adopcion: CreateSwapChainForHwnd fallo, hr ", (unsigned)hr);
+        fac->Release(); q->Release(); dev->Release(); DestroyWindow(hw); return;
     }
 
     hook_swapchain_present(sc);
@@ -835,12 +855,13 @@ static void adopt_existing_swapchain(void) {
     log_line("  (los flags de arriba son del swapchain descartable, no del juego)");
     // El descartable ya cumplio. La vtable vive en el modulo de DXGI, no en el
     // objeto, asi que el parche sobrevive a soltarlo.
-    forget_swapchain(sc);
+    forget_swapchain(reinterpret_cast<IDXGISwapChain *>(sc));
     sc->Release();
-    if (ctx != nullptr) reinterpret_cast<IUnknown *>(ctx)->Release();
-    if (dev != nullptr) reinterpret_cast<IUnknown *>(dev)->Release();
+    fac->Release();
+    q->Release();
+    dev->Release();
     DestroyWindow(hw);
-    log_line(ok ? "adopcion: vtable compartida parcheada desde un swapchain propio"
+    log_line(ok ? "adopcion: vtable compartida parcheada desde un descartable D3D12"
                 : "adopcion: no se pudo parchear el slot");
 }
 

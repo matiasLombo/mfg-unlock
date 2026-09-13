@@ -51,6 +51,7 @@ struct Settings {
     bool optsv3        = false;   // mfg-optsv3.txt
     bool blockalt      = false;   // mfg-blockalt.txt
     bool nowaitable    = false;   // mfg-nowaitable.txt
+    bool adopt         = true;    // mfg-noadopt.txt lo apaga: adopta el swapchain via un descartable D3D11 (fallback late-attach). Crashea en laptops hibridas (issue #8)
     bool panel         = true;    // mfg-nopanel.txt lo apaga
     bool wic           = true;    // mfg-nowic.txt lo apaga
     bool monoidx       = false;   // mfg-monoidx.txt
@@ -121,6 +122,7 @@ inline const Flag kFlags[] = {
     { L"mfg-optsv3.txt",         "optsv3", &Settings::optsv3 },
     { L"mfg-blockalt.txt",       "blockalt", &Settings::blockalt },
     { L"mfg-nowaitable.txt",     "nowaitable", &Settings::nowaitable },
+    { L"mfg-noadopt.txt",        "adopt", &Settings::adopt },
     { L"mfg-nopanel.txt",        "panel", &Settings::panel },
     { L"mfg-nowic.txt",          "wic", &Settings::wic },
     { L"mfg-monoidx.txt",        "monoidx", &Settings::monoidx },

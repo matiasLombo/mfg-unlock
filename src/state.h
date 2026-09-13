@@ -476,6 +476,10 @@ static int g_near_n = 0, g_near_bad = 0;     // presents within 8 of a change
 // which is itself an answer, and the integer controls will say so.
 static bool g_no_waitable = false;
 
+// escribe: config_apply.h; lee: present.h (adopt_existing_swapchain). Apagado
+// con mfg-noadopt.txt: el descartable D3D11 crashea en laptops hibridas (#8).
+static bool g_adopt_enabled = true;
+
 // escribe: config_apply.h; lee: present.h
 static bool g_novsync = false;        // mfg-novsync.txt: diagnostic
 
