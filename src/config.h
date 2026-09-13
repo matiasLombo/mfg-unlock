@@ -72,7 +72,7 @@ struct Settings {
     int clamplatency   = 0;       // mfg-clamplatency.txt: un digito 1..9
     int queue          = -1;      // mfg-queue.txt: un digito 0..3
     int blocks         = 0;       // mfg-blocks.txt: 2..64
-    int dynstep        = 0;       // dynstep: grilla del ratio de DYNAMIC en centesimas (0 = sin grilla, defecto)
+    int dynstep        = 100;     // dynstep: grilla del ratio de DYNAMIC en centesimas. DEFAULT 100 (=1.0) = conmutacion de ENTEROS: el controlador elige 2/3/4/5/6 y sostiene cada uno (cadencia pareja, adaptativo, como Blackwell Dynamic MFG). 0 = sin grilla (fraccional por bloques). Ver docs/investigacion-fraccionales.md (CIERRE)
     int dynpin         = 0;       // dynpin: fija el ratio de DYNAMIC en centesimas (0 = off; medicion, no juego normal)
     bool fracdiff      = false;   // fracdiff: difusion por frame (experimento; reserva=ceil, bound difundido). Ver docs/investigacion-fraccionales.md
     bool fracres       = false;   // fracres: H1b, difunde tambien la reserva [ctx+8] por frame via inmediato, sin API. Requiere fracdiff. Ver docs/investigacion-fraccionales.md

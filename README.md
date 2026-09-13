@@ -155,6 +155,32 @@ Multi-frame supported, max generated frames 5 (SL Plugin supports 5, NGX feature
 ```
 
 
+## Using it: the panel and the modes
+
+There is an in-game panel. **Press `` ` `` (backtick) to open it** — it is on by
+default (`mfg-nopanel.txt` disables it). From the panel you pick how the extra
+frames are generated; the choice is saved to `mfg-settings.txt` next to the dll,
+so no config editing is needed.
+
+Modes:
+
+- **Off** — no generation.
+- **Fixed 2x-6x** — a constant multiplier. The count never changes, so the
+  cadence is perfectly even; this is the cleanest image. 6x is the structural
+  maximum (the sub-frame array is inline and holds six slots).
+- **DYNAMIC** — the mod holds a target framerate by choosing the multiplier for
+  you. By default it **switches between whole multipliers** (2/3/4/5/6) and holds
+  each one, so the cadence stays even and it drops to a lower multiplier when the
+  scene does not need a higher one — adaptive, without wasting generation. This
+  is the same approach NVIDIA's Blackwell "Dynamic MFG" takes (whole steps, not
+  fractional): true fractional multipliers were tried and rejected because a
+  non-integer count per frame is inherently uneven and, forced per-frame, causes
+  ghosting. See `docs/investigacion-fraccionales.md` for the full measured story.
+
+`mfg-dynfps.txt` (or the panel) sets the target framerate for DYNAMIC. Advanced
+knobs live in flag files next to the dll; the defaults ship the good behaviour,
+so most people need none.
+
 ## Patch the plugin that actually loads, not the one on disk
 
 Streamline prefers a newer copy of its own plugins from NVIDIA's OTA cache when it

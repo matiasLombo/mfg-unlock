@@ -65,7 +65,7 @@ int main(void) {
         check("x6 apagado", a.x6, 0);
         check("host apagado", a.host, 0);
         check("hosthudless apagado", a.hosthudless, 0);
-        check("dynstep 0 (sin grilla)", a.dynstep, 0);
+        check("dynstep 100 (conmutacion de enteros, default)", a.dynstep, 100);
         check("fracdiff apagado", a.fracdiff, 0);
         check("fracres apagado", a.fracres, 0);
         check("queue -1 (sin archivo)", a.queue, -1);
