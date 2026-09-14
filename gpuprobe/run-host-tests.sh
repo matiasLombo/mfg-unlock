@@ -27,6 +27,11 @@ if [ -f gpuprobe/analyzer/run-tests.sh ]; then
     sh gpuprobe/analyzer/run-tests.sh || fail=1
 fi
 
+# El contrato entre el writer de C++, el JSONL y el analizador de Python.
+if [ -f gpuprobe/tests/contract.sh ]; then
+    sh gpuprobe/tests/contract.sh || fail=1
+fi
+
 if [ "$fail" != "0" ]; then
     echo "HAY TESTS EN ROJO"
     exit 1

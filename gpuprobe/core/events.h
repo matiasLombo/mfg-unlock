@@ -100,6 +100,15 @@ struct EvPass {
     u32      queue;        // indice de command queue
     u32      rt_w, rt_h;   // tamano del RT principal, para la regla de escala
     u64      rt_bytes;
+    // El RT principal, por instancia Y por clase. Las dos hacen falta y no
+    // son lo mismo: rt_key dice QUE recurso es (el analizador lo necesita para
+    // atribuirle el costo a uno solo), rt_dkey dice a que clase pertenece (el
+    // perfil matchea por ahi). Dos recursos distintos pueden compartir dkey
+    // -- un RT de SSR y uno de composicion, ambos RGBA16F full-res, son
+    // indistinguibles por descriptor -- y el analizador tiene que poder
+    // DECIRLO en vez de escribir una accion que toque a los dos.
+    ResKey   rt_key;
+    DescKey  rt_dkey;
 };
 
 struct EvVram {

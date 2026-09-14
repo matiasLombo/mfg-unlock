@@ -156,6 +156,7 @@ size_t format_event(char *out, size_t cap, const Event &e, const OutputInfo &res
                 "{\"t\":\"pass\",\"f\":%llu,\"key\":\"0x%llx\",\"rts\":\"0x%llx\","
                 "\"pso\":\"0x%llx\",\"gpu_ms\":%.5f,\"draws\":%u,\"ord\":%u,"
                 "\"queue\":%u,\"rt_w\":%u,\"rt_h\":%u,\"rt_bytes\":%llu,"
+                "\"rt_key\":\"0x%llx\",\"rt_dkey\":\"0x%llx\","
                 "\"begin\":%llu,\"end\":%llu,\"freq\":%llu,\"deep\":%u}",
                 (unsigned long long)e.frame,
                 (unsigned long long)e.pass.pass.v,
@@ -166,6 +167,8 @@ size_t format_event(char *out, size_t cap, const Event &e, const OutputInfo &res
                 e.pass.draws, e.pass.ordinal, e.pass.queue,
                 e.pass.rt_w, e.pass.rt_h,
                 (unsigned long long)e.pass.rt_bytes,
+                (unsigned long long)e.pass.rt_key.v,
+                (unsigned long long)e.pass.rt_dkey.v,
                 (unsigned long long)e.pass.gpu_begin_ticks,
                 (unsigned long long)e.pass.gpu_end_ticks,
                 (unsigned long long)e.pass.tick_freq, deep);
@@ -332,6 +335,8 @@ bool event_from_line(const ParsedLine &p, Event &e) {
         e.pass.rt_w = static_cast<u32>(p.u("rt_w"));
         e.pass.rt_h = static_cast<u32>(p.u("rt_h"));
         e.pass.rt_bytes = p.u("rt_bytes");
+        e.pass.rt_key = ResKey{p.u("rt_key")};
+        e.pass.rt_dkey = DescKey{p.u("rt_dkey")};
         // Si la linea vino sin ticks (un fixture escrito a mano) se reconstruye
         // una base de 1 GHz desde gpu_ms, para que el modelo de frame no tenga
         // que saber de donde salio el numero.
