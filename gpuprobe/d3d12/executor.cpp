@@ -218,7 +218,22 @@ void Executor::begin_frame(u64 index) {
             load_profile(false);
         }
     }
-    core_.advance_frame(index);
+    // El harness conmuta aca, en el limite de frame. Cada cambio de estado
+    // queda en el JSONL: es lo que despues le permite al analizador partir el
+    // frametime en dos condiciones y medir la ganancia de verdad. Un toggle
+    // sin evento es una medicion que nadie puede reconstruir.
+    const bool changed = core_.advance_frame(index);
+    if (changed || first_frame_) {
+        first_frame_ = false;
+        for (const Action &a : core_.profile().actions) {
+            const bool on = core_.is_on(a.id);
+            auto it = last_state_.find(a.id);
+            if (it != last_state_.end() && it->second == on) continue;
+            last_state_[a.id] = on;
+            collector().note_action(a.id, a.match.dkey,
+                                    static_cast<u32>(a.kind), on);
+        }
+    }
 }
 
 const char *Executor::capture_due(u64 index) {
@@ -252,6 +267,13 @@ const char *Executor::capture_due(u64 index) {
 void Executor::force(u64 id, bool on) {
     std::lock_guard<std::mutex> lk(mu_);
     core_.force(id, on);
+    // Un toggle desde el overlay tambien es un cambio de condicion: si no
+    // quedara en el log, el analizador atribuiria esos frames al estado
+    // anterior y la medicion saldria mezclada.
+    last_state_[id] = on;
+    const Action *a = core_.profile().find(id);
+    collector().note_action(id, a ? a->match.dkey : DescKey{},
+                            a ? static_cast<u32>(a->kind) : 0u, on);
 }
 
 }  // namespace gp

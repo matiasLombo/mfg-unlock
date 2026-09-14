@@ -175,6 +175,11 @@ public:
     double frame_ms() const;    // mediana movil del frametime
     void   vram_now(u64 *budget, u64 *usage) const;
 
+    // Deja constancia de que una accion se prendio o se apago. Es lo que
+    // despues le permite al analizador partir el frametime en dos condiciones
+    // y medir la ganancia; sin estos eventos, el harness A/B no existe.
+    void note_action(u64 action_id, DescKey target, u32 kind, bool on);
+
     // Publica solo para que los helpers de collector.cpp la vean; nadie de
     // afuera la incluye (esta declarada, no definida, en este header).
     struct Impl;

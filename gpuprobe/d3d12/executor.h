@@ -63,6 +63,8 @@ private:
     struct CapState { bool on = false; u64 changed = 0; bool shot_on = false;
                       bool shot_off = false; };
     std::unordered_map<u64, CapState> caps_;
+    std::unordered_map<u64, bool>     last_state_;
+    bool         first_frame_ = true;
     char         capture_suffix_[32] = {};
 };
 

@@ -1300,6 +1300,19 @@ void Collector::snapshot(PassLive *out, size_t max, size_t *count) const {
     *count = n;
 }
 
+void Collector::note_action(u64 action_id, DescKey target, u32 kind, bool on) {
+    if (!armed_) return;
+    Event e;
+    e.kind = EventKind::ActionApplied;
+    e.frame = frame_;
+    e.cpu_ns = now_ns();
+    e.action.action_id = action_id;
+    e.action.target = target;
+    e.action.kind = kind;
+    e.action.enabled = on ? 1u : 0u;
+    push(e);
+}
+
 double Collector::frame_ms() const {
     if (!impl_) return 0.0;
     std::lock_guard<std::mutex> lk(impl_->live_mu);
