@@ -17,7 +17,7 @@ def check(cond, msg):
         print(f"  FALLO {msg}")
 
 
-def main(outdir):
+def main(outdir, ab_exe=None):
     # --- 1. la sesion normal: los cinco defectos deliberados aparecen -----
     s = ingest.load(os.path.join(outdir, "sesion.jsonl"))
     check(s.schema == 1, "el analizador no leyo el esquema del writer de C++")
@@ -74,15 +74,20 @@ def main(outdir):
               f"ganancia medida {r.delta_ms:.3f} ms, esperada 0.9")
 
     # --- 4. C++ y Python tienen que dar el MISMO veredicto ---------------
-    exe = os.path.join(outdir, "ab_check")
+    exe = ab_exe or os.path.join(outdir, "ab_check")
     if not os.path.exists(exe):
         # En Windows el binario lo compila CMake con otro nombre y con .exe.
         for cand in (os.path.join(outdir, "ab_check.exe"),
                      os.path.join(outdir, "gpuprobe-ab-check.exe"),
-                     os.path.join(outdir, "Release", "gpuprobe-ab-check.exe")):
+                     os.path.join(outdir, "Release", "gpuprobe-ab-check.exe"),
+                     os.path.join("build", "Release", "gpuprobe-ab-check.exe")):
             if os.path.exists(cand):
                 exe = cand
                 break
+    if not os.path.exists(exe):
+        check(False, f"no encontre el binario ab_check (probe {exe})")
+        print(f"contrato: {len(fails)} FALLOS")
+        return 1
     for args in (("7.0", "8.0", "400", "3", "4"),
                  ("8.0", "8.0", "400", "11", "12"),
                  ("9.0", "8.0", "300", "5", "6")):
@@ -117,4 +122,5 @@ def _synth(base, n, seed, jitter=0.35):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "/tmp"))
+    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "/tmp",
+                  sys.argv[2] if len(sys.argv) > 2 else None))

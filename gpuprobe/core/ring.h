@@ -68,11 +68,19 @@ public:
 private:
     // head y tail en lineas de cache distintas: si comparten linea, cada push
     // invalida la linea que el consumidor esta leyendo y el ring "sin locks"
-    // termina costando mas que un mutex.
+    // termina costando mas que un mutex. El padding que eso mete es el punto,
+    // asi que se le dice a MSVC que no avise (C4324).
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
     alignas(64) std::atomic<size_t> head_{0};
     alignas(64) std::atomic<size_t> tail_{0};
     alignas(64) std::atomic<u64>    dropped_{0};
     Event slots_[N];
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 };
 
 // 16384 eventos = ~1.6 MB por hilo. Un frame pesado con instrumentacion deep
