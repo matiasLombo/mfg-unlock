@@ -136,5 +136,44 @@ int main() {
     CHECK(k1 != pso_key(a, 2, rts2, 1, Format::D32_Float));
     CHECK(k1 != pso_key(a, 2, rts, 1, Format::D16_Unorm));
 
+    // --- sesgo de mip sobre una vista -------------------------------------
+    // Es la parte del mip_bias que tiene todos los off-by-one.
+    {
+        u32 first = 0, levels = 12;
+        mip_bias_view(12, 1, &first, &levels);
+        CHECK_EQ_U64(first, 1);
+        CHECK_EQ_U64(levels, 11);
+
+        // Sesgo mas grande que la cadena: queda el ultimo mip, nunca cero.
+        first = 0; levels = 4;
+        mip_bias_view(4, 10, &first, &levels);
+        CHECK_EQ_U64(first, 3);
+        CHECK_EQ_U64(levels, 1);
+
+        // "Todos los que queden" se respeta tal cual.
+        first = 0; levels = kAllMips;
+        mip_bias_view(8, 2, &first, &levels);
+        CHECK_EQ_U64(first, 2);
+        CHECK_EQ_U64(levels, kAllMips);
+
+        // Una vista que ya empezaba abajo se corre igual.
+        first = 3; levels = 5;
+        mip_bias_view(10, 2, &first, &levels);
+        CHECK_EQ_U64(first, 5);
+        CHECK_EQ_U64(levels, 5);
+
+        // Sesgo negativo (mas detalle): no baja de cero.
+        first = 1; levels = 3;
+        mip_bias_view(10, -4, &first, &levels);
+        CHECK_EQ_U64(first, 0);
+        CHECK_EQ_U64(levels, 3);
+
+        // Un recurso de un solo mip no se puede sesgar a ningun lado.
+        first = 0; levels = 1;
+        mip_bias_view(1, 3, &first, &levels);
+        CHECK_EQ_U64(first, 0);
+        CHECK_EQ_U64(levels, 1);
+    }
+
     return gp_test::report("test_keys");
 }

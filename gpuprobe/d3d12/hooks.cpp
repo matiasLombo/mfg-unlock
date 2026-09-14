@@ -50,6 +50,7 @@ enum HookId {
     H_Device_CreateReservedResource,
     H_Device_CreateGraphicsPipelineState,
     H_Device_CreateComputePipelineState,
+    H_Device_CreateShaderResourceView,
     H_Device_CreateRenderTargetView,
     H_Device_CreateDepthStencilView,
     H_Queue_ExecuteCommandLists,
@@ -232,6 +233,9 @@ using CreateGfxPsoFn = HRESULT(STDMETHODCALLTYPE *)(
     ID3D12Device *, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *, REFIID, void **);
 using CreateCmpPsoFn = HRESULT(STDMETHODCALLTYPE *)(
     ID3D12Device *, const D3D12_COMPUTE_PIPELINE_STATE_DESC *, REFIID, void **);
+using CreateSrvFn = void(STDMETHODCALLTYPE *)(ID3D12Device *, ID3D12Resource *,
+                                              const D3D12_SHADER_RESOURCE_VIEW_DESC *,
+                                              D3D12_CPU_DESCRIPTOR_HANDLE);
 using CreateRtvFn = void(STDMETHODCALLTYPE *)(ID3D12Device *, ID3D12Resource *,
                                               const D3D12_RENDER_TARGET_VIEW_DESC *,
                                               D3D12_CPU_DESCRIPTOR_HANDLE);
@@ -348,6 +352,28 @@ HRESULT STDMETHODCALLTYPE hk_CreateComputePipelineState(
                                        ticks_ns() - t0, true);
     }
     return hr;
+}
+
+void STDMETHODCALLTYPE hk_CreateShaderResourceView(
+    ID3D12Device *dev, ID3D12Resource *res,
+    const D3D12_SHADER_RESOURCE_VIEW_DESC *desc,
+    D3D12_CPU_DESCRIPTOR_HANDLE handle) {
+    CreateSrvFn real = orig<CreateSrvFn>(H_Device_CreateShaderResourceView, dev);
+    if (!real) { gate_degrade("CreateShaderResourceView sin original"); return; }
+    if (gate_open()) {
+        Reentry guard;
+        if (guard.ok()) {
+            // mip_bias: la vista empieza un mip mas abajo. El recurso no se
+            // toca, asi que si la accion se apaga, la proxima vista vuelve a
+            // ser la original y no queda nada raro en memoria.
+            D3D12_SHADER_RESOURCE_VIEW_DESC biased{};
+            if (collector().srv_override(res, desc, &biased)) {
+                real(dev, res, &biased, handle);
+                return;
+            }
+        }
+    }
+    real(dev, res, desc, handle);
 }
 
 void STDMETHODCALLTYPE hk_CreateRenderTargetView(
@@ -638,6 +664,9 @@ void attach_device(ID3D12Device *dev) {
     install(H_Device_CreateComputePipelineState, dev,
             vtbl::Device::CreateComputePipelineState,
             reinterpret_cast<void *>(&hk_CreateComputePipelineState));
+    install(H_Device_CreateShaderResourceView, dev,
+            vtbl::Device::CreateShaderResourceView,
+            reinterpret_cast<void *>(&hk_CreateShaderResourceView));
     install(H_Device_CreateRenderTargetView, dev, vtbl::Device::CreateRenderTargetView,
             reinterpret_cast<void *>(&hk_CreateRenderTargetView));
     install(H_Device_CreateDepthStencilView, dev, vtbl::Device::CreateDepthStencilView,

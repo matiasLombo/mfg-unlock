@@ -25,8 +25,8 @@ juego  ->  version.dll  ->  colector  ->  sesion.jsonl  ->  analizador  ->  repo
 | colector (recursos, PSOs, pasadas, timestamps, VRAM) | funciona |
 | modelo de frame y formato JSONL | funciona, con tests |
 | analizador y reporte (Python) | funciona, 6 reglas |
-| ejecutor (`resource_scale`, `skip_pass`, `barrier_filter`) | funciona, detras de gates |
-| `mip_bias`, `drs_settings` | se parsean y se deciden; **todavia no se aplican** |
+| ejecutor (`resource_scale`, `skip_pass`, `barrier_filter`, `mip_bias`) | funciona, detras de gates |
+| `drs_settings` | se parsea y se decide; **todavia no se aplica** (falta NVAPI) |
 | overlay ImGui | opcional (ver abajo) |
 | harness A/B + capturas PNG | funciona |
 | testbed D3D12 propio + CI | funciona sobre WARP, sin GPU |

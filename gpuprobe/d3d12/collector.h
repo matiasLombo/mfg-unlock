@@ -107,6 +107,15 @@ public:
     // recurso.
     void on_rtv(D3D12_CPU_DESCRIPTOR_HANDLE h, ID3D12Resource *res);
     void on_dsv(D3D12_CPU_DESCRIPTOR_HANDLE h, ID3D12Resource *res);
+    // mip_bias: si hay una accion activa para este recurso, devuelve true y
+    // deja en out una vista que empieza un mip mas abajo. Es la unica forma
+    // honesta de aplicar un sesgo de mip desde afuera: cambiar el descriptor
+    // del RECURSO cambiaria lo que el juego cree que creo. Ojo con lo que
+    // ahorra: menos ancho de banda y menos presion de cache, NO menos VRAM --
+    // los mips grandes siguen residentes.
+    bool srv_override(ID3D12Resource *res,
+                      const D3D12_SHADER_RESOURCE_VIEW_DESC *in,
+                      D3D12_SHADER_RESOURCE_VIEW_DESC *out);
 
     // --- PSOs -------------------------------------------------------------
     PsoKey on_graphics_pso(const D3D12_GRAPHICS_PIPELINE_STATE_DESC &desc,

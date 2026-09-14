@@ -258,4 +258,29 @@ inline PassKey pass_key(RtSetKey rts, PsoKey first_pso, u32 ordinal) {
     return PassKey{h};
 }
 
+// Sesgo de mip sobre una VISTA. Es la parte del mip_bias que tiene todos los
+// off-by-one, asi que vive aca, pura y testeada, y no adentro del hook.
+//
+// mips: cuantos tiene el recurso. first/levels: lo que pedia la vista original
+// (levels == kAllMips significa "todos los que queden"). Siempre queda al menos
+// un mip: una vista vacia se lee negra, que es mucho peor que no sesgar nada.
+inline constexpr u32 kAllMips = 0xFFFFFFFFu;
+
+inline void mip_bias_view(u32 mips, i32 bias, u32 *first, u32 *levels) {
+    if (mips == 0) mips = 1;
+    u32 f = *first;
+    if (bias > 0) f += static_cast<u32>(bias);
+    else if (bias < 0) {
+        const u32 back = static_cast<u32>(-bias);
+        f = f > back ? f - back : 0;
+    }
+    if (f >= mips) f = mips - 1;
+    *first = f;
+    if (*levels != kAllMips) {
+        const u32 left = mips - f;
+        if (*levels > left) *levels = left;
+        if (*levels == 0) *levels = 1;
+    }
+}
+
 }  // namespace gp

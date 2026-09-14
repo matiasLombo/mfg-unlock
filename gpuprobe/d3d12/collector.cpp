@@ -604,6 +604,45 @@ void Collector::on_rtv(D3D12_CPU_DESCRIPTOR_HANDLE h, ID3D12Resource *res) {
             rd.h, rd.bytes, scale);
 }
 
+bool Collector::srv_override(ID3D12Resource *res,
+                             const D3D12_SHADER_RESOURCE_VIEW_DESC *in,
+                             D3D12_SHADER_RESOURCE_VIEW_DESC *out) {
+    if (!armed_ || !actions_ || !res || !out) return false;
+    ResourceDesc rd;
+    {
+        std::lock_guard<std::mutex> lk(impl_->tables);
+        auto it = impl_->resources.find(res);
+        if (it == impl_->resources.end()) return false;
+        rd = it->second;
+    }
+    // Solo texturas con cadena de mips: sesgar una vista de un RT de un mip
+    // no tiene sentido y seria una vista invalida.
+    if (rd.dim != Dim::Texture2D || rd.mips <= 1) return false;
+    const ResourceOverride ov = actions_->on_create(rd, CallsiteId{});
+    if (ov.mip_bias <= 0) return false;
+
+    if (in) {
+        *out = *in;
+    } else {
+        // Vista por defecto: hay que armarla para poder sesgarla.
+        *out = D3D12_SHADER_RESOURCE_VIEW_DESC{};
+        out->Format = static_cast<DXGI_FORMAT>(rd.fmt);
+        out->Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        out->ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        out->Texture2D.MipLevels = rd.mips;
+        // Una vista por defecto en D3D12 cubre todos los mips; se escribe
+        // explicito para que el sesgo tenga de donde recortar.
+    }
+    if (out->ViewDimension != D3D12_SRV_DIMENSION_TEXTURE2D) return false;
+
+    u32 first = out->Texture2D.MostDetailedMip;
+    u32 levels = out->Texture2D.MipLevels;
+    mip_bias_view(rd.mips, ov.mip_bias, &first, &levels);
+    out->Texture2D.MostDetailedMip = first;
+    out->Texture2D.MipLevels = levels;
+    return true;
+}
+
 void Collector::on_dsv(D3D12_CPU_DESCRIPTOR_HANDLE h, ID3D12Resource *res) {
     on_rtv(h, res);  // la tabla es la misma: lo unico que importa es el handle
 }

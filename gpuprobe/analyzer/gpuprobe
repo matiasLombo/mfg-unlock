@@ -1,0 +1,8 @@
+#!/bin/sh
+# El CLI del analizador, para no tener que acordarse del PYTHONPATH.
+#
+#   gpuprobe/analyzer/gpuprobe analyze sesion.jsonl --report r.md --profile p.toml
+#   gpuprobe/analyzer/gpuprobe passes  sesion.jsonl
+#   gpuprobe/analyzer/gpuprobe ab      sesion.jsonl
+exec env PYTHONPATH="$(cd "$(dirname "$0")" && pwd)${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m gpuprobe_analyzer "$@"

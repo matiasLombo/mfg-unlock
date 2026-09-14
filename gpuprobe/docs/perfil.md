@@ -96,12 +96,22 @@ enabled = true
 | `resource_scale` | **aplicado** | crea el recurso mas chico y escala los viewports que lo tienen bindeado |
 | `skip_pass` | **aplicado** | descarta los draws de la pasada que escribe sobre ese recurso |
 | `barrier_filter` | **aplicado** | no ejecuta esa transicion |
-| `mip_bias` | parseado y decidido, **todavia no aplicado** | falta interceptar la creacion de vistas y samplers |
+| `mip_bias` | **aplicado** | las vistas (SRV) de esa textura empiezan N mips mas abajo |
 | `drs_settings` | parseado, **todavia no aplicado** | falta NVAPI, que es una dependencia externa |
 
-Los dos ultimos se validan y se muestran en el overlay, pero hoy no cambian
-nada. Preferimos que el perfil documente la intencion y que el estado se diga
-aca a que una accion parezca activa y no lo este.
+Sobre `mip_bias`, dos precisiones que cambian para que sirve:
+
+- Se aplica sobre la **vista**, no sobre el recurso. Cambiar el descriptor del
+  recurso cambiaria lo que el juego cree que creo; mover `MostDetailedMip` en
+  el SRV no. Si la accion se apaga, la proxima vista vuelve a ser la original.
+- **No ahorra VRAM.** Los mips grandes siguen residentes; lo que baja es el
+  ancho de banda de texturas y la presion de cache. Contra un techo de VRAM
+  esto no alcanza: ahi lo que sirve es bajar un escalon la calidad de texturas
+  del juego.
+
+`drs_settings` se valida y se muestra en el overlay, pero hoy no cambia nada.
+Preferimos que el perfil documente la intencion y que el estado se diga aca a
+que una accion parezca activa y no lo este.
 
 ## Matchers
 

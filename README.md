@@ -19,6 +19,17 @@ NVIDIA's code rather than by inference.
 
 ---
 
+## gpuprobe
+
+En `gpuprobe/` vive otra cosa que nacio de este mismo repositorio: un toolkit
+para encontrar pasadas mal dimensionadas en juegos de D3D12 y arreglarlas desde
+afuera, con el mismo enfoque de proxy DLL y las mismas lecciones (enganche por
+vtable con tabla, passthrough ante cualquier falla, nada escrito en la carpeta
+del juego). Tiene su propio README, su propio CI y una app D3D12 de prueba que
+corre sobre WARP sin GPU.
+
+---
+
 ## Read this first
 
 **Anti-cheat.** This injects a DLL into the game process. GTA V ships BattlEye,
