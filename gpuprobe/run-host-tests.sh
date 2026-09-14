@@ -14,10 +14,10 @@ FLAGS="-std=c++20 -O2 -Wall -Wextra -Werror -I gpuprobe -pthread"
 OUT=${TMPDIR:-/tmp}/gpuprobe-tests
 mkdir -p "$OUT"
 
-CORE="gpuprobe/core/types.cpp gpuprobe/core/jsonl.cpp gpuprobe/core/frame.cpp gpuprobe/core/profile.cpp"
+CORE="gpuprobe/core/types.cpp gpuprobe/core/jsonl.cpp gpuprobe/core/frame.cpp gpuprobe/core/profile.cpp gpuprobe/core/executor_core.cpp"
 
 fail=0
-for t in test_hash test_keys test_ring test_frame test_profile test_stats test_analysis; do
+for t in test_hash test_keys test_ring test_frame test_profile test_stats test_executor; do
     [ -f "gpuprobe/tests/$t.cpp" ] || continue
     $CXX $FLAGS "gpuprobe/tests/$t.cpp" $CORE -o "$OUT/$t"
     if ! "$OUT/$t"; then fail=1; fi

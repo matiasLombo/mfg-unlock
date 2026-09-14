@@ -691,6 +691,26 @@ bool take_query(Collector::Impl *im, ListState *ls, u32 *out) {
     return true;
 }
 
+// Abre una pasada si no hay ninguna abierta. El corte normal es el cambio de
+// render targets, pero una command list de COMPUTE nunca llama
+// OMSetRenderTargets: su pasada empieza en el primer dispatch y su identidad
+// es el PSO. Sin esto, todo el trabajo de async compute quedaba sin medir --
+// y era justo el caso que el modelo de frame necesita para poder decir "esta
+// pasada corre tapada".
+bool open_pass(Collector::Impl *im, ListState *ls,
+               ID3D12GraphicsCommandList *list, bool deep, u32 budget) {
+    if (ls->pass_open) return true;
+    const u32 used = im->slots[ls->slot].next_query.load(std::memory_order_relaxed);
+    if (!deep && used >= budget) return false;
+    u32 q = 0;
+    if (!take_query(im, ls, &q)) return false;
+    list->EndQuery(im->slots[ls->slot].heap, D3D12_QUERY_TYPE_TIMESTAMP, q);
+    ls->q_begin = q;
+    ls->pass_open = true;
+    ls->draws = 0;
+    return true;
+}
+
 void close_pass(Collector::Impl *im, ListState *ls) {
     if (!ls->pass_open) return;
     ls->pass_open = false;
@@ -779,17 +799,9 @@ void Collector::cmd_set_render_targets(ID3D12GraphicsCommandList *list, u32 n,
     ls->rt_bytes = bytes;
     ls->cur_pass = pass_key(ls->cur_rts, ls->cur_pso, ls->ordinal);
 
-    // En modo light se instrumentan solo las pasadas hasta agotar el
-    // presupuesto; en deep, todas. Abrir la pasada es pedir el primer query.
-    u32 q = 0;
-    const u32 used = impl_->slots[ls->slot].next_query.load(std::memory_order_relaxed);
-    const bool budget_left = deep_ || used < impl_->cfg.query_budget;
-    if (budget_left && take_query(impl_, ls, &q)) {
-        list->EndQuery(impl_->slots[ls->slot].heap, D3D12_QUERY_TYPE_TIMESTAMP, q);
-        ls->q_begin = q;
-        ls->pass_open = true;
-        ls->draws = 0;
-    }
+    // En modo light se instrumentan las pasadas hasta agotar el presupuesto de
+    // queries; en deep, todas.
+    open_pass(impl_, ls, list, deep_, impl_->cfg.query_budget);
 }
 
 void Collector::cmd_set_pso(ID3D12GraphicsCommandList *list,
@@ -832,6 +844,11 @@ void Collector::cmd_dispatch(ID3D12GraphicsCommandList *list, u32 x, u32 y,
     if (!armed_) return;
     ListState *ls = Collector_find_list(impl_, list);
     if (!ls) return;
+    if (!ls->pass_open) {
+        // Pasada de compute: sin render targets, anclada al PSO.
+        ls->cur_pass = pass_key(ls->cur_rts, ls->cur_pso, ls->ordinal);
+        open_pass(impl_, ls, list, deep_, impl_->cfg.query_budget);
+    }
     ++ls->draws;
     if (!deep_) return;
     Event e;

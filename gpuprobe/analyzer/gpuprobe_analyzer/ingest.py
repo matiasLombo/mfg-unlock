@@ -112,6 +112,13 @@ def load_lines(lines: Iterable[str], warmup: int = DEFAULT_WARMUP,
                             rt_bytes=_int(ev.get("rt_bytes")))
                 s.passes[key] = p
             p.draws = max(p.draws, _int(ev.get("draws")))
+            # Que una pasada escriba sobre el recurso es evidencia directa de
+            # escritura: no depende de que el juego haya emitido un barrier.
+            # Un RT creado ya en RENDER_TARGET y nunca transicionado -- que es
+            # exactamente como se ve un recurso huerfano -- no emite ninguno.
+            rt = s.resources.get(p.rt_key)
+            if rt is not None:
+                rt.states_written.add(STATE_RENDER_TARGET)
             if f > warmup:
                 ms = float(ev.get("gpu_ms", 0.0) or 0.0)
                 if _int(ev.get("deep")):

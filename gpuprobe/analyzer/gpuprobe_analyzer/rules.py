@@ -378,7 +378,10 @@ ALL_RULES = [
 
 
 def analyze(s: Session, th: Optional[Thresholds] = None) -> List[Candidate]:
-    th = th or Thresholds()
+    # Sin umbrales explicitos, el warmup sale de la SESION. Si no, un analisis
+    # con warmup corto seguiria filtrando por el default de 120 frames y se
+    # perderia justo lo que se estaba buscando.
+    th = th or Thresholds(warmup=s.warmup_frames)
     cands: List[Candidate] = []
     for rule in ALL_RULES:
         cands.extend(rule(s, th))

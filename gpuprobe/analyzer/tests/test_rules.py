@@ -156,3 +156,35 @@ class TestRules(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRegresiones(unittest.TestCase):
+    """Casos que aparecieron corriendo el testbed de verdad sobre WARP.
+
+    Los tres estaban en verde en los unitarios y en rojo en la corrida real:
+    por eso el job de Windows existe.
+    """
+
+    def test_un_rt_escrito_sin_barriers_igual_cuenta_como_escrito(self):
+        # El testbed crea el huerfano ya en RENDER_TARGET y nunca lo
+        # transiciona: por barriers no se veia escrito, y sin escrituras la
+        # regla del huerfano no disparaba. Que una pasada lo tenga bindeado
+        # como RT es evidencia directa.
+        b = Builder()
+        b.res(0x10, 0xAA, "rt_full", "R16G16B16A16_FLOAT", 2560, 1440, flags=4)
+        for f in range(200, 260):
+            b.pass_(f, 0x100, 0x10, 0xAA, 0.5, draws=1)
+            b.frame_end(f, 10.0)
+        s = ingest.load_lines(b.build(), warmup=100)
+        self.assertTrue(s.resources[0x10].never_read())
+        self.assertTrue(any(c.cid.startswith("orphan_") for c in rules.analyze(s)))
+
+    def test_el_warmup_de_la_sesion_manda_sobre_el_default(self):
+        # Un PSO compilado en el frame 120 con warmup de sesion 30 tiene que
+        # aparecer; antes lo filtraba el warmup por defecto de los umbrales.
+        b = Builder()
+        for f in range(31, 240):
+            b.frame_end(f, 10.0)
+        b.pso(120, 0xF1, 12.0, render_thread=1)
+        s = ingest.load_lines(b.build(), warmup=30)
+        self.assertTrue(any(c.cid == "pso_stutter" for c in rules.analyze(s)))

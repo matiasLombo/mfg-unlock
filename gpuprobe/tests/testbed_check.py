@@ -63,7 +63,10 @@ def main(path, report_path=None):
     other_queue = [p for p in s.passes.values() if p.queue != 0]
     check(len(other_queue) >= 1, "registro la pasada de la queue de compute")
 
-    cands = rules.analyze(s)
+    # Corrida corta: el warmup de la sesion (30) manda, y los umbrales de
+    # costo bajan porque WARP mide todo mas lento y mas ruidoso que una GPU.
+    th = rules.Thresholds(warmup=30, min_gain_ms=0.05)
+    cands = rules.analyze(s, th)
     for c in cands:
         print(f"    {c.gain_ms:6.2f} ms [{c.visual_risk}/{c.stability}] {c.title}")
     by = {c.cid.split("_")[0] for c in cands}
@@ -81,7 +84,7 @@ def main(path, report_path=None):
         check(any("MISMO descriptor" in e for e in orph[0].evidence),
               "avisa que el matcher del huerfano es ambiguo")
 
-    md = report.render(s, cands)
+    md = report.render(s, cands, th)
     if report_path:
         with open(report_path, "w", encoding="utf-8") as fh:
             fh.write(md + "\n")
