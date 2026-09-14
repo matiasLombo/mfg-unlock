@@ -310,6 +310,13 @@ struct SlotState {
     u64              pending[kMaxQueues] = {};
     std::vector<PassRecord> passes;
     u64              frame = 0;
+    // Ultimo frame en el que ALGUNA lista empezo a grabar contra este slot.
+    // Un juego que graba con anticipacion puede abrir una lista en el frame N
+    // y ejecutarla en el N+2; si el slot se cobrara y se reseteara en el
+    // medio, esa lista escribiria sus queries sobre indices ya reciclados y
+    // los tiempos saldrian de otra pasada. Cobrar solo slots que no se tocan
+    // desde hace al menos un frame lo evita sin agregar ningun lock.
+    u64              touched = 0;
     bool             in_flight = false;
 };
 
@@ -626,8 +633,8 @@ bool Collector::srv_override(ID3D12Resource *res,
     // Solo texturas con cadena de mips: sesgar una vista de un RT de un mip
     // no tiene sentido y seria una vista invalida.
     if (rd.dim != Dim::Texture2D || rd.mips <= 1) return false;
-    const ResourceOverride ov = actions_->on_create(rd, CallsiteId{});
-    if (ov.mip_bias <= 0) return false;
+    const i8 bias = actions_->mip_bias_for(rd);
+    if (bias <= 0) return false;
 
     if (in) {
         *out = *in;
@@ -645,7 +652,7 @@ bool Collector::srv_override(ID3D12Resource *res,
 
     u32 first = out->Texture2D.MostDetailedMip;
     u32 levels = out->Texture2D.MipLevels;
-    mip_bias_view(rd.mips, ov.mip_bias, &first, &levels);
+    mip_bias_view(rd.mips, bias, &first, &levels);
     out->Texture2D.MostDetailedMip = first;
     out->Texture2D.MipLevels = levels;
     return true;
@@ -783,6 +790,7 @@ void Collector::cmd_begin(ID3D12GraphicsCommandList *list) {
     ls->list = list;
     ls->slot = impl_->cur_slot;
     ls->frame = frame_;
+    impl_->slots[ls->slot].touched = frame_;
     ls->pass_open = false;
     ls->pass_skipped = false;
     ls->draws = 0;
@@ -1164,8 +1172,11 @@ void Collector::on_execute(ID3D12CommandQueue *queue, u32 n,
 
 namespace {
 
-bool slot_ready(Collector::Impl *im, SlotState &slot) {
+bool slot_ready(Collector::Impl *im, SlotState &slot, u64 frame) {
     if (!slot.in_flight) return false;
+    // Todavia se estaba grabando contra este slot en el frame actual o en el
+    // anterior: puede quedar una lista abierta que aun no se ejecuto.
+    if (frame <= slot.touched + 1) return false;
     for (u32 i = 0; i < im->nqueues; ++i) {
         if (slot.pending[i] == 0) continue;
         if (im->queues[i].fence->GetCompletedValue() < slot.pending[i])
@@ -1289,7 +1300,7 @@ void Collector::on_present(IDXGISwapChain *swapchain) {
         std::lock_guard<std::mutex> lk(impl_->tables);
         for (u32 i = 0; i < kSlots; ++i) {
             SlotState &s = impl_->slots[(impl_->cur_slot + 1 + i) % kSlots];
-            if (slot_ready(impl_, s)) collect_slot(impl_, s, false);
+            if (slot_ready(impl_, s, frame_)) collect_slot(impl_, s, false);
         }
         impl_->cur_slot = (impl_->cur_slot + 1) % kSlots;
     }

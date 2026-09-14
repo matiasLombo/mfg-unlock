@@ -171,6 +171,41 @@ int main() {
         CHECK(ex.decide_resource(shadow4k(), CallsiteId{}).why == GateResult::Disabled);
     }
 
+    // --- scale y mip_bias sobre el MISMO recurso --------------------------
+    // Una textura puede matchear las dos acciones. Preguntar por una no tiene
+    // que devolver la otra, ni taparla porque vino antes en el perfil.
+    {
+        ExecutorCore ex;
+        ex.set_output(out);
+        ex.set_profile(parse(
+            "[gpuprobe]\nobserve_only = false\n"
+            "[[action]]\nkind = \"resource_scale\"\n"
+            "match = { category = \"texture\" }\nscale = 0.5\n"
+            "verify = \"none\"\nenabled = true\n"
+            "[[action]]\nkind = \"mip_bias\"\n"
+            "match = { category = \"texture\" }\nmip_bias = 2\n"
+            "verify = \"none\"\nenabled = true\n"));
+        ResourceDesc tex;
+        tex.dim = Dim::Texture2D;
+        tex.fmt = Format::BC7_Unorm;
+        tex.w = tex.h = 2048;
+        tex.depth = 1; tex.mips = 12; tex.samples = 1;
+        tex.flags = kFlagNone; tex.heap = HeapKind::Default;
+        CHECK(classify(tex, out) == Category::Texture);
+
+        const Decision scale = ex.decide_resource(tex, CallsiteId{},
+                                                  ActionKind::ResourceScale);
+        CHECK(scale.apply());
+        CHECK_NEAR(scale.scale, 0.5, 1e-9);
+        CHECK_EQ_U64(scale.mip_bias, 0);
+
+        const Decision bias = ex.decide_resource(tex, CallsiteId{},
+                                                 ActionKind::MipBias);
+        CHECK(bias.apply());
+        CHECK_EQ_U64(bias.mip_bias, 2);
+        CHECK_NEAR(bias.scale, 1.0, 1e-9);
+    }
+
     // --- el backbuffer no se toca ni con verify = none --------------------
     {
         ExecutorCore ex;

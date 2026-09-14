@@ -158,9 +158,14 @@ void Executor::save_ledger() {
     ledger_dirty_ = false;
 }
 
+i8 Executor::mip_bias_for(const ResourceDesc &d) {
+    const Decision dec = core_.decide_resource(d, CallsiteId{}, ActionKind::MipBias);
+    return dec.apply() ? static_cast<i8>(dec.mip_bias) : 0;
+}
+
 ResourceOverride Executor::on_create(const ResourceDesc &d, CallsiteId site) {
     ResourceOverride ov;
-    const Decision dec = core_.decide_resource(d, site);
+    const Decision dec = core_.decide_resource(d, site, ActionKind::ResourceScale);
     if (!dec.apply()) return ov;
     if (dec.scale < 1.0 && dec.scale > 0.0) {
         ov.w = static_cast<u32>(static_cast<double>(d.w) * dec.scale);
@@ -174,7 +179,6 @@ ResourceOverride Executor::on_create(const ResourceDesc &d, CallsiteId site) {
         ov.w &= ~7u;
         ov.h &= ~7u;
     }
-    ov.mip_bias = static_cast<i8>(dec.mip_bias);
     return ov;
 }
 

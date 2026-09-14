@@ -57,6 +57,10 @@ struct ResourceOverride {
 struct Actions {
     virtual ~Actions() = default;
     virtual ResourceOverride on_create(const ResourceDesc &, CallsiteId) = 0;
+    // El sesgo de mip para ESTE recurso, si hay una accion activa. Va aparte
+    // de on_create porque se pregunta en otro momento (al crear la vista) y
+    // porque un recurso puede matchear las dos acciones.
+    virtual i8 mip_bias_for(const ResourceDesc &) { return 0; }
     virtual void note_resource(DescKey, const ResourceDesc &, bool placed,
                                bool reserved) = 0;
     virtual void note_copy(DescKey, bool as_source) = 0;

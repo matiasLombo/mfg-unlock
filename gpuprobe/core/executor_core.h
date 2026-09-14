@@ -82,9 +82,15 @@ public:
     const std::unordered_map<u64, Observed> &observations() const { return obs_; }
 
     // --- decisiones -------------------------------------------------------
-    // Que hacer con un recurso que esta por crearse. No aplica nada: devuelve
-    // la decision y el motivo, y quien llama decide que hacer con eso.
-    Decision decide_resource(const ResourceDesc &, CallsiteId) const;
+    // Que hacer con un recurso. No aplica nada: devuelve la decision y el
+    // motivo, y quien llama decide que hacer con eso.
+    //
+    // `want` acota a un tipo de accion, y no es un detalle: una textura puede
+    // matchear un resource_scale Y un mip_bias, y quien pregunta sabe cual le
+    // sirve. Sin esto, el que viniera primero en el perfil tapaba al otro --
+    // un mip_bias que nunca se aplica y nadie entiende por que.
+    Decision decide_resource(const ResourceDesc &, CallsiteId,
+                             ActionKind want = ActionKind::None) const;
     Decision decide_pass(PassKey, DescKey rt) const;
     Decision decide_barrier(u32 before, u32 after) const;
 

@@ -27,6 +27,7 @@ public:
 
     // --- Actions ----------------------------------------------------------
     ResourceOverride on_create(const ResourceDesc &, CallsiteId) override;
+    i8 mip_bias_for(const ResourceDesc &) override;
     void note_resource(DescKey, const ResourceDesc &, bool placed,
                        bool reserved) override;
     void note_copy(DescKey, bool as_source) override;

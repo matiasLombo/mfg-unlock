@@ -88,14 +88,15 @@ GateResult ExecutorCore::gate(const Action &a, const ResourceDesc &d,
     return GateResult::Ok;
 }
 
-Decision ExecutorCore::decide_resource(const ResourceDesc &d,
-                                       CallsiteId site) const {
+Decision ExecutorCore::decide_resource(const ResourceDesc &d, CallsiteId site,
+                                       ActionKind want) const {
     (void)site;
     Decision dec;
     const DescKey key = desc_key(d, out_);
     for (const Action &a : profile_.actions) {
         if (a.kind != ActionKind::ResourceScale && a.kind != ActionKind::MipBias)
             continue;
+        if (want != ActionKind::None && a.kind != want) continue;
         if (!matches(a.match, d, out_)) continue;
         dec.action_id = a.id;
         if (profile_.observe_only) { dec.why = GateResult::ObserveOnly; return dec; }
