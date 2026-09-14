@@ -31,7 +31,9 @@ add_library(gpuprobe_core STATIC
 # pipeline entero en CI sin GPU.
 add_executable(gpuprobe-testbed
     testbed/testbed.cpp
-    d3d12/collector.cpp)
+    d3d12/collector.cpp
+    d3d12/capture.cpp
+    d3d12/gate.cpp)
 target_link_libraries(gpuprobe-testbed PRIVATE gpuprobe_core d3d12 dxgi d3dcompiler)
 
 # Las herramientas de host, para poder correr el fixture y el chequeo cruzado

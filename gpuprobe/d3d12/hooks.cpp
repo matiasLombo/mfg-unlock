@@ -30,6 +30,7 @@
 #include "collector.h"
 #include "executor.h"
 #include "gate.h"
+#include "overlay.h"
 #include "vtbl.h"
 
 namespace gp {
@@ -78,6 +79,11 @@ struct Slot {
 Slot       g_slots[H_Count];
 std::mutex g_hook_mu;
 HookStats  g_stats;
+
+// El device y la queue con los que dibuja el overlay. Se llenan al armar; si
+// no estan, no hay overlay y no pasa nada mas.
+std::atomic<ID3D12Device *>       g_device{nullptr};
+std::atomic<ID3D12CommandQueue *> g_queue{nullptr};
 
 void **vtable_of(void *obj) { return *reinterpret_cast<void ***>(obj); }
 
@@ -136,11 +142,25 @@ using ResizeFn = HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain *, UINT, UINT, UINT
 
 void arm_from_swapchain(IDXGISwapChain *sc);
 
-void note_present(IDXGISwapChain *sc) {
-    // Camino de vtables robadas: nadie nos aviso de la creacion del swapchain,
-    // asi que el primer Present del juego es donde nos enteramos de que
-    // device hay que armar.
+// Lo que hay que hacer ANTES del Present real: dibujar el overlay. Despues ya
+// es tarde -- el frame se fue.
+void before_present(IDXGISwapChain *sc) {
     if (gate_phase() == Phase::Passthrough) arm_from_swapchain(sc);
+    if (gate_phase() != Phase::Verified && gate_phase() != Phase::Armed) return;
+
+    // F10: prender y apagar el overlay. Con el flanco, no con el nivel, o
+    // parpadearia sesenta veces por segundo.
+    static bool held = false;
+    const bool down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+    if (down && !held) overlay_toggle();
+    held = down;
+
+    ID3D12Device *dev = g_device.load(std::memory_order_acquire);
+    ID3D12CommandQueue *q = g_queue.load(std::memory_order_acquire);
+    if (dev && q) overlay_draw(dev, q, sc);
+}
+
+void note_present(IDXGISwapChain *sc) {
     // La resolucion de salida sale del swapchain y no de la ventana: con DRS,
     // upscalers y modos raros, la ventana miente y el backbuffer no.
     DXGI_SWAP_CHAIN_DESC d{};
@@ -153,6 +173,10 @@ void note_present(IDXGISwapChain *sc) {
 HRESULT STDMETHODCALLTYPE hk_Present(IDXGISwapChain *sc, UINT interval, UINT flags) {
     PresentFn real = orig<PresentFn>(H_SwapChain_Present, sc);
     if (!real) { gate_degrade("Present sin original para su vtable"); return E_FAIL; }
+    if (gate_open()) {
+        Reentry guard;
+        if (guard.ok()) before_present(sc);
+    }
     const HRESULT hr = real(sc, interval, flags);
     if (gate_open()) {
         Reentry guard;
@@ -165,6 +189,10 @@ HRESULT STDMETHODCALLTYPE hk_Present1(IDXGISwapChain1 *sc, UINT interval, UINT f
                                       const DXGI_PRESENT_PARAMETERS *params) {
     Present1Fn real = orig<Present1Fn>(H_SwapChain_Present1, sc);
     if (!real) { gate_degrade("Present1 sin original"); return E_FAIL; }
+    if (gate_open()) {
+        Reentry guard;
+        if (guard.ok()) before_present(sc);
+    }
     const HRESULT hr = real(sc, interval, flags, params);
     if (gate_open()) {
         Reentry guard;
@@ -619,6 +647,11 @@ void attach_device(ID3D12Device *dev) {
 
 void attach_queue(ID3D12CommandQueue *queue) {
     if (!queue) return;
+    // La primera queue directa que vemos es con la que dibuja el overlay.
+    if (queue->GetDesc().Type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
+        ID3D12CommandQueue *expected = nullptr;
+        g_queue.compare_exchange_strong(expected, queue);
+    }
     install(H_Queue_ExecuteCommandLists, queue, vtbl::CommandQueue::ExecuteCommandLists,
             reinterpret_cast<void *>(&hk_ExecuteCommandLists));
     g_stats.queues =
@@ -640,6 +673,7 @@ void arm_with_device(ID3D12Device *device, IDXGISwapChain *sc) {
         std::snprintf(exe, sizeof exe, "%s", slash ? slash + 1 : full);
     }
     if (!gate_arm(device, exe)) return;
+    g_device.store(device, std::memory_order_release);
 
     OutputInfo out{};
     if (sc) {

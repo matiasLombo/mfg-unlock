@@ -221,6 +221,34 @@ void Executor::begin_frame(u64 index) {
     core_.advance_frame(index);
 }
 
+const char *Executor::capture_due(u64 index) {
+    if (!armed_) return nullptr;
+    const Profile &p = core_.profile();
+    if (p.observe_only) return nullptr;
+    // Se captura cuando el estado de una accion lleva estable el warmup del
+    // perfil: antes de eso la imagen puede tener caches a medio llenar o un
+    // RT recien recreado, y la comparacion visual no seria justa.
+    const u64 settle = p.ab_warmup ? p.ab_warmup : 5;
+    for (const Action &a : p.actions) {
+        if (!a.ab) continue;
+        CapState &c = caps_[a.id];
+        const bool on = core_.is_on(a.id);
+        if (on != c.on) {
+            c.on = on;
+            c.changed = index;
+            continue;
+        }
+        if (index < c.changed + settle) continue;
+        bool &shot = on ? c.shot_on : c.shot_off;
+        if (shot) continue;
+        shot = true;
+        std::snprintf(capture_suffix_, sizeof capture_suffix_, "a%llu-%s",
+                      static_cast<unsigned long long>(a.id), on ? "on" : "off");
+        return capture_suffix_;
+    }
+    return nullptr;
+}
+
 void Executor::force(u64 id, bool on) {
     std::lock_guard<std::mutex> lk(mu_);
     core_.force(id, on);

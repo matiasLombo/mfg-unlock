@@ -67,6 +67,10 @@ struct Actions {
     // estado. A mitad de una lista grabada seria un RT a media resolucion con
     // el viewport de la otra.
     virtual void begin_frame(u64 index) = 0;
+    // Devuelve un sufijo ("a3-on") cuando corresponde sacar una captura, o
+    // nullptr. El costo visual no se mide: se mira, y para mirarlo hacen falta
+    // las dos imagenes del mismo punto.
+    virtual const char *capture_due(u64 index) { (void)index; return nullptr; }
 };
 
 class Collector {
@@ -146,6 +150,25 @@ public:
 
     u64  frame_index() const { return frame_; }
     bool deep_frame() const { return deep_; }
+
+    // --- lo que mira el overlay ------------------------------------------
+    // Una fila por pasada viva, con su costo suavizado. No es para analizar
+    // -- para eso esta el JSONL y el analizador -- es para poder ver en vivo
+    // que se movio al prender un candidato.
+    struct PassLive {
+        PassKey key;
+        DescKey rt_dkey;
+        double  gpu_ms = 0.0;
+        u32     draws = 0;
+        u32     rt_w = 0, rt_h = 0;
+        u32     queue = 0;
+        u64     last_frame = 0;
+    };
+    // Copia ordenada por costo. Toma un lock: el overlay corre una vez por
+    // frame en el hilo de presentacion, no en el de grabacion.
+    void snapshot(PassLive *out, size_t max, size_t *count) const;
+    double frame_ms() const;    // mediana movil del frametime
+    void   vram_now(u64 *budget, u64 *usage) const;
 
     // Publica solo para que los helpers de collector.cpp la vean; nadie de
     // afuera la incluye (esta declarada, no definida, en este header).

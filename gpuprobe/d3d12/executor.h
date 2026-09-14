@@ -15,6 +15,7 @@
 
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 namespace gp {
 
@@ -33,6 +34,7 @@ public:
     bool skip_pass(PassKey, DescKey rt) override;
     bool drop_barrier(u32 before, u32 after) override;
     void begin_frame(u64 index) override;
+    const char *capture_due(u64 index) override;
 
     // --- overlay ----------------------------------------------------------
     ExecutorCore &core() { return core_; }
@@ -56,6 +58,12 @@ private:
     u64          last_check_frame_ = 0;
     bool         ledger_dirty_ = false;
     bool         armed_ = false;
+    // Estado de captura por accion: cuando cambio, y si ya capturamos esa
+    // combinacion de (accion, estado).
+    struct CapState { bool on = false; u64 changed = 0; bool shot_on = false;
+                      bool shot_off = false; };
+    std::unordered_map<u64, CapState> caps_;
+    char         capture_suffix_[32] = {};
 };
 
 // El ejecutor del proceso, como el colector: uno solo.

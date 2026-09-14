@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "capture.h"
 #include "core/hash.h"
 #include "core/jsonl.h"
 
@@ -331,9 +332,17 @@ struct Collector::Impl {
     // crear la vista (raro), no al grabar (hot path).
     std::unordered_map<u64, float>           scaled;
 
+    // Tabla viva para el overlay. El costo se suaviza con una media movil
+    // exponencial: sin eso la tabla parpadea y no se puede leer.
+    std::unordered_map<u64, Collector::PassLive> live;
+    mutable std::mutex live_mu;
+    double frame_ms_ema = 0.0;
+    u64    vram_budget = 0, vram_usage = 0;
+
     u64 last_present_ns = 0;
-    u64 module_base = 0;
-    u64 module_size = 0;
+    // La ruta de la sesion sin extension: las capturas del harness van al lado
+    // del JSONL y con el mismo prefijo, que es como el analizador las encuentra.
+    char session_base[MAX_PATH * 2] = {};
 };
 
 namespace {
@@ -440,6 +449,16 @@ bool Collector::init(ID3D12Device *device, const CollectorConfig &cfg) {
     if (!im->writer.open(path, cfg.exe_name, adapter_name, out_, budget)) {
         delete im;
         return false;
+    }
+
+    // La base para las capturas: la misma ruta sin ".jsonl".
+    {
+        char narrow[MAX_PATH * 2];
+        WideCharToMultiByte(CP_UTF8, 0, path, -1, narrow, sizeof narrow, nullptr,
+                            nullptr);
+        size_t n = strlen(narrow);
+        if (n > 6 && strcmp(narrow + n - 6, ".jsonl") == 0) narrow[n - 6] = 0;
+        std::snprintf(im->session_base, sizeof im->session_base, "%s", narrow);
     }
 
     im->last_present_ns = now_ns();
@@ -1116,6 +1135,19 @@ void collect_slot(Collector::Impl *im, SlotState &slot, bool deep) {
         e.pass.rt_key = p.rt_key;
         e.pass.rt_dkey = p.rt_dkey;
         push(e);
+
+        // La tabla viva del overlay.
+        const double ms = ticks_to_ms(begin, end, e.pass.tick_freq);
+        std::lock_guard<std::mutex> lk(im->live_mu);
+        Collector::PassLive &lv = im->live[p.key.v];
+        lv.key = p.key;
+        lv.rt_dkey = p.rt_dkey;
+        lv.gpu_ms = lv.last_frame ? lv.gpu_ms * 0.85 + ms * 0.15 : ms;
+        lv.draws = p.draws;
+        lv.rt_w = p.rt_w;
+        lv.rt_h = p.rt_h;
+        lv.queue = p.queue;
+        lv.last_frame = p.frame;
     }
 
     const D3D12_RANGE nothing{0, 0};
@@ -1130,11 +1162,17 @@ void collect_slot(Collector::Impl *im, SlotState &slot, bool deep) {
 
 void Collector::on_present(IDXGISwapChain *swapchain) {
     if (!armed_) return;
-    (void)swapchain;
 
     const u64 now = now_ns();
     const u64 cpu_ns = now - impl_->last_present_ns;
     impl_->last_present_ns = now;
+
+    {
+        std::lock_guard<std::mutex> lk(impl_->live_mu);
+        const double ms = static_cast<double>(cpu_ns) / 1e6;
+        impl_->frame_ms_ema = impl_->frame_ms_ema
+                                  ? impl_->frame_ms_ema * 0.9 + ms * 0.1 : ms;
+    }
 
     Event fe;
     fe.kind = EventKind::FrameEnd;
@@ -1163,6 +1201,9 @@ void Collector::on_present(IDXGISwapChain *swapchain) {
             ve.vram.committed = vm.CurrentUsage;
             ve.vram.available_res = vm.CurrentReservation;
             push(ve);
+            std::lock_guard<std::mutex> lk(impl_->live_mu);
+            impl_->vram_budget = vm.Budget;
+            impl_->vram_usage = vm.CurrentUsage;
         }
     }
 
@@ -1177,6 +1218,27 @@ void Collector::on_present(IDXGISwapChain *swapchain) {
         impl_->cur_slot = (impl_->cur_slot + 1) % kSlots;
     }
 
+    // Captura del harness A/B, si toca. Es lo unico de gpuprobe que frena la
+    // GPU, y pasa dos veces por candidato -- no por frame. El frame en el que
+    // pasa no sirve como muestra, y por eso la captura va DESPUES del
+    // frame_end de este frame y antes del frame_begin del proximo.
+    if (actions_ && swapchain) {
+        if (const char *suffix = actions_->capture_due(frame_)) {
+            ID3D12CommandQueue *q = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(impl_->tables);
+                for (u32 i = 0; i < impl_->nqueues; ++i)
+                    if (impl_->queues[i].queue) { q = impl_->queues[i].queue; break; }
+            }
+            if (q && impl_->session_base[0]) {
+                char path[MAX_PATH * 2];
+                std::snprintf(path, sizeof path, "%s-%s.png", impl_->session_base,
+                              suffix);
+                capture_swapchain(impl_->device, q, swapchain, path);
+            }
+        }
+    }
+
     ++frame_;
     deep_ = impl_->cfg.deep_every && (frame_ % impl_->cfg.deep_every) == 0;
     // El unico momento en el que las acciones cambian de estado.
@@ -1187,6 +1249,43 @@ void Collector::on_present(IDXGISwapChain *swapchain) {
     fb.frame = frame_;
     fb.flags = deep_ ? kEvDeepFrame : kEvNone;
     push(fb);
+}
+
+void Collector::snapshot(PassLive *out, size_t max, size_t *count) const {
+    *count = 0;
+    if (!impl_ || !out) return;
+    std::lock_guard<std::mutex> lk(impl_->live_mu);
+    size_t n = 0;
+    for (const auto &kv : impl_->live) {
+        // Una pasada que no aparece hace 120 frames dejo de existir (el juego
+        // cambio de escena): no tiene sentido seguir mostrandola.
+        if (frame_ > kv.second.last_frame + 120) continue;
+        if (n >= max) break;
+        out[n++] = kv.second;
+    }
+    // Ordenada por costo, que es el orden en el que se mira.
+    for (size_t i = 1; i < n; ++i) {
+        PassLive tmp = out[i];
+        size_t j = i;
+        while (j > 0 && out[j - 1].gpu_ms < tmp.gpu_ms) { out[j] = out[j - 1]; --j; }
+        out[j] = tmp;
+    }
+    *count = n;
+}
+
+double Collector::frame_ms() const {
+    if (!impl_) return 0.0;
+    std::lock_guard<std::mutex> lk(impl_->live_mu);
+    return impl_->frame_ms_ema;
+}
+
+void Collector::vram_now(u64 *budget, u64 *usage) const {
+    if (budget) *budget = 0;
+    if (usage) *usage = 0;
+    if (!impl_) return;
+    std::lock_guard<std::mutex> lk(impl_->live_mu);
+    if (budget) *budget = impl_->vram_budget;
+    if (usage) *usage = impl_->vram_usage;
 }
 
 }  // namespace gp
