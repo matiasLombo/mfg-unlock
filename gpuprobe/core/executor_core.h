@@ -76,6 +76,9 @@ public:
     void note_reserved(DescKey);
     void note_viewport(DescKey);
     const Observed *observed(DescKey) const;
+    // Para poder guardar la libreta entre sesiones. Es de solo lectura: quien
+    // la escribe es note_*.
+    const std::unordered_map<u64, Observed> &observations() const { return obs_; }
 
     // --- decisiones -------------------------------------------------------
     // Que hacer con un recurso que esta por crearse. No aplica nada: devuelve

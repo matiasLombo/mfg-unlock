@@ -44,12 +44,19 @@ jobs:
           cmake -S gpuprobe -B build
           cmake --build build --config Release
 
-      - name: tests de host tambien en Windows
+      # El mismo contrato que corre en Linux, pero con los binarios de MSVC:
+      # asegura que el writer de C++ compilado con otro compilador siga
+      # escribiendo lo que el analizador entiende, y que el veredicto A/B de
+      # C++ y el de Python sigan coincidiendo.
+      - name: contrato C++ <-> Python con los binarios de MSVC
         shell: bash
         run: |
-          ./build/Release/gpuprobe-gen-session.exe fixture.jsonl
+          ./build/Release/gpuprobe-gen-session.exe sesion-fixture.jsonl
+          mv sesion-fixture.jsonl sesion.jsonl
+          ./build/Release/gpuprobe-gen-session.exe thrash.jsonl thrash
+          ./build/Release/gpuprobe-gen-session.exe ab.jsonl ab
           PYTHONPATH=gpuprobe/analyzer python gpuprobe/tests/contract.py .
-        continue-on-error: true
+          rm -f sesion.jsonl thrash.jsonl ab.jsonl
 
       # El testbed a resolucion real no termina nunca sobre un rasterizador por
       # CPU, asi que se achica el area dibujada y el costo del shader. Los

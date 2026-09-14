@@ -75,6 +75,14 @@ def main(outdir):
 
     # --- 4. C++ y Python tienen que dar el MISMO veredicto ---------------
     exe = os.path.join(outdir, "ab_check")
+    if not os.path.exists(exe):
+        # En Windows el binario lo compila CMake con otro nombre y con .exe.
+        for cand in (os.path.join(outdir, "ab_check.exe"),
+                     os.path.join(outdir, "gpuprobe-ab-check.exe"),
+                     os.path.join(outdir, "Release", "gpuprobe-ab-check.exe")):
+            if os.path.exists(cand):
+                exe = cand
+                break
     for args in (("7.0", "8.0", "400", "3", "4"),
                  ("8.0", "8.0", "400", "11", "12"),
                  ("9.0", "8.0", "300", "5", "6")):

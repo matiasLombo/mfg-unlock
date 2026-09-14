@@ -172,6 +172,10 @@ struct RtvEntry {
     DescKey dkey{};
     u32     w = 0, h = 0;
     u64     bytes = 0;
+    // Si el ejecutor creo este recurso mas chico, cuanto. Vive aca y no en un
+    // mapa para que OMSetRenderTargets no tenga que tomar un lock: el viewport
+    // de la pasada depende de este numero y se consulta en cada pasada.
+    float   scale = 1.0f;
 };
 
 RtvEntry g_rtv[kRtvTableSize];
@@ -180,7 +184,8 @@ u32 rtv_slot(SIZE_T handle) {
     return static_cast<u32>(hash_bytes(&handle, sizeof handle) & (kRtvTableSize - 1));
 }
 
-void rtv_put(SIZE_T handle, ResKey res, DescKey dkey, u32 w, u32 h, u64 bytes) {
+void rtv_put(SIZE_T handle, ResKey res, DescKey dkey, u32 w, u32 h, u64 bytes,
+             float scale) {
     u32 i = rtv_slot(handle);
     for (u32 probe = 0; probe < 64; ++probe, i = (i + 1) & (kRtvTableSize - 1)) {
         const SIZE_T cur = g_rtv[i].handle.load(std::memory_order_acquire);
@@ -190,6 +195,7 @@ void rtv_put(SIZE_T handle, ResKey res, DescKey dkey, u32 w, u32 h, u64 bytes) {
             g_rtv[i].w = w;
             g_rtv[i].h = h;
             g_rtv[i].bytes = bytes;
+            g_rtv[i].scale = scale;
             g_rtv[i].handle.store(handle, std::memory_order_release);
             return;
         }
@@ -272,7 +278,9 @@ struct ListState {
     DescKey  rt_dkey{};
     u32      rt_w = 0, rt_h = 0;
     u64      rt_bytes = 0;
+    float    rt_scale = 1.0f;
     bool     pass_open = false;
+    bool     pass_skipped = false;  // skip_pass activo en la pasada actual
     u32      q_begin = 0;
     u32      draws = 0;
     u32      ordinal = 0;
@@ -319,6 +327,9 @@ struct Collector::Impl {
     std::unordered_map<void *, ListState *>  lists;
     std::vector<ListState *>                 list_pool;
     std::unordered_map<void *, PsoKey>       psos;
+    // dkey del recurso YA escalado -> escala que se le aplico. Se consulta al
+    // crear la vista (raro), no al grabar (hot path).
+    std::unordered_map<u64, float>           scaled;
 
     u64 last_present_ns = 0;
     u64 module_base = 0;
@@ -469,7 +480,20 @@ ResourceOverride Collector::want_override(const D3D12_RESOURCE_DESC &desc,
                                           CallsiteId site) {
     if (!actions_ || !armed_) return ResourceOverride{};
     const ResourceDesc rd = from_d3d12(desc, heap, false);
-    return actions_->on_create(rd, site);
+    const ResourceOverride ov = actions_->on_create(rd, site);
+    if (ov.w && ov.h && (ov.w != rd.w || ov.h != rd.h)) {
+        // Se anota la escala contra la clave del recurso COMO VA A QUEDAR: es
+        // la que va a tener cuando se cree y la unica con la que despues se lo
+        // puede reconocer.
+        ResourceDesc scaled = rd;
+        scaled.w = ov.w;
+        scaled.h = ov.h;
+        const float s = rd.w ? static_cast<float>(ov.w) / static_cast<float>(rd.w)
+                             : 1.0f;
+        std::lock_guard<std::mutex> lk(impl_->tables);
+        impl_->scaled[desc_key(scaled, out_).v] = s;
+    }
+    return ov;
 }
 
 void Collector::on_resource(ID3D12Resource *res, const D3D12_RESOURCE_DESC &desc,
@@ -487,6 +511,9 @@ void Collector::on_resource(ID3D12Resource *res, const D3D12_RESOURCE_DESC &desc
         std::lock_guard<std::mutex> lk(impl_->tables);
         impl_->resources[res] = rd;
     }
+    if (actions_)
+        actions_->note_resource(desc_key(rd, out_), rd, placed,
+                                rd.heap == HeapKind::Reserved);
 
     Event e;
     e.kind = EventKind::ResourceCreate;
@@ -518,14 +545,17 @@ void Collector::on_resource_release(ID3D12Resource *res) {
 void Collector::on_rtv(D3D12_CPU_DESCRIPTOR_HANDLE h, ID3D12Resource *res) {
     if (!armed_ || !res || !h.ptr) return;
     ResourceDesc rd;
+    float scale = 1.0f;
     {
         std::lock_guard<std::mutex> lk(impl_->tables);
         auto it = impl_->resources.find(res);
         if (it == impl_->resources.end()) return;  // recurso que no vimos crear
         rd = it->second;
+        auto sc = impl_->scaled.find(desc_key(rd, out_).v);
+        if (sc != impl_->scaled.end()) scale = sc->second;
     }
     rtv_put(h.ptr, ResKey{reinterpret_cast<u64>(res)}, desc_key(rd, out_), rd.w,
-            rd.h, rd.bytes);
+            rd.h, rd.bytes, scale);
 }
 
 void Collector::on_dsv(D3D12_CPU_DESCRIPTOR_HANDLE h, ID3D12Resource *res) {
@@ -661,6 +691,7 @@ void Collector::cmd_begin(ID3D12GraphicsCommandList *list) {
     ls->slot = impl_->cur_slot;
     ls->frame = frame_;
     ls->pass_open = false;
+    ls->pass_skipped = false;
     ls->draws = 0;
     ls->ordinal = 0;
     ls->q_next = ls->q_limit = 0;
@@ -671,6 +702,7 @@ void Collector::cmd_begin(ID3D12GraphicsCommandList *list) {
     ls->rt_dkey = DescKey{};
     ls->rt_w = ls->rt_h = 0;
     ls->rt_bytes = 0;
+    ls->rt_scale = 1.0f;
     tls_last = ls;
 }
 
@@ -759,6 +791,7 @@ void Collector::cmd_set_render_targets(ID3D12GraphicsCommandList *list, u32 n,
     DescKey main_dkey{};
     u32 w = 0, h = 0;
     u64 bytes = 0;
+    float scale = 1.0f;
     if (rtvs && n) {
         const u32 count = single_handle ? 1 : n;
         for (u32 i = 0; i < count && nk < 8; ++i) {
@@ -771,6 +804,7 @@ void Collector::cmd_set_render_targets(ID3D12GraphicsCommandList *list, u32 n,
                 w = e->w;
                 h = e->h;
                 bytes = e->bytes;
+                scale = e->scale;
             }
         }
     }
@@ -787,6 +821,7 @@ void Collector::cmd_set_render_targets(ID3D12GraphicsCommandList *list, u32 n,
                 w = e->w;
                 h = e->h;
                 bytes = e->bytes;
+                scale = e->scale;
             }
         }
     }
@@ -797,7 +832,11 @@ void Collector::cmd_set_render_targets(ID3D12GraphicsCommandList *list, u32 n,
     ls->rt_w = w;
     ls->rt_h = h;
     ls->rt_bytes = bytes;
+    ls->rt_scale = scale;
     ls->cur_pass = pass_key(ls->cur_rts, ls->cur_pso, ls->ordinal);
+    // skip_pass se decide UNA vez por pasada, no por draw: si cambiara a mitad
+    // de la pasada quedaria medio frame dibujado.
+    ls->pass_skipped = actions_ && actions_->skip_pass(ls->cur_pass, main_dkey);
 
     // En modo light se instrumentan las pasadas hasta agotar el presupuesto de
     // queries; en deep, todas.
@@ -821,13 +860,14 @@ void Collector::cmd_set_pso(ID3D12GraphicsCommandList *list,
     if (ls->draws == 0) ls->cur_pass = pass_key(ls->cur_rts, key, ls->ordinal);
 }
 
-void Collector::cmd_draw(ID3D12GraphicsCommandList *list, u32 count,
+bool Collector::cmd_draw(ID3D12GraphicsCommandList *list, u32 count,
                          u32 instances) {
-    if (!armed_) return;
+    if (!armed_) return true;
     ListState *ls = Collector_find_list(impl_, list);
-    if (!ls) return;
+    if (!ls) return true;
     ++ls->draws;
-    if (!deep_) return;   // en light no se emite un evento por draw
+    if (ls->pass_skipped) return false;
+    if (!deep_) return true;   // en light no se emite un evento por draw
     Event e;
     e.kind = EventKind::Draw;
     e.frame = ls->frame;
@@ -837,20 +877,22 @@ void Collector::cmd_draw(ID3D12GraphicsCommandList *list, u32 count,
     e.draw.count = count;
     e.draw.instances = instances;
     push(e);
+    return true;
 }
 
-void Collector::cmd_dispatch(ID3D12GraphicsCommandList *list, u32 x, u32 y,
+bool Collector::cmd_dispatch(ID3D12GraphicsCommandList *list, u32 x, u32 y,
                              u32 z) {
-    if (!armed_) return;
+    if (!armed_) return true;
     ListState *ls = Collector_find_list(impl_, list);
-    if (!ls) return;
+    if (!ls) return true;
     if (!ls->pass_open) {
         // Pasada de compute: sin render targets, anclada al PSO.
         ls->cur_pass = pass_key(ls->cur_rts, ls->cur_pso, ls->ordinal);
         open_pass(impl_, ls, list, deep_, impl_->cfg.query_budget);
     }
     ++ls->draws;
-    if (!deep_) return;
+    if (ls->pass_skipped) return false;
+    if (!deep_) return true;
     Event e;
     e.kind = EventKind::Dispatch;
     e.frame = ls->frame;
@@ -861,30 +903,76 @@ void Collector::cmd_dispatch(ID3D12GraphicsCommandList *list, u32 x, u32 y,
     e.draw.gy = y;
     e.draw.gz = z;
     push(e);
+    return true;
 }
 
-void Collector::cmd_barrier(ID3D12GraphicsCommandList *list, u32 n,
-                            const D3D12_RESOURCE_BARRIER *barriers) {
-    if (!armed_ || !barriers) return;
-    ListState *ls = Collector_find_list(impl_, list);
-    (void)ls;
+u32 Collector::cmd_barrier(ID3D12GraphicsCommandList *list, u32 n,
+                           const D3D12_RESOURCE_BARRIER *barriers,
+                           D3D12_RESOURCE_BARRIER *out) {
+    if (!armed_ || !barriers) return n;
+    (void)list;
+    u32 kept = 0;
     for (u32 i = 0; i < n; ++i) {
         const D3D12_RESOURCE_BARRIER &b = barriers[i];
         Event e;
         e.kind = EventKind::Barrier;
         e.frame = frame_;
         e.barrier.kind = static_cast<u32>(b.Type);
+        bool drop = false;
         if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
             e.barrier.key = ResKey{reinterpret_cast<u64>(b.Transition.pResource)};
             e.barrier.before = static_cast<u32>(b.Transition.StateBefore);
             e.barrier.after = static_cast<u32>(b.Transition.StateAfter);
+            if (actions_)
+                drop = actions_->drop_barrier(e.barrier.before, e.barrier.after);
         } else if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_UAV) {
             e.barrier.key = ResKey{reinterpret_cast<u64>(b.UAV.pResource)};
         } else {
             e.barrier.key = ResKey{reinterpret_cast<u64>(b.Aliasing.pResourceAfter)};
         }
+        e.barrier.dropped = drop ? 1u : 0u;
         push(e);
+        if (!drop && out) out[kept] = b;
+        if (!drop) ++kept;
     }
+    return out ? kept : n;
+}
+
+bool Collector::cmd_viewports(ID3D12GraphicsCommandList *list, u32 n,
+                              const D3D12_VIEWPORT *in, D3D12_VIEWPORT *out) {
+    if (!armed_ || !in) return false;
+    ListState *ls = Collector_find_list(impl_, list);
+    if (!ls) return false;
+    // El gate: para escalar un RT hay que poder escalar sus viewports, y eso
+    // solo se sabe si pasan por aca.
+    if (actions_ && ls->rt_dkey.v) actions_->note_viewport(ls->rt_dkey);
+    if (!out || ls->rt_scale >= 1.0f || ls->rt_scale <= 0.0f) return false;
+    for (u32 i = 0; i < n; ++i) {
+        out[i] = in[i];
+        out[i].Width *= ls->rt_scale;
+        out[i].Height *= ls->rt_scale;
+        out[i].TopLeftX *= ls->rt_scale;
+        out[i].TopLeftY *= ls->rt_scale;
+    }
+    return true;
+}
+
+void Collector::cmd_copy(ID3D12GraphicsCommandList *list, ID3D12Resource *dst,
+                         ID3D12Resource *src) {
+    if (!armed_ || !actions_) return;
+    (void)list;
+    // Una copia con extents fijos es la razon numero uno por la que un recurso
+    // NO se puede escalar. Que quede anotado es lo que despues hace que el
+    // gate lo rechace en vez de corromper el render tres minutos mas tarde.
+    std::lock_guard<std::mutex> lk(impl_->tables);
+    auto note = [&](ID3D12Resource *r, bool as_source) {
+        if (!r) return;
+        auto it = impl_->resources.find(r);
+        if (it == impl_->resources.end()) return;
+        actions_->note_copy(desc_key(it->second, out_), as_source);
+    };
+    note(src, true);
+    note(dst, false);
 }
 
 void Collector::cmd_close(ID3D12GraphicsCommandList *list) {
@@ -1091,6 +1179,8 @@ void Collector::on_present(IDXGISwapChain *swapchain) {
 
     ++frame_;
     deep_ = impl_->cfg.deep_every && (frame_ % impl_->cfg.deep_every) == 0;
+    // El unico momento en el que las acciones cambian de estado.
+    if (actions_) actions_->begin_frame(frame_);
 
     Event fb;
     fb.kind = EventKind::FrameBegin;

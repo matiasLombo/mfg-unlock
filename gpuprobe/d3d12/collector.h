@@ -50,11 +50,23 @@ struct ResourceOverride {
 
 // Interfaz que implementa el ejecutor. El colector la consulta; si es nullptr,
 // gpuprobe es puro OBSERVE.
+//
+// Las note_* no son opcionales ni decorativas: son los hechos que despues
+// habilitan (o no) una accion. Un ejecutor que no se entera de que a un
+// recurso lo copian con extents fijos es un ejecutor que lo va a escalar.
 struct Actions {
     virtual ~Actions() = default;
     virtual ResourceOverride on_create(const ResourceDesc &, CallsiteId) = 0;
-    virtual bool skip_pass(PassKey) = 0;
-    virtual bool drop_barrier(ResKey, u32 before, u32 after) = 0;
+    virtual void note_resource(DescKey, const ResourceDesc &, bool placed,
+                               bool reserved) = 0;
+    virtual void note_copy(DescKey, bool as_source) = 0;
+    virtual void note_viewport(DescKey) = 0;
+    virtual bool skip_pass(PassKey, DescKey rt) = 0;
+    virtual bool drop_barrier(u32 before, u32 after) = 0;
+    // Limite de frame: el unico momento en el que las acciones cambian de
+    // estado. A mitad de una lista grabada seria un RT a media resolucion con
+    // el viewport de la otra.
+    virtual void begin_frame(u64 index) = 0;
 };
 
 class Collector {
@@ -102,10 +114,23 @@ public:
                                 BOOL single_handle,
                                 const D3D12_CPU_DESCRIPTOR_HANDLE *dsv);
     void cmd_set_pso(ID3D12GraphicsCommandList *list, ID3D12PipelineState *pso);
-    void cmd_draw(ID3D12GraphicsCommandList *list, u32 count, u32 instances);
-    void cmd_dispatch(ID3D12GraphicsCommandList *list, u32 x, u32 y, u32 z);
-    void cmd_barrier(ID3D12GraphicsCommandList *list, u32 n,
-                     const D3D12_RESOURCE_BARRIER *barriers);
+    // Devuelven true si el juego TIENE que ejecutar la llamada. Un false es
+    // un skip_pass activo. El testbed ignora el resultado; el hook no.
+    bool cmd_draw(ID3D12GraphicsCommandList *list, u32 count, u32 instances);
+    bool cmd_dispatch(ID3D12GraphicsCommandList *list, u32 x, u32 y, u32 z);
+    // Registra los barriers y devuelve cuantos hay que dejar pasar, ya
+    // copiados a out (que tiene que tener lugar para n). Sin ejecutor activo
+    // devuelve n y copia todo: filtrar es una accion, observar no.
+    u32 cmd_barrier(ID3D12GraphicsCommandList *list, u32 n,
+                    const D3D12_RESOURCE_BARRIER *barriers,
+                    D3D12_RESOURCE_BARRIER *out = nullptr);
+    // Los viewports importan por dos motivos: sin verlos no se puede escalar
+    // un RT (el gate viewports_tracked), y cuando se escala hay que escalarlos
+    // tambien. Devuelve true si el llamador tiene que usar 'out'.
+    bool cmd_viewports(ID3D12GraphicsCommandList *list, u32 n,
+                       const D3D12_VIEWPORT *in, D3D12_VIEWPORT *out);
+    void cmd_copy(ID3D12GraphicsCommandList *list, ID3D12Resource *dst,
+                  ID3D12Resource *src);
     void cmd_close(ID3D12GraphicsCommandList *list);
 
     // --- ejecucion y presentacion ----------------------------------------

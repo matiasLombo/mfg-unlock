@@ -245,9 +245,16 @@ int main(int argc, char **argv) {
         return 1;
     cmp_list->Close();
 
-    Com<ID3D12Fence> fence;
-    if (!check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)),
-               "fence"))
+    // Una fence por queue. Con una sola fence compartida, si la queue de
+    // compute senaliza N+1 antes de que la de graficos senalice N, el valor de
+    // la fence va para atras -- que D3D12 no admite y termina en device
+    // removed. Es un error facil de escribir y dificil de ver.
+    Com<ID3D12Fence> gfx_fence, cmp_fence;
+    if (!check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gfx_fence)),
+               "fence gfx"))
+        return 1;
+    if (!check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&cmp_fence)),
+               "fence compute"))
         return 1;
     HANDLE fence_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     UINT64 fence_value = 0;
@@ -536,7 +543,7 @@ int main(int argc, char **argv) {
         b.Transition.StateBefore = t.state;
         b.Transition.StateAfter = to;
         list->ResourceBarrier(1, &b);
-        col.cmd_barrier(list, 1, &b);
+        (void)col.cmd_barrier(list, 1, &b, nullptr);
         t.state = to;
     };
 
@@ -550,6 +557,8 @@ int main(int argc, char **argv) {
         D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h),
                           0.0f, 1.0f};
         D3D12_RECT sc{0, 0, static_cast<LONG>(w), static_cast<LONG>(h)};
+        D3D12_VIEWPORT scaled_vp;
+        if (col.cmd_viewports(list, 1, &vp, &scaled_vp)) vp = scaled_vp;
         list->RSSetViewports(1, &vp);
         list->RSSetScissorRects(1, &sc);
     };
@@ -571,7 +580,7 @@ int main(int argc, char **argv) {
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         for (UINT d = 0; d < draws; ++d) {
             list->DrawInstanced(3, instances, 0, 0);
-            col.cmd_draw(list, 3, instances);
+            (void)col.cmd_draw(list, 3, instances);
         }
     };
 
@@ -605,7 +614,7 @@ int main(int argc, char **argv) {
                 ? static_cast<UINT>(300 * g_cost_scale) + 8 : 300;
             for (UINT d = 0; d < shadow_draws; ++d) {
                 gfx_list->DrawInstanced(3, 3, 0, 0);
-                col.cmd_draw(gfx_list.get(), 3, 3);
+                (void)col.cmd_draw(gfx_list.get(), 3, 3);
             }
             // Se lee en la pasada de iluminacion: transicion legitima.
             transition(gfx_list.get(), t, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -629,7 +638,7 @@ int main(int argc, char **argv) {
             gfx_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             for (UINT d = 0; d < 40; ++d) {
                 gfx_list->DrawInstanced(3, 2, 0, 0);
-                col.cmd_draw(gfx_list.get(), 3, 2);
+                (void)col.cmd_draw(gfx_list.get(), 3, 2);
             }
             transition(gfx_list.get(), t, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         }
@@ -653,7 +662,7 @@ int main(int argc, char **argv) {
                 ? static_cast<UINT>(120 * g_cost_scale) + 4 : 120;
             for (UINT d = 0; d < gbuf_draws; ++d) {
                 gfx_list->DrawInstanced(3, 2, 0, 0);
-                col.cmd_draw(gfx_list.get(), 3, 2);
+                (void)col.cmd_draw(gfx_list.get(), 3, 2);
             }
             // Lectura legitima, y despues la vuelta por COMMON que no hace
             // falta: leer -> COMMON -> escribir, cuando leer -> escribir
@@ -706,6 +715,9 @@ int main(int argc, char **argv) {
             d.pResource = dst.res;
             d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
             gfx_list->CopyTextureRegion(&d, 0, 0, 0, &s, nullptr);
+            // El colector se entera de la copia: es el hecho que despues hace
+            // que el gate del ejecutor RECHACE escalar este recurso.
+            col.cmd_copy(gfx_list.get(), dst.res, src.res);
         }
 
         // 10. hostil B: un RT colocado en un heap compartido. Escalarlo
@@ -740,7 +752,7 @@ int main(int argc, char **argv) {
         const Constants cc{scaled_cost(40), 0.33f, 0.0f, 0.0f};
         cmp_list->SetComputeRoot32BitConstants(0, 4, &cc, 0);
         cmp_list->Dispatch(20, 12, 64);
-        col.cmd_dispatch(cmp_list.get(), 20, 12, 64);
+        (void)col.cmd_dispatch(cmp_list.get(), 20, 12, 64);
         col.cmd_close(cmp_list.get());
         cmp_list->Close();
         ID3D12CommandList *clists[] = {cmp_list.get()};
@@ -750,13 +762,22 @@ int main(int argc, char **argv) {
         // Esperar a las dos queues. El testbed no busca fps: busca que cada
         // frame sea comparable con el anterior.
         ++fence_value;
-        gfx_queue->Signal(fence.get(), fence_value);
-        cmp_queue->Signal(fence.get(), fence_value + 1);
-        if (fence->GetCompletedValue() < fence_value + 1) {
-            fence->SetEventOnCompletion(fence_value + 1, fence_event);
-            WaitForSingleObject(fence_event, 10000);
+        gfx_queue->Signal(gfx_fence.get(), fence_value);
+        cmp_queue->Signal(cmp_fence.get(), fence_value);
+        for (ID3D12Fence *fe : {gfx_fence.get(), cmp_fence.get()}) {
+            if (fe->GetCompletedValue() >= fence_value) continue;
+            if (FAILED(fe->SetEventOnCompletion(fence_value, fence_event))) {
+                std::fprintf(stderr, "testbed: SetEventOnCompletion fallo en el "
+                                     "frame %u\n", f);
+                return 1;
+            }
+            if (WaitForSingleObject(fence_event, 30000) != WAIT_OBJECT_0) {
+                std::fprintf(stderr, "testbed: la GPU no termino el frame %u en "
+                                     "30 s (device removed 0x%08lx)\n", f,
+                             static_cast<unsigned long>(device->GetDeviceRemovedReason()));
+                return 1;
+            }
         }
-        ++fence_value;
 
         col.on_present(nullptr);
 
@@ -766,8 +787,13 @@ int main(int argc, char **argv) {
         }
     }
 
+    std::printf("testbed: %u frames corridos, cerrando\n", frames);
+    std::fflush(stdout);
+
     // Cerrar prolijo: el escritor tiene que drenar lo que quede en los rings.
     col.shutdown();
+    std::printf("testbed: colector cerrado\n");
+    std::fflush(stdout);
     for (Target &t : targets) if (t.res) t.res->Release();
     if (late_pso) late_pso->Release();
     pso_shadow->Release();
