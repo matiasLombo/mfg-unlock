@@ -23,7 +23,8 @@ add_library(gpuprobe_core STATIC
     core/types.cpp
     core/jsonl.cpp
     core/frame.cpp
-    core/profile.cpp)
+    core/profile.cpp
+    core/executor_core.cpp)
 
 # El testbed: una app D3D12 propia con pasadas deliberadamente mal
 # dimensionadas. Corre headless sobre WARP, que es lo que permite probar el

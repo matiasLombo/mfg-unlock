@@ -19,20 +19,21 @@ mkdir -p "$OUT"
 FLAGS="-std=c++20 -O2 -Wall -Wextra -Werror -I gpuprobe"
 LINK="-static -static-libgcc -static-libstdc++"
 
-CORE="gpuprobe/core/types.cpp gpuprobe/core/jsonl.cpp gpuprobe/core/frame.cpp gpuprobe/core/profile.cpp"
+CORE="gpuprobe/core/types.cpp gpuprobe/core/jsonl.cpp gpuprobe/core/frame.cpp gpuprobe/core/profile.cpp gpuprobe/core/executor_core.cpp"
 
 echo "testbed..."
 $CXX $FLAGS gpuprobe/testbed/testbed.cpp gpuprobe/d3d12/collector.cpp $CORE \
     -o "$OUT/gpuprobe-testbed.exe" -ld3d12 -ldxgi -ld3dcompiler $LINK
 
-if [ -f gpuprobe/proxy/proxy.cpp ]; then
-    echo "proxy..."
-    $CXX $FLAGS -shared gpuprobe/proxy/proxy.cpp gpuprobe/d3d12/hooks.cpp \
-        gpuprobe/d3d12/collector.cpp gpuprobe/d3d12/executor.cpp $CORE \
-        -I external/minhook/include \
-        external/minhook/src/hook.c external/minhook/src/buffer.c \
-        external/minhook/src/trampoline.c external/minhook/src/hde/hde64.c \
-        -o "$OUT/version.dll" -ld3d12 -ldxgi $LINK
-fi
+# El proxy: version.dll. Sin MinHook ni ninguna otra dependencia -- las
+# vtables se roban con objetos descartables propios (ver d3d12/hooks.cpp).
+echo "proxy version.dll..."
+$CXX $FLAGS -shared \
+    gpuprobe/proxy/proxy.cpp gpuprobe/proxy/forwards_version.S \
+    gpuprobe/proxy/exports.def \
+    gpuprobe/d3d12/hooks.cpp gpuprobe/d3d12/collector.cpp \
+    gpuprobe/d3d12/executor.cpp gpuprobe/d3d12/gate.cpp $CORE \
+    -I gpuprobe/proxy \
+    -o "$OUT/version.dll" -ld3d12 -ldxgi -lgdi32 -luser32 $LINK
 
 ls -la "$OUT"
