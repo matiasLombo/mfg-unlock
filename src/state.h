@@ -495,6 +495,13 @@ static bool g_nullalt = false;        // mfg-nullalt.txt: alternate between equa
 // recorded with it and the replay only happens on that same thread -- from
 // the present hook, which the game enters every frame.
 static unsigned char g_opt_copy[256];
+// La ultima struct de opciones que el juego paso con FG ENCENDIDO (raw_mode==1),
+// entera. forceon la usa para forzar eOn "bien configurado" en vez de flipear la
+// struct eOff (que puede traer campos en cero que dejan la generacion sucia).
+// g_opt_scratch es el buffer que se le entrega al plugin en ese caso.
+static unsigned char g_opt_on[256];
+static bool g_opt_on_have = false;
+static unsigned char g_opt_scratch[256];
 
 // escribe: proxy.cpp, writer.h; lee: -
 static volatile LONG g_opt_have = 0;
@@ -712,6 +719,10 @@ static bool g_peralt = false;         // mfg-peralt.txt: diffuse per frame
 // mfg-x6.txt lo vuelve a habilitar para investigarlo. El arreglo de fondo es
 // encontrar por que el bound necesita el +1 y sacarlo.
 static bool g_allow_x6 = false;
+// mfg-forceon.txt: con un multiplicador FIJO el panel fuerza eOn aunque el juego
+// tenga FG apagado en su menu. Default off por el freeze de pausa de GTA V.
+// escribe: config_apply.h; lee: writer.h (via ForceInput.force_on).
+static volatile LONG g_force_on = 0;
 
 // escribe: loader.h, proxy.cpp; lee: -
 // La fase de la sesion. Monotona: nunca vuelve para atras.
@@ -1010,7 +1021,12 @@ static volatile LONG g_smfl_calls = 0;
 //
 // Si la carpeta no tiene los archivos, no se sustituye nada igual: el respaldo
 // es la ausencia de la base, no la ausencia de un flag.
-static bool g_snippet_on = true;
+// OFF por default desde 1.4 (issue #8). Sustituir nuestro nvngx_dlssg.dll
+// (Streamline 2.12) sobre el juego crashea NMS y Cyberpunk (NMS.exe deref
+// null+0x5c, medido). El mecanismo correcto es parchear el snippet PROPIO del
+// juego IN-PLACE (gates + cubins en on_dll_load), que es lo que v1.2 hacia y no
+// crashea. mfg-base.txt lo vuelve a encender (opt-in, no recomendado).
+static bool g_snippet_on = false;
 
 // escribe: frametoken.h, measurement.h; lee: -
 // Forma del salto de indice entre llamadas consecutivas al token, para saber si

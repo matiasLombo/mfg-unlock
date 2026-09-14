@@ -161,6 +161,15 @@ inline const Pattern kGateEax = { "gate-eax", kGateEaxBytes, 5, 1 };
 inline const pb kGateRegBytes[] = { X(0x81), M(0xF8, 0xF8), X(0xB0), X(0x01), X(0x00), X(0x00) };
 inline const Pattern kGateReg = { "gate-reg", kGateRegBytes, 6, 2 };
 
+// nvngx_dlssg 0x168e7: 8D 43 FF (lea eax,[rbx-1]) 83 F8 03 (cmp eax,3) 77.. (ja)
+// -- el range-check que RECHAZA setear DLSSG.MultiFrameCountMax por encima de 4,
+// asi que la reserva de sub-frames nunca se dimensiona para 6X (5 generados) y
+// el byte del bucle a 6 la desborda -> NGX devuelve CERO. Se sube el inmediato
+// para que acepte hasta 6X. El registro fuente de la lea se enmascara (rm en los
+// 3 bits bajos del modrm) por si el build usa otro. write_at = 5 (el inmediato).
+inline const pb kMfcRangeBytes[] = { X(0x8D), M(0xF8, 0x40), X(0xFF), X(0x83), X(0xF8), X(0x03) };
+inline const Pattern kMfcRange = { "mfc-range", kMfcRangeBytes, 6, 5 };
+
 // ---- sl.pcl: el registro ETW doble -----------------------------------------
 //
 // TraceLoggingRegister inline: si el handle del proveedor ya esta puesto,

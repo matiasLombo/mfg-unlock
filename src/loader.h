@@ -703,6 +703,16 @@ static VOID CALLBACK on_dll_load(ULONG reason, const DllNotifyData *d, PVOID) {
     } else if (g_six) {
         log_line("  tope del snippet NO se toca: no es nuestra build");
     }
+    // mfg-x6.txt: sube el range-check de MultiFrameCountMax para que la RESERVA
+    // de sub-frames se dimensione a 6X. patch_snippet_max de arriba sube el tope
+    // REPORTADO; esto sube el que ACEPTA setear, que es el que limita la reserva.
+    // Sin esto, en NMS x6 da CERO (la reserva queda en <=4 y el bucle a 6 la
+    // desborda). Es una apuesta a que el snippet aguanta 6; medir con fps.
+    if (g_allow_x6) {
+        const int mr = patch_mfc_range(reinterpret_cast<unsigned char *>(d->DllBase));
+        log_num("  range-check MultiFrameCountMax subido para 6X real (mfg-x6.txt), sitios: ", (unsigned)mr);
+        if (mr == 0) log_line("  ! no se encontro el range-check: en este build no aplica");
+    }
     if (g_mfcmax >= 2) {
         const int mm = patch_multiframe_max(reinterpret_cast<unsigned char *>(d->DllBase));
         log_num("  MultiFrameCountMax forzado, sitios: ", (unsigned)mm);

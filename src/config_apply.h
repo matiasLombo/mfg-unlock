@@ -132,6 +132,8 @@ static void apply_config(void) {
             g_fixed_cap = a.topefijo;
             if (g_fixed_cap) log_line("tope fijo en 5 (mfg-topefijo.txt): es la LINEA BASE, crashea");
             g_allow_x6 = a.x6;
+            g_force_on = a.forceon ? 1 : 0;
+            if (a.forceon) log_line("panel fuerza eOn con multiplicador fijo (mfg-forceon.txt); OJO freeze de pausa en GTA V");
             if (g_allow_x6) log_line("6X habilitado a mano (mfg-x6.txt): crashea en Halo");
             g_dyn_diag = a.dyndiag;
             if (g_dyn_diag) log_line("dynamic: diagnostico por cambio de ratio ENCENDIDO (mfg-dyndiag.txt)");

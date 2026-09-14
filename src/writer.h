@@ -83,6 +83,19 @@ static bool game_turned_off_generation(void) {
     return g_game_asked_on != 0 && g_game_wants == 0;
 }
 
+// Cierto solo si la ventana en foco pertenece a ESTE proceso (el juego esta al
+// frente). Robusto sin depender de un hwnd puntual. Se usa para NO forzar eOn
+// cuando el juego esta alt-tabeado/minimizado: ahi no presenta, y forzar la
+// generacion sin presentacion es el runaway que congela (mismo mecanismo que la
+// pausa). Al volver el foco se retoma el forzado.
+static bool game_process_in_front(void) {
+    const HWND fg = GetForegroundWindow();
+    if (fg == nullptr) return false;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fg, &pid);
+    return pid == GetCurrentProcessId();
+}
+
 static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     *savedMode = *(LONG *)(p + 32);
     *savedCount = *(LONG *)(p + 36);
@@ -103,6 +116,9 @@ static void force_into(unsigned char *p, LONG *savedMode, LONG *savedCount) {
     e.interp_on = g_interp_on != 0;
     e.wic_ok = g_wic_ok;
     e.last_seen_generated = g_last_seen_generated;
+    // Solo se fuerza eOn con el juego AL FRENTE: alt-tabeado no presenta y
+    // forzar la generacion ahi congela (medido en NMS al alt-tabear).
+    e.force_on = g_force_on != 0 && game_process_in_front();
     const LONG kTope = count_cap();
     e.cap = kTope;
     const policy::ForceOutput s = policy::decide_force(e);
@@ -236,6 +252,23 @@ static const void *dynamic_upgrade(const void *options) {
 
 // Which struct to actually hand to Streamline for this call.
 static const void *options_for_call(const void *options) {
+    // forceon: cuando forzamos eOn sobre una llamada eOff del juego, el plugin
+    // recibia la struct eOff con solo el mode flipeado -- y si esa struct trae
+    // campos que la config eOn necesita en cero, la generacion sale con
+    // artifacts. Aca se le entrega la ULTIMA struct BUENA (capturada con FG on),
+    // con el mode y la cuenta que force_into ya escribio en la del juego. Asi
+    // DLSS-G arranca la generacion forzada con la misma config que cuando el
+    // juego la prende el mismo. Solo con el flag, multiplicador fijo, juego al
+    // frente y con una struct-on ya vista.
+    if (options != nullptr && g_force_on && g_opt_on_have &&
+        g_force_sel >= 2 && g_force_sel < policy::kSelDyn &&
+        g_game_wants == 0 && game_process_in_front()) {
+        const unsigned char *p = (const unsigned char *)options;
+        memcpy(g_opt_scratch, g_opt_on, sizeof(g_opt_scratch));
+        *(LONG *)(g_opt_scratch + 32) = *(const LONG *)(p + 32);   // eOn
+        *(LONG *)(g_opt_scratch + 36) = *(const LONG *)(p + 36);   // nuestra cuenta
+        return g_opt_scratch;
+    }
     // Never, now. DYNAMIC is our own controller writing eOn with a count, so
     // there is nothing here to reach for: rebuilding the struct would put
     // eDynamic back over the mode force_into just set, and hand the multiplier
@@ -272,6 +305,12 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
         // what decides whether this call is worth capturing again.
         raw_mode = *(LONG *)(p + 32);
         raw_cnt = *n;
+        if (raw_mode == 1) {
+            // Guardar la ultima struct ENTERA con FG on: forceon la reusa para
+            // forzar eOn bien configurado (no la eOff con campos en cero).
+            if (copy_bounded(g_opt_on, options, sizeof(g_opt_on)) >= 40)
+                g_opt_on_have = true;
+        }
         if (raw_mode == 0 || raw_mode == 1) {
             if (raw_mode == 1) g_game_asked_on = 1;
             if (g_game_wants != raw_mode) {
@@ -364,6 +403,13 @@ static unsigned hk_slDLSSGSetOptions(const void *viewport, const void *options) 
 // Replays the last options with the forced count. Called from the present
 // hook and only on the thread the game itself used.
 static void apply_override_now(void) {
+    // Un contador de frames propio: esta funcion se llama una vez por frame
+    // token (frametoken.h), asi que avanza aunque el PresentCount este
+    // congelado -- que es lo que pasa en Vulkan + overlay de Steam (NMS: se
+    // clava en 45 para siempre). Sin esto, la precondition (2) de abajo nunca
+    // se cumple y NINGUN cambio del panel llega a slDLSSGSetOptions.
+    static LONG s_frames = 0;
+    const LONG frames_now = ++s_frames;
     if (g_opt_pending == 0) return;
     // Nunca dos cambios de cuenta mas juntos que el enfriamiento del plugin.
     //
@@ -414,6 +460,7 @@ static void apply_override_now(void) {
         static LARGE_INTEGER freq = { };
         static LONGLONG last = 0;
         static LONG last_pres_count = 0;
+        static LONG last_frames = 0;
         static LONG last_sent = -1;
         if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
         LARGE_INTEGER now_qpc;
@@ -422,11 +469,14 @@ static void apply_override_now(void) {
             const double ms = (double)(now_qpc.QuadPart - last) * 1000.0 /
                               (double)freq.QuadPart;
             if (ms < 150.0) return;                                  // (1)
-            if (g_present_count - last_pres_count < 8) {                 // (2)
+            // (2) 8 presentaciones O 8 frame-tokens desde el ultimo envio. El
+            // frame-token es el fallback para cuando el PresentCount no avanza
+            // (Vulkan + overlay de Steam): sin el, el cambio no salia nunca.
+            if (g_present_count - last_pres_count < 8 && frames_now - last_frames < 8) {
                 static LONG said_p = -1;
                 if (said_p != g_force_generated) {
                     said_p = g_force_generated;
-                    log_num("override: sin 8 presentaciones desde el ultimo envio; se espera. presentes ", (unsigned)(g_present_count - last_pres_count));
+                    log_num("override: sin 8 presentaciones/frames desde el ultimo envio; se espera. presentes ", (unsigned)(g_present_count - last_pres_count));
                 }
                 return;
             }
@@ -443,6 +493,7 @@ static void apply_override_now(void) {
         }
         last = now_qpc.QuadPart;
         last_pres_count = g_present_count;
+        last_frames = frames_now;
         // Un apagado (seleccion 1) escribe solo el modo, no la cuenta, asi que
         // no hay cuenta nueva que esperar ver en la API: con last_sent = 0 el
         // latch comparaba contra la cuenta vieja y esperaba para siempre.
@@ -459,7 +510,12 @@ static void apply_override_now(void) {
     // off, the game spoke this frame, no captured call to replay, no wrapper
     // installed, or the wrong thread.
     static int said = 0;
-    if (game_turned_off_generation()) {
+    // mfg-forceon.txt + multiplicador fijo: se pisa el eOff del juego igual (ver
+    // decide_force). Sin el flag se difiere, que protege el freeze de pausa.
+    const bool panel_forces_on = g_force_on != 0 && g_force_sel >= 2 &&
+                                 g_force_sel < policy::kSelDyn &&
+                                 game_process_in_front();
+    if (game_turned_off_generation() && !panel_forces_on) {
         if (said != 4) { said = 4; log_line("override: el juego apago la generacion; no se pisa"); }
         return;
     }

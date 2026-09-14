@@ -183,6 +183,14 @@ def harvest(snippet, ptxas, cuobjdump, tmp, seen, out):
         key = (fp, orig[1]) if fp else None
         if not fp or key in seen:
             continue
+        # Only the mvec-estimate kernel (.nv.shared == 7776). Measured on No
+        # Man's Sky: swapping inpaint (3920) and inpaint-decision (784) causes a
+        # flickering transparent ghost frame; mvec-estimate alone gives fluid
+        # x3/x4 with no ghost. Other kernels are untested, so leave them to
+        # NVIDIA. mvec-estimate is what camera motion is reconstructed from --
+        # the one that removes judder.
+        if fp[1] != 7776:
+            continue
 
         fat = os.path.join(tmp, f"{fp[0]}_{fp[1]}_{fp[2]}.fatbin")
         open(fat, "wb").write(d[start:end])

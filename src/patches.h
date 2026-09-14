@@ -1225,6 +1225,47 @@ static int patch_cap_six(unsigned char *base) {
     return hits;
 }
 
+// Sube el range-check de DLSSG.MultiFrameCountMax (nvngx_dlssg 0x168ea:
+// cmp eax,3 -> cmp eax,5) para que la RESERVA de sub-frames se dimensione para
+// 6X. Sin esto, el snippet no acepta MultiFrameCountMax > 4, la reserva queda en
+// <=4, y el byte del bucle a 6 la desborda -> NGX devuelve CERO generacion (es
+// lo que se ve en NMS: x5 sube fps, x6 no). Gateado en mfg-x6.txt (g_allow_x6):
+// es una APUESTA a que el snippet aguanta la reserva de 6 -- si no la aguanta,
+// puede dar pantalla negra o cero, por eso no va por default. Medir con un
+// contador de fps: x5 vs x6.
+static int patch_mfc_range(unsigned char *base) {
+    if (!g_allow_x6) return 0;
+    auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    auto *nt = reinterpret_cast<IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    auto *sec = IMAGE_FIRST_SECTION(nt);
+    unsigned char *text = nullptr;
+    size_t len = 0;
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        const char *n = reinterpret_cast<const char *>(sec[i].Name);
+        if (n[0] == '.' && n[1] == 't' && n[2] == 'e' && n[3] == 'x' && n[4] == 't') {
+            text = base + sec[i].VirtualAddress;
+            len = sec[i].Misc.VirtualSize;
+            break;
+        }
+    }
+    if (text == nullptr) return 0;
+    int hits = 0;
+    size_t at[8];
+    const int n = sites::find(text, len, sites::kMfcRange, at, 8);
+    for (int k = 0; k < n && k < 8; ++k) {
+        unsigned char *imm = text + at[k] + sites::kMfcRange.write_at;
+        DWORD old = 0;
+        if (VirtualProtect(imm, 1, PAGE_EXECUTE_READWRITE, &old)) {
+            *imm = 5;               // eax<=5 -> MultiFrameCountMax<=6 aceptado
+            VirtualProtect(imm, 1, old, &old);
+            ++hits;
+        }
+    }
+    return hits;
+}
+
 static int patch_gates(unsigned char *base) {
     auto *dos = reinterpret_cast<IMAGE_DOS_HEADER *>(base);
     if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;

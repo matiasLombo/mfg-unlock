@@ -45,6 +45,7 @@ struct Settings {
     bool mfcmax        = false;   // mfg-mfcmax.txt
     bool topefijo      = false;   // mfg-topefijo.txt
     bool x6            = false;   // mfg-x6.txt
+    bool forceon       = false;   // mfg-forceon.txt: panel fuerza eOn con multiplicador fijo aunque el juego tenga FG apagado. Riesgo freeze de pausa (GTA V). Default off.
     bool dyndiag       = false;   // mfg-dyndiag.txt
     bool latch         = true;    // mfg-nolatch.txt lo apaga
     bool deuda         = true;    // mfg-sin-deuda.txt lo apaga
@@ -116,6 +117,7 @@ inline const Flag kFlags[] = {
     { L"mfg-mfcmax.txt",         "mfcmax", &Settings::mfcmax },
     { L"mfg-topefijo.txt",       "topefijo", &Settings::topefijo },
     { L"mfg-x6.txt",             "x6", &Settings::x6 },
+    { L"mfg-forceon.txt",        "forceon", &Settings::forceon },
     { L"mfg-dyndiag.txt",        "dyndiag", &Settings::dyndiag },
     { L"mfg-nolatch.txt",        "latch", &Settings::latch },
     { L"mfg-sin-deuda.txt",      "deuda", &Settings::deuda },

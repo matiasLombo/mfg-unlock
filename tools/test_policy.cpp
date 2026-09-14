@@ -34,6 +34,7 @@ static ForceInput base(void) {
     e.wic_ok = true;
     e.last_seen_generated = 0;
     e.cap = 6;
+    e.force_on = false;
     return e;
 }
 
@@ -53,6 +54,17 @@ int main(void) {
         ForceOutput s = decide_force(e);
         check("GTA V en pausa (eOn visto, ahora eOff): no se pelea", s.write_mode ? 1 : 0, 0);
         check("  razon JUEGO_APAGO", (long)s.reason, (long)Reason::GAME_TURNED_OFF);
+        // mfg-forceon.txt: con un multiplicador FIJO el panel fuerza eOn igual
+        // (NMS: apagar FG en el menu del juego ya no ignora al panel). El default
+        // de arriba (sin el flag) sigue difiriendo, que es lo que protege GTA V.
+        e.force_on = true;
+        ForceOutput f = decide_force(e);
+        check("  con mfg-forceon.txt + fijo: el panel FUERZA eOn", f.mode, kOn);
+        check("    y cuenta 6", f.count, 6);
+        // DYNAMIC no se fuerza ni con el flag: ahi vive GTA V.
+        e.sel = kSelDynFut; e.force_generated = 3;
+        ForceOutput dyn = decide_force(e);
+        check("  con el flag pero DYNAMIC: sigue difiriendo", dyn.write_mode ? 1 : 0, 0);
     }
     {
         // Halo intento16: 235 ventanas con eOff y NUNCA eOn antes. Ahi se fuerza.

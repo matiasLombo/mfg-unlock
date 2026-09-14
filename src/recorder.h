@@ -236,6 +236,37 @@ static DWORD WINAPI recorder(LPVOID) {
             }
 
             if (g_ov_visible) {
+                // Seleccion por TECLADO: 0=AUTO 1=OFF 2..6=2X..6X. El puntero
+                // del panel se alimenta de raw input, y un juego que registra
+                // raw input para su camara (NMS) se lo roba -> el cursor virtual
+                // queda pegado y el click cae en la fila equivocada. Las teclas
+                // por GetAsyncKeyState son el unico input que nunca falla aca,
+                // asi que el numero elige el modo directo, sin depender del mouse.
+                {
+                    static bool numwas[7] = { false, false, false, false, false, false, false };
+                    for (int nk = 0; nk <= 6; ++nk) {
+                        const bool down = (GetAsyncKeyState('0' + nk) & 0x8000) != 0;
+                        if (down && !numwas[nk]) {
+                            const int row = nk;         // 0 AUTO, 1 OFF, 2..6 = 2X..6X
+                            const bool ok = row < kPanRows &&
+                                (row < 2 || g_frames_max == 0 ||
+                                 (LONG)(row - 1) <= g_frames_max);
+                            if (ok) {
+                                g_force_sel = row;
+                                g_force_generated = row >= 2
+                                    ? (count_is_multiplier() ? row : row - 1)
+                                    : 0;
+                                arm_frametoken_hook();
+                                g_opt_pending = 1;
+                                g_override_said = false;
+                                log_num("panel: mode now (teclado) ", (unsigned)row);
+                                g_settings_dirty = 1;
+                            }
+                        }
+                        numwas[nk] = down;
+                    }
+                }
+
                 const bool lmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
                 // El slider vuelve solo para DYNAMIC, y mueve fps, no ratio.
                 const bool onslider = g_ov_hot == kHotSlider &&
@@ -429,7 +460,11 @@ static DWORD WINAPI recorder(LPVOID) {
         // Solo se pregunta si el diagnostico guardado es ROJO y no hay respuesta
         // todavia. Un juego VERDE o AMARILLO no ve nada de esto.
         read_previous_verdict();
-        g_pide_permiso = (g_previous_verdict == 2 && g_consent == -1) ? 1 : 0;
+        // Solo tiene sentido preguntar por el reemplazo si la sustitucion esta
+        // habilitada. En 1.4 g_snippet_on va OFF por default (no sustituimos: el
+        // MFG anda in-place), asi que el prompt "ESTE JUEGO NO PUEDE USAR MFG ASI"
+        // era falso y confuso -- se suprime cuando no vamos a sustituir nada.
+        g_pide_permiso = (g_snippet_on && g_previous_verdict == 2 && g_consent == -1) ? 1 : 0;
         if (g_pide_permiso) {
             const bool si = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
             const bool no = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;

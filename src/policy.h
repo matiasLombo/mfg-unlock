@@ -34,10 +34,14 @@ struct ForceInput {
     bool wic_ok;                 // g_wic_ok: el parche de la cuenta esta puesto
     long last_seen_generated;    // g_last_seen_generated: lo que el juego escribio
     long cap;                   // tope_cuenta()
+    bool force_on;              // g_force_on (mfg-forceon.txt): con un multiplicador
+                                // FIJO, el panel fuerza eOn aunque el juego pida
+                                // eOff. Default false -> se difiere (protege el
+                                // freeze de pausa de GTA V, [[no-pelearle-el-eoff-al-juego]]).
 };
 
 // Las mismas constantes de overlay.h, sin arrastrar ese header al host.
-enum { kSelOff = 1, kSelDyn = 7, kSelDynFut = 8 };
+enum { kSelAuto = 0, kSelOff = 1, kSelDyn = 7, kSelDynFut = 8 };
 
 enum class Reason {
     PASSIVE,          // no se reescribe nada: topologia rota
@@ -67,15 +71,30 @@ inline ForceOutput decide_force(const ForceInput &e) {
     ForceOutput s{};
     s.reason = Reason::NONE;
     if (e.passive) { s.reason = Reason::PASSIVE; return s; }
-    // juego_apago_la_generacion(): la guarda de haberlo visto pedir eOn importa,
-    // hay juegos que no llaman nunca con eOn y ahi respetar el eOff seria no
-    // generar jamas.
-    if (e.game_asked_on && e.game_wants == 0) { s.reason = Reason::GAME_TURNED_OFF; return s; }
 
+    // OFF del panel: apaga SIEMPRE, aun si el juego la tenia encendida. Forzar
+    // eOff no tiene el riesgo de forzar eOn (que es lo que congela en pausa), y
+    // sin esto el OFF del panel no pegaba porque el juego re-asserta eOn.
     if (e.sel == kSelOff) {
         s.reason = Reason::OFF;
         s.write_mode = true; s.mode = kOff;
         return s;
+    }
+
+    // juego_apago_la_generacion(): la guarda de haberlo visto pedir eOn importa,
+    // hay juegos que no llaman nunca con eOn y ahi respetar el eOff seria no
+    // generar jamas.
+    //
+    // Un juego que apago FG desde su menu (NMS) es INDISTINGUIBLE de GTA V al
+    // pausar -- los dos son game_asked_on=true, game_wants=0 -- y forzar eOn en
+    // la pausa congela ([[no-pelearle-el-eoff-al-juego]], test "pausa de GTA V").
+    // Por eso por DEFAULT se difiere. mfg-forceon.txt + un multiplicador FIJO
+    // (2..6) hace que el panel FUERCE eOn igual: el que lo prende asume el riesgo
+    // (o su juego no congela en el menu, como puede ser NMS). DYNAMIC y AUTO
+    // siempre difieren -- son los modos donde GTA V vive.
+    const bool panel_forces = e.force_on && e.sel >= 2 && e.sel < kSelDyn;
+    if (!panel_forces && e.game_asked_on && e.game_wants == 0) {
+        s.reason = Reason::GAME_TURNED_OFF; return s;
     }
     if (e.sel == kSelDyn || e.sel == kSelDynFut) {
         if (e.force_generated <= 0) {
