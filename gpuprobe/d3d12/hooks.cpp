@@ -208,6 +208,9 @@ HRESULT STDMETHODCALLTYPE hk_ResizeBuffers(IDXGISwapChain *sc, UINT count, UINT 
     const HRESULT hr = real(sc, count, w, h, fmt, flags);
     if (SUCCEEDED(hr) && w && h) {
         collector().set_output(w, h);
+        // Los buffers son OTROS despues de un resize: hay que volver a
+        // marcarlos, o los nuevos entran como RTs comunes.
+        collector().note_backbuffers(sc);
         gate_log("swapchain redimensionado a %ux%u", w, h);
     }
     return hr;
@@ -716,11 +719,13 @@ void arm_with_device(ID3D12Device *device, IDXGISwapChain *sc) {
     }
     if (adapter) collector().set_adapter(adapter);
 
-    if (!collector().init(device, cfg))
+    if (!collector().init(device, cfg)) {
         gate_degrade("el colector no arranco");
-    else
+    } else {
+        collector().note_backbuffers(sc);
         gate_log("colector armado sobre %s: deep_every=%u query_budget=%u", exe,
                  cfg.deep_every, cfg.query_budget);
+    }
 }
 
 void arm_from_swapchain(IDXGISwapChain *sc) {

@@ -188,3 +188,17 @@ class TestRegresiones(unittest.TestCase):
         b.pso(120, 0xF1, 12.0, render_thread=1)
         s = ingest.load_lines(b.build(), warmup=30)
         self.assertTrue(any(c.cid == "pso_stutter" for c in rules.analyze(s)))
+
+    def test_el_backbuffer_no_es_un_huerfano(self):
+        # El backbuffer se escribe y nunca se transiciona a lectura: lo lee el
+        # compositor. Sin este caso, la regla del huerfano marcaria el RT final
+        # de todos los juegos.
+        b = Builder()
+        b.res(0x10, 0xAA, "backbuffer", "R8G8B8A8_UNORM", 2560, 1440, flags=4)
+        for f in range(200, 260):
+            b.pass_(f, 0x100, 0x10, 0xAA, 0.5, draws=1)
+            b.frame_end(f, 10.0)
+        s = ingest.load_lines(b.build(), warmup=100)
+        cands = rules.analyze(s)
+        self.assertEqual([c for c in cands if c.cid.startswith("orphan_")], [])
+        self.assertEqual([c for c in cands if c.cid.startswith("post_")], [])

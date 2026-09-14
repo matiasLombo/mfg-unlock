@@ -51,6 +51,7 @@ enum class GateResult : u32 {
     ViewportsUnknown,    // no podemos escalar sus viewports
     Ambiguous,           // varios recursos comparten el descriptor
     ObserveOnly,         // el perfil esta en modo observacion
+    Backbuffer,          // es el backbuffer del swapchain: no se toca nunca
 };
 
 const char *gate_name(GateResult);

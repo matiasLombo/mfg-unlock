@@ -162,6 +162,7 @@ UINT scaled_cost(UINT iters) {
 int main(int argc, char **argv) {
     UINT frames = 900;
     bool force_warp = true;   // en CI no hay GPU: WARP por defecto
+    bool want_window = true;  // con swapchain de verdad; cae a headless solo
     const char *out_path = nullptr;
     for (int i = 1; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--frames") && i + 1 < argc) frames = static_cast<UINT>(std::atoi(argv[++i]));
@@ -172,6 +173,7 @@ int main(int argc, char **argv) {
             g_viewport_scale = static_cast<float>(std::atof(argv[++i]));
         else if (!std::strcmp(argv[i], "--cost-scale") && i + 1 < argc)
             g_cost_scale = static_cast<float>(std::atof(argv[++i]));
+        else if (!std::strcmp(argv[i], "--headless")) want_window = false;
     }
 
     Com<IDXGIFactory4> factory;
@@ -224,6 +226,45 @@ int main(int argc, char **argv) {
     Com<ID3D12CommandQueue> cmp_queue;
     if (!check(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&cmp_queue)), "queue compute"))
         return 1;
+
+    // --- swapchain de verdad ---------------------------------------------
+    // No es decoracion: el backbuffer es el unico recurso que se escribe todos
+    // los frames y NUNCA se transiciona a lectura, asi que sin uno no se puede
+    // probar que el analizador no lo confunda con un recurso huerfano. Si no
+    // se puede crear (sesion sin escritorio), se sigue headless y el test lo
+    // nota solo.
+    HWND hwnd = nullptr;
+    Com<IDXGISwapChain1> swapchain;
+    UINT swap_count = 2;
+    if (want_window) {
+        WNDCLASSEXA wc{};
+        wc.cbSize = sizeof wc;
+        wc.lpfnWndProc = DefWindowProcA;
+        wc.hInstance = GetModuleHandleA(nullptr);
+        wc.lpszClassName = "gpuprobe_testbed";
+        RegisterClassExA(&wc);
+        hwnd = CreateWindowExA(0, wc.lpszClassName, "gpuprobe testbed",
+                               WS_OVERLAPPEDWINDOW, 0, 0, 640, 360, nullptr,
+                               nullptr, wc.hInstance, nullptr);
+        if (hwnd) {
+            DXGI_SWAP_CHAIN_DESC1 sd{};
+            sd.Width = kOutW;
+            sd.Height = kOutH;
+            sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            sd.SampleDesc.Count = 1;
+            sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+            sd.BufferCount = swap_count;
+            sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+            if (FAILED(factory->CreateSwapChainForHwnd(gfx_queue.get(), hwnd, &sd,
+                                                       nullptr, nullptr,
+                                                       &swapchain))) {
+                std::printf("testbed: sin swapchain (se sigue headless)\n");
+                DestroyWindow(hwnd);
+                hwnd = nullptr;
+            }
+        }
+    }
+    if (swapchain.get()) std::printf("testbed: swapchain de %u buffers\n", swap_count);
 
     Com<ID3D12CommandAllocator> gfx_alloc, cmp_alloc;
     if (!check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -386,6 +427,31 @@ int main(int argc, char **argv) {
     const int T_PLACED = add_target("placed_rt", DXGI_FORMAT_R8G8B8A8_UNORM, 1024, 1024, 1, false,
                                     false, shared_heap.get(), 0);
     if (T_SHADOW < 0 || T_PLACED < 0 || T_COPYDST < 0) return 1;
+
+    // Los backbuffers: sus RTVs salen del mismo heap. El colector los marca
+    // aparte (note_backbuffers) para que no entren como RTs comunes.
+    std::vector<ID3D12Resource *> backbuffers;
+    std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> back_rtv;
+    std::vector<D3D12_RESOURCE_STATES> back_state;
+    if (swapchain.get()) {
+        for (UINT i = 0; i < swap_count; ++i) {
+            ID3D12Resource *buf = nullptr;
+            if (FAILED(swapchain->GetBuffer(i, IID_PPV_ARGS(&buf))) || !buf) break;
+            D3D12_CPU_DESCRIPTOR_HANDLE h =
+                rtv_heap->GetCPUDescriptorHandleForHeapStart();
+            h.ptr += static_cast<SIZE_T>(next_rtv++) * rtv_step;
+            device->CreateRenderTargetView(buf, nullptr, h);
+            col.on_rtv(h, buf);
+            backbuffers.push_back(buf);
+            back_rtv.push_back(h);
+            back_state.push_back(D3D12_RESOURCE_STATE_PRESENT);
+        }
+        col.note_backbuffers(swapchain.get());
+        // note_backbuffers registra los recursos; on_rtv necesita que ya esten
+        // registrados, asi que se vuelve a asociar la vista ahora.
+        for (size_t i = 0; i < backbuffers.size(); ++i)
+            col.on_rtv(back_rtv[i], backbuffers[i]);
+    }
 
     // La textura 3D de la niebla volumetrica: el unico recurso con UAV, y el
     // unico que se toca desde la queue de compute.
@@ -732,6 +798,47 @@ int main(int argc, char **argv) {
                         static_cast<double>(ns) / 1e6);
         }
 
+        // 12. la pasada final: al backbuffer. Es la que hace que la sesion
+        //     tenga un recurso presentado, que se escribe todos los frames y
+        //     que nadie lee con un shader.
+        UINT back_index = 0;
+        if (swapchain.get() && !backbuffers.empty()) {
+            IDXGISwapChain3 *sc3 = nullptr;
+            if (SUCCEEDED(swapchain->QueryInterface(IID_PPV_ARGS(&sc3))) && sc3) {
+                back_index = sc3->GetCurrentBackBufferIndex();
+                sc3->Release();
+            }
+            if (back_index < backbuffers.size()) {
+                D3D12_RESOURCE_BARRIER bb{};
+                bb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                bb.Transition.pResource = backbuffers[back_index];
+                bb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                bb.Transition.StateBefore = back_state[back_index];
+                bb.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                if (bb.Transition.StateBefore != bb.Transition.StateAfter) {
+                    gfx_list->ResourceBarrier(1, &bb);
+                    (void)col.cmd_barrier(gfx_list.get(), 1, &bb, nullptr);
+                    back_state[back_index] = D3D12_RESOURCE_STATE_RENDER_TARGET;
+                }
+                gfx_list->OMSetRenderTargets(1, &back_rtv[back_index], FALSE, nullptr);
+                col.cmd_set_render_targets(gfx_list.get(), 1, &back_rtv[back_index],
+                                           FALSE, nullptr);
+                set_viewport(gfx_list.get(), kOutW, kOutH);
+                gfx_list->SetPipelineState(pso_rgba8);
+                col.cmd_set_pso(gfx_list.get(), pso_rgba8);
+                const Constants c{scaled_cost(40), 0.95f, 0.0f, 0.0f};
+                gfx_list->SetGraphicsRoot32BitConstants(0, 4, &c, 0);
+                gfx_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                gfx_list->DrawInstanced(3, 1, 0, 0);
+                (void)col.cmd_draw(gfx_list.get(), 3, 1);
+
+                std::swap(bb.Transition.StateBefore, bb.Transition.StateAfter);
+                gfx_list->ResourceBarrier(1, &bb);
+                (void)col.cmd_barrier(gfx_list.get(), 1, &bb, nullptr);
+                back_state[back_index] = D3D12_RESOURCE_STATE_PRESENT;
+            }
+        }
+
         col.cmd_close(gfx_list.get());
         gfx_list->Close();
         ID3D12CommandList *lists[] = {gfx_list.get()};
@@ -779,7 +886,8 @@ int main(int argc, char **argv) {
             }
         }
 
-        col.on_present(nullptr);
+        if (swapchain.get()) swapchain->Present(0, 0);
+        col.on_present(swapchain.get());
 
         if ((f % 100) == 0) {
             std::printf("  frame %u\n", f);
@@ -794,6 +902,8 @@ int main(int argc, char **argv) {
     col.shutdown();
     std::printf("testbed: colector cerrado\n");
     std::fflush(stdout);
+    for (ID3D12Resource *b : backbuffers) if (b) b->Release();
+    if (hwnd) DestroyWindow(hwnd);
     for (Target &t : targets) if (t.res) t.res->Release();
     if (late_pso) late_pso->Release();
     pso_shadow->Release();

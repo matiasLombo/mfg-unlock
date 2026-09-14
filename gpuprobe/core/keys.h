@@ -30,6 +30,12 @@ struct ResourceDesc {
     u32      flags  = kFlagNone;
     HeapKind heap   = HeapKind::Unknown;
     u64      bytes  = 0;   // el que dijo el device si lo sabemos; si no, el piso
+    // Buffer del swapchain. Importa por dos cosas que serian errores caros:
+    // el backbuffer se escribe y NUNCA se transiciona a un estado de lectura
+    // (lo lee el compositor, no un shader), asi que la regla del recurso
+    // huerfano lo marcaria a el en todos los juegos; y escalarlo no es una
+    // optimizacion, es romper la presentacion.
+    bool     swapchain = false;
 };
 
 // La resolucion a la que el juego presenta. Todo lo demas se mide contra esto:
@@ -72,6 +78,7 @@ const char *scale_name(ScaleClass);
 enum class Category : u8 {
     Unknown = 0,
     Buffer,
+    Backbuffer,     // buffer del swapchain: ni se escala ni se le pide lectura
     ShadowMap,      // depth, cuadrado, sin relacion con la salida
     ShadowCube,     // depth, cuadrado, array multiplo de 6
     DepthBuffer,    // depth a resolucion de salida
@@ -95,6 +102,7 @@ inline bool desc_is_depth(const ResourceDesc &d) {
 }
 
 inline Category classify(const ResourceDesc &d, const OutputInfo &out) {
+    if (d.swapchain) return Category::Backbuffer;
     if (d.dim == Dim::Buffer) return Category::Buffer;
     if (d.heap == HeapKind::Upload || d.heap == HeapKind::Readback)
         return Category::Staging;

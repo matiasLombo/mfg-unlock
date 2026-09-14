@@ -86,6 +86,7 @@ const char *category_name(Category c) {
     switch (c) {
         case Category::Unknown:     return "unknown";
         case Category::Buffer:      return "buffer";
+        case Category::Backbuffer:  return "backbuffer";
         case Category::ShadowMap:   return "shadowmap";
         case Category::ShadowCube:  return "shadowcube";
         case Category::DepthBuffer: return "depthbuffer";

@@ -156,6 +156,11 @@ def rule_fullres_post(s: Session, th: Thresholds) -> List[Candidate]:
         r = s.resource_for_pass(p)
         if r is None or r.cat not in ("rt_full", "volume"):
             continue
+        # Escalar el backbuffer no es una optimizacion: es romper la
+        # presentacion. El ejecutor tambien lo rechaza, pero proponerlo ya
+        # seria un error del reporte.
+        if r.cat == "backbuffer":
+            continue
         if p.draws > th.post_max_draws:
             continue  # geometria, no post: bajar su RT cambia la imagen entera
         excl = p.exclusive_ms
@@ -202,6 +207,13 @@ def rule_never_read(s: Session, th: Thresholds) -> List[Candidate]:
     out = []
     for r in s.resources.values():
         if not r.never_read():
+            continue
+        # El backbuffer se escribe y nunca se transiciona a lectura -- lo lee
+        # el compositor, no un shader. Sin esta linea, la regla marcaria el RT
+        # final de TODOS los juegos como recurso huerfano, que es el peor tipo
+        # de falso positivo: el que aparece siempre y entrena a ignorar el
+        # reporte.
+        if r.cat == "backbuffer":
             continue
         # Las pasadas que escriben sobre EL, por instancia. Por descriptor
         # sumaria el costo de sus hermanos y la ganancia saldria inflada.

@@ -91,7 +91,8 @@ size_t format_event(char *out, size_t cap, const Event &e, const OutputInfo &res
                 "{\"t\":\"res\",\"f\":%llu,\"key\":\"0x%llx\",\"dkey\":\"0x%llx\","
                 "\"cat\":\"%s\",\"dim\":\"%s\",\"fmt\":\"%s\",\"fmt_id\":%u,"
                 "\"w\":%u,\"h\":%u,\"d\":%u,\"mips\":%u,\"samples\":%u,"
-                "\"flags\":%u,\"heap\":\"%s\",\"bytes\":%llu,\"site\":\"0x%llx\"}",
+                "\"flags\":%u,\"heap\":\"%s\",\"bytes\":%llu,\"site\":\"0x%llx\","
+                "\"swap\":%u}",
                 (unsigned long long)e.frame,
                 (unsigned long long)e.resource.key.v,
                 (unsigned long long)e.resource.dkey.v,
@@ -99,7 +100,8 @@ size_t format_event(char *out, size_t cap, const Event &e, const OutputInfo &res
                 format_name(d.fmt), static_cast<unsigned>(d.fmt),
                 d.w, d.h, d.depth, d.mips, d.samples, d.flags, heap_name(d.heap),
                 (unsigned long long)d.bytes,
-                (unsigned long long)e.resource.site.v);
+                (unsigned long long)e.resource.site.v,
+                d.swapchain ? 1u : 0u);
             break;
         }
 
@@ -282,6 +284,7 @@ bool event_from_line(const ParsedLine &p, Event &e) {
         d.samples = static_cast<u32>(p.u("samples", 1));
         d.flags = static_cast<u32>(p.u("flags"));
         d.bytes = p.u("bytes");
+        d.swapchain = p.u("swap") != 0;
         d.dim = p.str_is("dim", "buffer") ? Dim::Buffer
               : p.str_is("dim", "tex1d")  ? Dim::Texture1D
               : p.str_is("dim", "tex3d")  ? Dim::Texture3D

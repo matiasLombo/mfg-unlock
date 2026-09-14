@@ -57,6 +57,15 @@ def main(path, report_path=None):
     check("rt_full" in cats, "clasifico los RTs de salida como full-res")
     check("rt_half" in cats, "clasifico el bloom como media resolucion")
     check("volume" in cats, "clasifico la textura 3D como volumen")
+    # El backbuffer solo existe si el testbed pudo crear el swapchain (una
+    # sesion sin escritorio cae a headless y sigue). Cuando existe, la
+    # verificacion que importa es que NO se lo proponga como huerfano: se
+    # escribe todos los frames y nunca se transiciona a lectura, que es
+    # exactamente la forma de un recurso huerfano.
+    if "backbuffer" in cats:
+        check(True, "clasifico los buffers del swapchain como backbuffer")
+    else:
+        print("  (sin swapchain: el testbed corrio headless)")
 
     # Async compute: la pasada de la queue 1 tiene que aparecer, y su tiempo
     # exclusivo tiene que ser menor que su costo si solapo con graficos.
@@ -80,6 +89,10 @@ def main(path, report_path=None):
     # RGBA16F full-res): el reporte tiene que decirlo en vez de proponer una
     # accion que tocaria a los tres.
     orph = [c for c in cands if c.cid.startswith("orphan_")]
+    if "backbuffer" in cats:
+        backs = {r.dkey for r in cats["backbuffer"]}
+        check(not any(c.dkey in backs for c in orph),
+              "no propone el backbuffer como recurso huerfano")
     if orph:
         check(any("MISMO descriptor" in e for e in orph[0].evidence),
               "avisa que el matcher del huerfano es ambiguo")

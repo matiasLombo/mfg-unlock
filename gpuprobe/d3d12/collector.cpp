@@ -561,6 +561,33 @@ void Collector::on_resource_release(ID3D12Resource *res) {
     push(e);
 }
 
+void Collector::note_backbuffers(IDXGISwapChain *swapchain) {
+    if (!armed_ || !swapchain) return;
+    DXGI_SWAP_CHAIN_DESC sd{};
+    if (FAILED(swapchain->GetDesc(&sd))) return;
+    const UINT count = sd.BufferCount ? sd.BufferCount : 2;
+    for (UINT i = 0; i < count; ++i) {
+        ID3D12Resource *buf = nullptr;
+        if (FAILED(swapchain->GetBuffer(i, IID_PPV_ARGS(&buf))) || !buf) continue;
+        const D3D12_RESOURCE_DESC d = buf->GetDesc();
+        ResourceDesc rd = from_d3d12(d, D3D12_HEAP_TYPE_DEFAULT, false);
+        rd.swapchain = true;
+        {
+            std::lock_guard<std::mutex> lk(impl_->tables);
+            impl_->resources[buf] = rd;
+        }
+        Event e;
+        e.kind = EventKind::ResourceCreate;
+        e.frame = frame_;
+        e.resource.key = ResKey{reinterpret_cast<u64>(buf)};
+        e.resource.dkey = desc_key(rd, out_);
+        e.resource.desc = rd;
+        push(e);
+        // GetBuffer sube el refcount; el swapchain es el dueno, no nosotros.
+        buf->Release();
+    }
+}
+
 void Collector::on_rtv(D3D12_CPU_DESCRIPTOR_HANDLE h, ID3D12Resource *res) {
     if (!armed_ || !res || !h.ptr) return;
     ResourceDesc rd;

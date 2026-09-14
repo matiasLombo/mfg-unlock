@@ -46,6 +46,7 @@ struct Str {
 bool name_to_category(const Str &s, Category &out) {
     static const struct { const char *n; Category c; } kTable[] = {
         {"unknown", Category::Unknown},        {"buffer", Category::Buffer},
+        {"backbuffer", Category::Backbuffer},
         {"shadowmap", Category::ShadowMap},    {"shadowcube", Category::ShadowCube},
         {"depthbuffer", Category::DepthBuffer},{"cubemap", Category::CubeMap},
         {"volume", Category::Volume},          {"rt_full", Category::RtFull},

@@ -15,6 +15,7 @@ const char *gate_name(GateResult g) {
         case GateResult::ViewportsUnknown: return "no podemos escalar sus viewports";
         case GateResult::Ambiguous:        return "varios recursos comparten el descriptor";
         case GateResult::ObserveOnly:      return "el perfil esta en modo observacion";
+        case GateResult::Backbuffer:       return "es el backbuffer: no se toca";
     }
     return "?";
 }
@@ -56,6 +57,12 @@ const Observed *ExecutorCore::observed(DescKey k) const {
 
 GateResult ExecutorCore::gate(const Action &a, const ResourceDesc &d,
                               DescKey key) const {
+    // El backbuffer no se escala ni con verify = "none": no es una
+    // optimizacion, es romper la presentacion. Esta antes que el gate del
+    // usuario a proposito -- no hay perfil que lo habilite.
+    if (d.swapchain && (a.kind == ActionKind::ResourceScale ||
+                        a.kind == ActionKind::MipBias))
+        return GateResult::Backbuffer;
     if (a.verify == Verify::None) return GateResult::Ok;
 
     const Observed *o = observed(key);

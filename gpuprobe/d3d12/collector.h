@@ -91,6 +91,11 @@ public:
     void on_resource(ID3D12Resource *res, const D3D12_RESOURCE_DESC &desc,
                      D3D12_HEAP_TYPE heap, bool placed, CallsiteId site);
     void on_resource_release(ID3D12Resource *res);
+    // Registra los buffers del swapchain como recursos marcados. Sin esto, el
+    // backbuffer aparece como un RT full-res que se escribe y nunca se lee --
+    // que es exactamente la forma de un recurso huerfano -- y el reporte lo
+    // propondria en todos los juegos.
+    void note_backbuffers(IDXGISwapChain *swapchain);
     // El ejecutor decide si el recurso se crea mas chico. Se llama ANTES de
     // crearlo; devuelve el override ya validado por los gates.
     ResourceOverride want_override(const D3D12_RESOURCE_DESC &desc,

@@ -171,6 +171,27 @@ int main() {
         CHECK(ex.decide_resource(shadow4k(), CallsiteId{}).why == GateResult::Disabled);
     }
 
+    // --- el backbuffer no se toca ni con verify = none --------------------
+    {
+        ExecutorCore ex;
+        ex.set_output(out);
+        ex.set_profile(parse(
+            "[gpuprobe]\nobserve_only = false\n"
+            "[[action]]\nkind = \"resource_scale\"\n"
+            "match = { category = \"backbuffer\" }\n"
+            "scale = 0.5\nverify = \"none\"\nenabled = true\n"));
+        ResourceDesc bb = rt_full();
+        bb.swapchain = true;
+        const DescKey k = desc_key(bb, out);
+        ex.note_resource(k, bb);
+        ex.note_viewport(k);
+        const Decision d = ex.decide_resource(bb, CallsiteId{});
+        CHECK(!d.apply());
+        CHECK(d.why == GateResult::Backbuffer);
+        // Y clasifica como backbuffer, no como RT full-res.
+        CHECK(classify(bb, out) == Category::Backbuffer);
+    }
+
     // --- barriers ---------------------------------------------------------
     {
         ExecutorCore ex;
