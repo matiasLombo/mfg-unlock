@@ -183,7 +183,9 @@ def load_lines(lines: Iterable[str], warmup: int = DEFAULT_WARMUP,
             s.frames.append(FrameAgg(
                 index=f, cpu_ms=float(ev.get("cpu_ms", 0.0) or 0.0),
                 present_ms=float(ev.get("present_ms", 0.0) or 0.0),
-                dropped=_int(ev.get("dropped")), deep=bool(_int(ev.get("deep")))))
+                dropped=_int(ev.get("dropped")), deep=bool(_int(ev.get("deep"))),
+                resident_calls=_int(ev.get("resident")),
+                evict_calls=_int(ev.get("evict"))))
             _close_frame(s, frame_intervals, frame_barriers)
             frame_intervals = []
             frame_barriers = []

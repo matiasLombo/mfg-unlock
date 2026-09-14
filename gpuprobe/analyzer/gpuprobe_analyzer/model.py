@@ -122,6 +122,8 @@ class FrameAgg:
     present_ms: float
     dropped: int
     deep: bool
+    resident_calls: int = 0
+    evict_calls: int = 0
 
 
 @dataclass
@@ -201,6 +203,33 @@ class Session:
 
     def vram_peak(self) -> Optional[VramSample]:
         return max(self.vram, key=lambda v: v.usage) if self.vram else None
+
+    def evictions(self) -> int:
+        """Cuantas veces el juego solto memoria a mano durante el gameplay.
+
+        Es una senal mas temprana que el contador de uso: un juego que evicta
+        esta peleando con el budget aunque el uso quede justo por debajo del
+        techo, porque el driver ya lo esta obligando a soltar.
+        """
+        return sum(f.evict_calls for f in self.frames
+                   if f.index > self.warmup_frames)
+
+    def vram_by_category(self):
+        """Bytes de VRAM atribuidos por categoria de recurso.
+
+        Es una atribucion por lo que el juego CREO, no por lo que esta
+        residente: D3D12 no dice que esta en la placa en cada momento. Sirve
+        para la pregunta que importa -- que clase de recurso se esta comiendo
+        la memoria -- y no para el total exacto.
+        """
+        out = {}
+        for r in self.resources.values():
+            if r.heap in ("upload", "readback"):
+                continue
+            cat = out.setdefault(r.cat, [0, 0])
+            cat[0] += r.bytes
+            cat[1] += 1
+        return dict(sorted(out.items(), key=lambda kv: kv[1][0], reverse=True))
 
     def thrashing(self) -> bool:
         """El juego pide mas VRAM de la que el adaptador le presupuesta.

@@ -66,6 +66,8 @@ struct RingSlot {
 RingSlot g_rings[kMaxRings];
 std::atomic<u32> g_ring_count{0};
 std::atomic<u64> g_dropped_this_frame{0};
+std::atomic<u32> g_resident_calls{0};
+std::atomic<u32> g_evict_calls{0};
 
 Ring *thread_ring() {
     static thread_local Ring *mine = nullptr;
@@ -486,6 +488,12 @@ void Collector::set_output(u32 w, u32 h) {
     out_.w = w;
     out_.h = h;
     if (impl_) impl_->writer.set_output(out_);
+}
+
+void Collector::note_residency(bool evicting, u32 count) {
+    if (!armed_) return;
+    (evicting ? g_evict_calls : g_resident_calls)
+        .fetch_add(count ? count : 1, std::memory_order_relaxed);
 }
 
 void Collector::set_adapter(IDXGIAdapter3 *adapter) {
@@ -1251,6 +1259,8 @@ void Collector::on_present(IDXGISwapChain *swapchain) {
         static_cast<u32>(g_dropped_this_frame.exchange(0, std::memory_order_relaxed));
     fe.frame_ev.queries_used =
         impl_->slots[impl_->cur_slot].next_query.load(std::memory_order_relaxed);
+    fe.frame_ev.resident_calls = g_resident_calls.exchange(0, std::memory_order_relaxed);
+    fe.frame_ev.evict_calls = g_evict_calls.exchange(0, std::memory_order_relaxed);
     push(fe);
 
     // VRAM cada 30 frames: el budget del adaptador se mueve despacio y no vale

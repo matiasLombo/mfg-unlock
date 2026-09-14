@@ -84,6 +84,31 @@ def render(s: Session, cands: List[Candidate],
               + (f" -- {r.cat} {r.w}x{r.h}" if r else ""))
         a("")
 
+    # --- VRAM por recurso -------------------------------------------------
+    by_cat = s.vram_by_category()
+    if by_cat:
+        total = sum(v[0] for v in by_cat.values())
+        a("## A donde se va la VRAM")
+        a("")
+        a("Atribuida por lo que el juego CREO, no por lo que esta residente: "
+          "D3D12 no dice que hay en la placa en cada momento. Sirve para saber "
+          "que clase de recurso se come la memoria, no para el total exacto.")
+        a("")
+        a("| categoria | MB | recursos | % |")
+        a("| --- | ---: | ---: | ---: |")
+        for cat, (nbytes, count) in list(by_cat.items())[:12]:
+            a(f"| {cat} | {nbytes / (1024.0 * 1024.0):.0f} | {count} | "
+              f"{nbytes / total * 100.0 if total else 0:.0f}% |")
+        a(f"| **total** | **{total / (1024.0 * 1024.0):.0f}** | "
+          f"{sum(v[1] for v in by_cat.values())} | |")
+        a("")
+        ev = s.evictions()
+        if ev:
+            a(f"El juego llamo a Evict {ev} veces despues del warmup: esta "
+              f"soltando memoria a mano, que es senal de pelea con el budget "
+              f"aunque el contador de uso quede debajo del techo.")
+            a("")
+
     # --- candidatos -------------------------------------------------------
     a("## Candidatos")
     a("")

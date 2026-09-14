@@ -50,6 +50,8 @@ enum HookId {
     H_Device_CreateReservedResource,
     H_Device_CreateGraphicsPipelineState,
     H_Device_CreateComputePipelineState,
+    H_Device_MakeResident,
+    H_Device_Evict,
     H_Device_CreateShaderResourceView,
     H_Device_CreateRenderTargetView,
     H_Device_CreateDepthStencilView,
@@ -350,6 +352,34 @@ HRESULT STDMETHODCALLTYPE hk_CreateComputePipelineState(
                                        out ? static_cast<ID3D12PipelineState *>(*out)
                                            : nullptr,
                                        ticks_ns() - t0, true);
+    }
+    return hr;
+}
+
+using ResidencyFn = HRESULT(STDMETHODCALLTYPE *)(ID3D12Device *, UINT,
+                                                 ID3D12Pageable *const *);
+
+HRESULT STDMETHODCALLTYPE hk_MakeResident(ID3D12Device *dev, UINT n,
+                                          ID3D12Pageable *const *objs) {
+    ResidencyFn real = orig<ResidencyFn>(H_Device_MakeResident, dev);
+    if (!real) { gate_degrade("MakeResident sin original"); return E_FAIL; }
+    const HRESULT hr = real(dev, n, objs);
+    if (gate_open()) {
+        Reentry guard;
+        if (guard.ok()) collector().note_residency(false, n);
+    }
+    return hr;
+}
+
+HRESULT STDMETHODCALLTYPE hk_Evict(ID3D12Device *dev, UINT n,
+                                   ID3D12Pageable *const *objs) {
+    ResidencyFn real = orig<ResidencyFn>(H_Device_Evict, dev);
+    if (!real) { gate_degrade("Evict sin original"); return E_FAIL; }
+    const HRESULT hr = real(dev, n, objs);
+    if (gate_open()) {
+        Reentry guard;
+        // Un juego evictando en pleno gameplay esta peleando con el budget.
+        if (guard.ok()) collector().note_residency(true, n);
     }
     return hr;
 }
@@ -664,6 +694,10 @@ void attach_device(ID3D12Device *dev) {
     install(H_Device_CreateComputePipelineState, dev,
             vtbl::Device::CreateComputePipelineState,
             reinterpret_cast<void *>(&hk_CreateComputePipelineState));
+    install(H_Device_MakeResident, dev, vtbl::Device::MakeResident,
+            reinterpret_cast<void *>(&hk_MakeResident));
+    install(H_Device_Evict, dev, vtbl::Device::Evict,
+            reinterpret_cast<void *>(&hk_Evict));
     install(H_Device_CreateShaderResourceView, dev,
             vtbl::Device::CreateShaderResourceView,
             reinterpret_cast<void *>(&hk_CreateShaderResourceView));

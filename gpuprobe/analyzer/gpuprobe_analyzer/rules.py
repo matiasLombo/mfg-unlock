@@ -331,9 +331,23 @@ def rule_pso_stutter(s: Session, th: Thresholds) -> List[Candidate]:
 
 def rule_vram_ceiling(s: Session, th: Thresholds) -> List[Candidate]:
     peak = s.vram_peak()
-    if peak is None:
+    evictions = s.evictions()
+    if peak is None and not evictions:
         return []
-    if not s.thrashing():
+    if peak is None:
+        # Sin muestras de VRAM pero con evicciones: alcanza para avisar.
+        return [Candidate(
+            cid="vram_evict", priority=1,
+            title=f"el juego solto memoria {evictions} veces durante el gameplay",
+            kind="informe", gain_ms=0.0,
+            gain_basis="no es una ganancia: es la senal de que el juego esta "
+                       "peleando con el budget de VRAM",
+            visual_risk=RISK_LOW, stability=STAB_HIGH,
+            evidence=["MakeResident/Evict durante gameplay significa que el "
+                      "driver lo esta obligando a soltar",
+                      "no hubo muestras de budget en esta sesion para decir "
+                      "cuanto falta"])]
+    if not s.thrashing() and not evictions:
         # Cerca del techo tambien vale decirlo: a 95% cualquier accion que
         # agregue memoria lo cruza.
         if peak.pressure < 0.95:
@@ -352,6 +366,23 @@ def rule_vram_ceiling(s: Session, th: Thresholds) -> List[Candidate]:
                 "cualquier accion que agregue VRAM cruza el techo desde aca",
             ])]
 
+    if not s.thrashing():
+        # Debajo del techo pero evictando: el driver ya lo esta apretando.
+        return [Candidate(
+            cid="vram_evict", priority=1,
+            title=f"debajo del budget pero soltando memoria {evictions} veces",
+            kind="informe", gain_ms=0.0,
+            gain_basis="el contador de uso puede quedarse justo debajo del techo "
+                       "mientras el driver obliga al juego a soltar; las "
+                       "evicciones se ven antes",
+            visual_risk=RISK_LOW, stability=STAB_HIGH,
+            evidence=[
+                f"pico de {_fmt_mb(peak.usage)} sobre {_fmt_mb(peak.budget)} "
+                f"({peak.pressure * 100:.0f}%)",
+                f"{evictions} llamadas a Evict despues del warmup",
+                "los ms por pasada de esta sesion pueden estar contaminados",
+            ])]
+
     over = peak.usage - peak.budget
     return [Candidate(
         cid="vram_thrashing",
@@ -367,6 +398,9 @@ def rule_vram_ceiling(s: Session, th: Thresholds) -> List[Candidate]:
         evidence=[
             f"pico de {_fmt_mb(peak.usage)} contra un budget de "
             f"{_fmt_mb(peak.budget)} en el frame {peak.frame}",
+            (f"y el juego solto memoria {evictions} veces durante el gameplay"
+             if evictions else
+             "sin evicciones: el juego todavia no esta soltando nada a mano"),
             "bajar la calidad de texturas del juego un escalon suele ser mejor "
             "que cualquier mip_bias que podamos aplicar desde afuera",
             "hasta que esto se arregle, el resto de los candidatos de esta "

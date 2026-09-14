@@ -78,11 +78,13 @@ size_t format_event(char *out, size_t cap, const Event &e, const OutputInfo &res
         case EventKind::FrameEnd:
             n = std::snprintf(out, cap,
                 "{\"t\":\"%s\",\"f\":%llu,\"cpu_ms\":%.4f,\"present_ms\":%.4f,"
-                "\"dropped\":%u,\"queries\":%u,\"deep\":%u}",
+                "\"dropped\":%u,\"queries\":%u,\"resident\":%u,\"evict\":%u,"
+                "\"deep\":%u}",
                 t, (unsigned long long)e.frame,
                 static_cast<double>(e.frame_ev.cpu_ns) / 1e6,
                 static_cast<double>(e.frame_ev.present_ns) / 1e6,
-                e.frame_ev.dropped, e.frame_ev.queries_used, deep);
+                e.frame_ev.dropped, e.frame_ev.queries_used,
+                e.frame_ev.resident_calls, e.frame_ev.evict_calls, deep);
             break;
 
         case EventKind::ResourceCreate: {
@@ -270,6 +272,8 @@ bool event_from_line(const ParsedLine &p, Event &e) {
         e.frame_ev.present_ns = static_cast<u64>(p.f("present_ms") * 1e6);
         e.frame_ev.dropped = static_cast<u32>(p.u("dropped"));
         e.frame_ev.queries_used = static_cast<u32>(p.u("queries"));
+        e.frame_ev.resident_calls = static_cast<u32>(p.u("resident"));
+        e.frame_ev.evict_calls = static_cast<u32>(p.u("evict"));
     } else if (is("res")) {
         e.kind = EventKind::ResourceCreate;
         e.resource.key = ResKey{p.u("key")};

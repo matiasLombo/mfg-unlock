@@ -202,3 +202,47 @@ class TestRegresiones(unittest.TestCase):
         cands = rules.analyze(s)
         self.assertEqual([c for c in cands if c.cid.startswith("orphan_")], [])
         self.assertEqual([c for c in cands if c.cid.startswith("post_")], [])
+
+
+class TestVram(unittest.TestCase):
+
+    def test_atribucion_por_categoria(self):
+        b = Builder()
+        b.res(0x10, 0xAA, "shadowmap", "D32_FLOAT", 4096, 4096, d=4, flags=2,
+              nbytes=256 * 1024 * 1024)
+        b.res(0x20, 0xBB, "rt_full", "R16G16B16A16_FLOAT", 2560, 1440, flags=4,
+              nbytes=28 * 1024 * 1024)
+        # Staging no cuenta: no vive en la placa.
+        b.res(0x30, 0xCC, "staging", "R8G8B8A8_UNORM", 2560, 1440, heap="upload",
+              nbytes=14 * 1024 * 1024)
+        b.frame_end(200, 8.0)
+        s = ingest.load_lines(b.build(), warmup=100)
+        by = s.vram_by_category()
+        self.assertEqual(by["shadowmap"][0], 256 * 1024 * 1024)
+        self.assertEqual(by["rt_full"][1], 1)
+        self.assertNotIn("staging", by)
+        # Y viene ordenado de mayor a menor, que es como se lee.
+        self.assertEqual(list(by)[0], "shadowmap")
+
+    def test_evicciones_debajo_del_budget_igual_avisan(self):
+        # El contador de uso puede quedarse justo debajo del techo mientras el
+        # driver obliga al juego a soltar. Las evicciones se ven antes.
+        b = Builder()
+        for f in range(200, 260):
+            b.vram(f, b.budget - (100 << 20))
+            b.frame_end(f, 12.0)
+        b.lines.append('{"t":"frame_end","f":261,"cpu_ms":12.0,"evict":40,'
+                       '"dropped":0,"deep":0}')
+        s = ingest.load_lines(b.build(), warmup=100)
+        self.assertFalse(s.thrashing())
+        self.assertEqual(s.evictions(), 40)
+        cands = rules.analyze(s)
+        self.assertEqual(cands[0].cid, "vram_evict")
+
+    def test_sin_vram_y_sin_evicciones_no_dice_nada(self):
+        b = Builder()
+        for f in range(200, 260):
+            b.frame_end(f, 8.0)
+        s = ingest.load_lines(b.build(), warmup=100)
+        self.assertEqual([c for c in rules.analyze(s) if c.cid.startswith("vram")],
+                         [])

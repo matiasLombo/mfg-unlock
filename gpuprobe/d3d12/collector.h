@@ -162,6 +162,10 @@ public:
     // de VRAM y el analizador lo dice en vez de inventarlo.
     void set_adapter(IDXGIAdapter3 *adapter);
 
+    // Residencia: el juego pidiendo o soltando memoria a mano. Se cuenta por
+    // frame y sale en el JSONL.
+    void note_residency(bool evicting, u32 count);
+
     u64  frame_index() const { return frame_; }
     bool deep_frame() const { return deep_; }
 

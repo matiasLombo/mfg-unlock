@@ -55,6 +55,12 @@ struct EvFrame {
     u64 present_ns;    // lo que tardo Present
     u32 dropped;       // pasadas que no pudimos medir por falta de queries
     u32 queries_used;
+    // Llamadas a MakeResident/Evict en este frame. Un juego que empieza a
+    // evictar en pleno gameplay esta peleando con el budget de VRAM, y eso se
+    // ve antes aca que en el contador de uso -- que puede quedarse justo
+    // debajo del techo mientras el driver pagina sin parar.
+    u32 resident_calls;
+    u32 evict_calls;
 };
 
 struct EvResource {
