@@ -9,6 +9,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <new>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -19,8 +20,9 @@
 #include "core/hash.h"
 #include "core/jsonl.h"
 
-extern "C" __declspec(dllimport) USHORT NTAPI RtlCaptureStackBackTrace(
-    ULONG FramesToSkip, ULONG FramesToCapture, PVOID *BackTrace, PULONG BackTraceHash);
+// CaptureStackBackTrace es la macro que winbase.h mapea a
+// RtlCaptureStackBackTrace. Usar la macro en vez de declarar el simbolo a mano
+// evita tener que linkear ntdll y funciona igual con MSVC y con mingw.
 
 namespace gp {
 
@@ -337,7 +339,7 @@ CallsiteId capture_callsite() {
     // hashear direcciones crudas daria un callsite distinto en cada corrida y
     // dos sesiones del mismo juego no se podrian comparar.
     void *frames[12];
-    const USHORT n = RtlCaptureStackBackTrace(2, 12, frames, nullptr);
+    const USHORT n = CaptureStackBackTrace(2, 12, frames, nullptr);
     if (n == 0) return CallsiteId{0};
     static u64 base = reinterpret_cast<u64>(GetModuleHandleW(nullptr));
     u64 h = 0x63616C6C736974ull;  // "callsit"

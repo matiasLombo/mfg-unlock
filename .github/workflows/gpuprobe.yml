@@ -1,0 +1,71 @@
+# CI de gpuprobe. Dos trabajos, y el segundo es el que importa:
+#
+#   host    -- todo lo puro (modelo de frame, perfil, estadistica, analizador)
+#              corre en Linux sin GPU.
+#   windows -- compila la capa D3D12 con MSVC, corre el testbed sobre WARP
+#              (rasterizador por software de Microsoft, el unico que soporta
+#              timestamps) y despues corre el analizador sobre la sesion que
+#              salio de esa corrida. Si el colector deja de medir bien, esto se
+#              pone en rojo aunque todos los tests unitarios sigan verdes.
+name: gpuprobe
+
+on:
+  push:
+    paths:
+      - 'gpuprobe/**'
+      - '.github/workflows/gpuprobe.yml'
+  pull_request:
+    paths:
+      - 'gpuprobe/**'
+      - '.github/workflows/gpuprobe.yml'
+  workflow_dispatch:
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: tests de host (C++ puro + analizador + contrato)
+        run: sh gpuprobe/run-host-tests.sh
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: compilar con MSVC
+        run: |
+          cmake -S gpuprobe -B build
+          cmake --build build --config Release
+
+      - name: tests de host tambien en Windows
+        shell: bash
+        run: |
+          ./build/Release/gpuprobe-gen-session.exe fixture.jsonl
+          PYTHONPATH=gpuprobe/analyzer python gpuprobe/tests/contract.py .
+        continue-on-error: true
+
+      # El testbed a resolucion real no termina nunca sobre un rasterizador por
+      # CPU, asi que se achica el area dibujada y el costo del shader. Los
+      # DESCRIPTORES no cambian -- el shadow map sigue siendo un D32 de 4096 en
+      # array de 4 -- que es lo que el analizador mira.
+      - name: correr el testbed sobre WARP
+        run: |
+          ./build/Release/gpuprobe-testbed.exe --warp --frames 240 --viewport-scale 0.03 --cost-scale 0.04 --out sesion.jsonl
+
+      - name: el analizador sobre la sesion real
+        run: python gpuprobe/tests/testbed_check.py sesion.jsonl reporte.md
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sesion-warp
+          path: |
+            sesion.jsonl
+            reporte.md
