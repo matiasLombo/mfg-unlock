@@ -141,6 +141,13 @@ Tres bugs que los tests unitarios no vieron aparecieron ahi: las pasadas de
 compute no se median, el recurso huerfano no se detectaba, y el backbuffer
 salia propuesto como recurso huerfano.
 
+## De donde sale cada decision
+
+`docs/referencias.md` dice que se tomo de Special K, 3Dmigoto, OptiScaler y
+PIX/Nsight, y -- mas util -- que se rechazo de cada uno y por que. La decision
+mas importante del proyecto esta ahi: matchear por descriptor y no por hash de
+shader, que es lo contrario de lo que hace 3Dmigoto, por una razon concreta.
+
 ## Limites conocidos
 
 - **Agility SDK**: si el juego carga su propio `d3d12core.dll`, las vtables del
