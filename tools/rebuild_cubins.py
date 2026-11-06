@@ -165,7 +165,7 @@ def fingerprint(b):
 def harvest(snippet, ptxas, cuobjdump, tmp, seen, out):
     """Every kernel in one snippet whose Blackwell rebuild fits its own slot."""
     d, secs = sections(snippet)
-    took = 0
+    took = covered = 0
     for start, end in fatbins(d, secs):
         ents = list(entries(d, start, end))
         if not any(k == 1 and sm == 120 for k, sm, *_ in ents):
@@ -181,7 +181,17 @@ def harvest(snippet, ptxas, cuobjdump, tmp, seen, out):
         # the fingerprint alone silently dropped whichever build came second,
         # and that was 310.9: the one DOOM and GTA V actually load.
         key = (fp, orig[1]) if fp else None
-        if not fp or key in seen:
+        if not fp:
+            continue
+        if key in seen:
+            # Same kernel in the same slot as a snippet already harvested, so
+            # the entry already in the header applies here unchanged. Count it:
+            # skipping it silently made this build report "0 kernel(s)" and
+            # left it out of kCubinsBuiltFor, which reads as a failure for the
+            # very snippet a game may load (seen with OTA builds 20318464 and
+            # 20318480, whose mvec-estimate fatbins are byte-identical).
+            covered += 1
+            print(f"  ok {describe(fp):<22} {fp}  {orig[1]}: same as an earlier build, its entry applies")
             continue
         # Only the mvec-estimate kernel (.nv.shared == 7776). Measured on No
         # Man's Sky: swapping inpaint (3920) and inpaint-decision (784) causes a
@@ -213,8 +223,8 @@ def harvest(snippet, ptxas, cuobjdump, tmp, seen, out):
         out.append((fp, describe(fp), orig[1], blob))
         took += 1
         print(f"  ok {describe(fp):<22} {fp}  {orig[1]} -> {len(blob)} bytes")
-    print(f"  -> {took} kernel(s) from {os.path.basename(snippet)}")
-    return took
+    print(f"  -> {took} new kernel(s), {covered} already covered, from {os.path.basename(snippet)}")
+    return took + covered
 
 
 def main():
@@ -233,7 +243,9 @@ def main():
     for sn in snippets:
         print(f"snippet : {sn}")
         if harvest(sn, ptxas, cuobjdump, tmp, seen, built):
-            m = re.search(r"[\/]versions[\/]([^\/]+)[\/]", sn)
+            # [\\/]: Windows paths use "\"; the old [\/] matched only "/", so
+            # every build was labelled by its file name, 160_E658700.bin.
+            m = re.search(r"[\\/]versions[\\/]([^\\/]+)[\\/]", sn)
             builds.append(m.group(1) if m else os.path.basename(sn))
 
     if not built:
